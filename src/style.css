@@ -1,0 +1,5 @@
+/* 在你的全局 CSS 文件中 */
+:root {
+  /* 主题色 */
+  --el-color-primary: #A8071A;
+}
