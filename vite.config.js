@@ -11,6 +11,9 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  define: {
+    __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false'
+  },
   server: { // 开发服务器配置（仅开发环境生效）
     host: true,
     proxy: {
