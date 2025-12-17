@@ -188,7 +188,7 @@ const saveApiKey = async () => {
 };
 
 const handleClick = (tab, event) => {
-  console.log(tab, event);
+  // console.log(tab, event);
 };
 
 // 获取数据
@@ -218,7 +218,7 @@ const resetParams = () => {
 };
 
 // 写入数据: 新建表格
-const createAndWriteData = async (list, type) => {
+const createAndWriteData = async (list, type, task_id) => {
   if (!list || list.length == 0) {
     ElMessage({
       message: "获取数据异常，请稍后重试",
@@ -256,7 +256,7 @@ const createAndWriteData = async (list, type) => {
       // 创建表格
       const { tableId, index } = await createSequentialTable(tableName);
       const newTable = await bitable.base.getTable(tableId);
-      console.log("🚀 ~ createAndWriteData ~ newTable:", newTable)
+      // console.log("🚀 ~ createAndWriteData ~ newTable:", newTable)
       await bitable.ui.switchToTable(tableId);
       // 修改表格中第一个字段
       const first_field = await newTable.getField('文本');
@@ -273,11 +273,11 @@ const createAndWriteData = async (list, type) => {
       }
       );
       const createdFields = await Promise.all(fieldPromises);
-      console.log(`表格"${tableName}"创建成功，包含${createdFields.length}个字段`);
+      // console.log(`表格"${tableName}"创建成功，包含${createdFields.length}个字段`);
     }
     // 写入数据
     const activeTable = await bitable.base.getActiveTable();
-    console.log("🚀 ~ createAndWriteData ~ activeTable:", activeTable)
+    // console.log("🚀 ~ createAndWriteData ~ activeTable:", activeTable)
     const fieldList = [];
     for (const config of fields) {
       const field = await activeTable.getField(config.name);
@@ -286,7 +286,7 @@ const createAndWriteData = async (list, type) => {
       }
       fieldList.push(field);
     };
-    console.log("🚀 ~ createAndWriteData ~ fieldList:", fieldList)
+    // console.log("🚀 ~ createAndWriteData ~ fieldList:", fieldList)
     if (fieldList.length != fields.length) {
       console.error(`表格中获取的字段错误：` + fieldList.length);
       return;
@@ -311,7 +311,7 @@ const createAndWriteData = async (list, type) => {
     }
     // 写入记录
     const recordIds = await activeTable.addRecords(records);
-    console.log(`成功添加 ${recordIds.length} 条数据`);
+    // console.log(`成功添加 ${recordIds.length} 条数据`, ' - ' + total + ' - ', page + ' - ', total > page);
 
     if (total > page) {
       page += 1;
@@ -341,7 +341,7 @@ const createSequentialTable = async (baseTableName) => {
       const newTable = await bitable.base.addTable({
         name: baseTableName
       });
-      console.log(`已创建基础表格：${baseTableName}，ID：${newTable.id}`);
+      // console.log(`已创建基础表格：${baseTableName}，ID：${newTable.id}`);
       return newTable;
     }
 
@@ -369,7 +369,7 @@ const createSequentialTable = async (baseTableName) => {
     const newTable = await bitable.base.addTable({
       name: newTableName
     });
-    console.log(`已创建序号表格：${newTableName}`);
+    // console.log(`已创建序号表格：${newTableName}`);
     return newTable;
 
   } catch (error) {
@@ -491,12 +491,11 @@ const getList = async (task_id, type) => {
       let res = response.data;
       if (res.sta == 0) {
         const { count, data } = res.data;
-        console.log("🚀 ~ getList ~ data:", data)
         if (!type) { // 第一次请求
           total = Math.ceil(count / page_size);
-          createAndWriteData(data);
+          createAndWriteData(data, '', task_id);
         } else if (type == 'next') {
-          createAndWriteData(data, type);
+          createAndWriteData(data, type, task_id);
         }
       } else {
         loading.value = false;
@@ -629,7 +628,7 @@ const getSearchData = async () => {
 const commit = () => {
   if (activeName.value == "1") {
     // 主页批量获取
-    console.log("commit", formData.value);
+    // console.log("commit", formData.value);
     const { url } = formData.value;
     if (!String(url)) {
       showErrorMsg("请输入博主主页链接");
@@ -640,7 +639,7 @@ const commit = () => {
     bitable.bridge.setData("profile_url", formData.value.url);
   } else if (activeName.value == "2") {
     // 关键词搜索获取
-    console.log("commit", formData1.value);
+    // console.log("commit", formData1.value);
     const { keyword } = formData1.value;
     if (!String(keyword)) {
       showErrorMsg("请输入关键词");
