@@ -1,5 +1,5 @@
 <script setup>
-import { bitable, FieldType } from "@lark-base-open/js-sdk";
+import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ref, onMounted } from "vue";
 import request from '@/utils/request'
 
@@ -235,15 +235,16 @@ const createAndWriteData = async (list, type, task_id) => {
       { type: FieldType.Text, name: "标签" },
       { type: FieldType.Text, name: "用户ID" },
       { type: FieldType.Text, name: "作者" },
-      { type: FieldType.Text, name: "点赞数" },
-      { type: FieldType.Text, name: "评论数" },
-      { type: FieldType.Text, name: "收藏数" },
-      { type: FieldType.Text, name: "分享数" },
+      { type: FieldType.Number, name: "点赞数" }, // Number类型,小红书平台可能不支持，可能返回字符串 12.1万
+      { type: FieldType.Number, name: "评论数" },
+      { type: FieldType.Number, name: "收藏数" },
+      { type: FieldType.Number, name: "分享数" },
       { type: FieldType.Text, name: "下载链接" },
       { type: FieldType.Text, name: "封面" },
-      { type: FieldType.Text, name: "时长" },
+      { type: FieldType.Number, name: "时长" },
       { type: FieldType.DateTime, name: "发布时间" },
     ];
+    console.log("🚀 ~ createAndWriteData ~ fields:", fields)
     // 创建表格，创建表格中的字段
     if (!type) { // 第一次请求
       let tableName = '';
@@ -277,7 +278,7 @@ const createAndWriteData = async (list, type, task_id) => {
     }
     // 写入数据
     const activeTable = await bitable.base.getActiveTable();
-    // console.log("🚀 ~ createAndWriteData ~ activeTable:", activeTable)
+    // console.log("🚀 ~ createAndWriteData ~ activeTable:", activeTable, fields)
     const fieldList = [];
     for (const config of fields) {
       const field = await activeTable.getField(config.name);
@@ -299,12 +300,17 @@ const createAndWriteData = async (list, type, task_id) => {
       record.push(await fieldList[2].createCell(item.tags));
       record.push(await fieldList[3].createCell(item.user_id));
       record.push(await fieldList[4].createCell(item.nickname));
+      await fieldList[5].setFormatter(NumberFormatter.INTEGER);
       record.push(await fieldList[5].createCell(item.digg_count));
+      await fieldList[6].setFormatter(NumberFormatter.INTEGER);
       record.push(await fieldList[6].createCell(item.comment_count));
+      await fieldList[7].setFormatter(NumberFormatter.INTEGER);
       record.push(await fieldList[7].createCell(item.collect_count));
+      await fieldList[8].setFormatter(NumberFormatter.INTEGER);
       record.push(await fieldList[8].createCell(item.share_count));
       record.push(await fieldList[9].createCell(item.play_url));
       record.push(await fieldList[10].createCell(item.cover_url));
+      await fieldList[11].setFormatter(NumberFormatter.INTEGER);
       record.push(await fieldList[11].createCell(item.duration));
       record.push(await fieldList[12].createCell(item.create_time ? item.create_time * 1000 : ''));
       records.push(record);
