@@ -52,6 +52,8 @@ const pages_options = ref([
     label: "获取前50页",
   },
 ]);
+// 小红书 关键词搜索 没有 全量获取
+const xhs_pages_options = pages_options.value.filter((item) => item.value !== 0);
 const social_type_options = ref([
   {
     value: "xhs",
@@ -826,7 +828,8 @@ const handleError = async (recordId) => { };
               </el-tooltip>
             </div>
             <el-select v-model="formData1.pages" placeholder="请选择" style="width: 100%">
-              <el-option v-for="tl in pages_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+              <el-option v-for="tl in (formData1.social_type == 'xhs' ? xhs_pages_options : pages_options)"
+                :key="tl.value" :label="tl.label" :value="tl.value" />
             </el-select>
           </el-form-item>
         </el-form>
