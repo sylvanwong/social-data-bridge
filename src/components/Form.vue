@@ -13,7 +13,7 @@ const activeName = ref("1");
 const formData = ref({ radio: 1, url: "", pages: 1 });
 const formData1 = ref({
   radio: 1,
-  social_type: 'douyin', // "xhs",
+  social_type: "xhs",
   keyword: "",
   sort_type: 0, // xhs
   filter_note_type: 0, // xhs
@@ -53,10 +53,10 @@ const pages_options = ref([
   },
 ]);
 const social_type_options = ref([
-  // {
-  //   value: "xhs",
-  //   label: "小红书",
-  // },
+  {
+    value: "xhs",
+    label: "小红书",
+  },
   {
     value: "douyin",
     label: "抖音",
