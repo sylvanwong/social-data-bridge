@@ -246,7 +246,7 @@ const createAndWriteData = async (list, type, task_id) => {
       { type: FieldType.Number, name: "时长" },
       { type: FieldType.DateTime, name: "发布时间" },
     ];
-    console.log("🚀 ~ createAndWriteData ~ fields:", fields)
+    // console.log("🚀 ~ createAndWriteData ~ fields:", fields)
     // 创建表格，创建表格中的字段
     if (!type) { // 第一次请求
       let tableName = '';
@@ -634,6 +634,10 @@ const getSearchData = async () => {
 };
 
 const commit = () => {
+  if (!api_key.value) {
+    showErrorMsg("请输入API key");
+    return;
+  }
   if (activeName.value == "1") {
     // 主页批量获取
     // console.log("commit", formData.value);
