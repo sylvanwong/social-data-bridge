@@ -1,10 +1,11 @@
 <script setup>
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { ref, onMounted } from "vue";
+import { ElMessage } from "element-plus";
+import { ref, onMounted, onUnmounted, computed } from "vue";
 import request from '@/utils/request'
 
-let profile_timer = null;
-let search_timer = null;
+const profile_timer = ref(null);
+const search_timer = ref(null);
 
 const api_key = ref("");
 const api_key_disabled = ref(true);
@@ -22,136 +23,53 @@ const formData1 = ref({
   filter_duration: 0, // douyin
   pages: 1,
 });
-const pages_options = ref([
-  {
-    value: 0,
-    label: "全量获取",
-  },
-  {
-    value: 1,
-    label: "仅获取首页",
-  },
-  {
-    value: 5,
-    label: "获取前5页",
-  },
-  {
-    value: 10,
-    label: "获取前10页",
-  },
-  {
-    value: 20,
-    label: "获取前20页",
-  },
-  {
-    value: 30,
-    label: "获取前30页",
-  },
-  {
-    value: 50,
-    label: "获取前50页",
-  },
-]);
-// 小红书 关键词搜索 没有 全量获取
-const xhs_pages_options = pages_options.value.filter((item) => item.value !== 0);
-const social_type_options = ref([
-  {
-    value: "xhs",
-    label: "小红书",
-  },
-  {
-    value: "douyin",
-    label: "抖音",
-  },
-]);
-const douyin_sort_type_options = ref([
-  {
-    value: 0,
-    label: "综合",
-  },
-  {
-    value: 1,
-    label: "最多点赞",
-  },
-  {
-    value: 2,
-    label: "最多发布",
-  },
-]);
-const xhs_sort_type_options = ref([
-  {
-    value: 0,
-    label: "综合",
-  },
-  {
-    value: 1,
-    label: "最热",
-  },
-  {
-    value: 2,
-    label: "最新",
-  },
-  {
-    value: 3,
-    label: "最多评论",
-  },
-  {
-    value: 4,
-    label: "最多收藏",
-  },
-]);
-const filter_note_type_options = ref([
-  {
-    value: 0,
-    label: "综合笔记",
-  },
-  {
-    value: 1,
-    label: "视频笔记",
-  },
-  {
-    value: 2,
-    label: "图文笔记",
-  },
-]);
-const time_options = ref([
-  {
-    value: 0,
-    label: "不限",
-  },
-  {
-    value: 1,
-    label: "一天之内",
-  },
-  {
-    value: 2,
-    label: "一周之内",
-  },
-  {
-    value: 3,
-    label: "半年之内",
-  },
-]);
-const filter_duration_options = ref([
-  {
-    value: 0,
-    label: "不限",
-  },
-  {
-    value: 1,
-    label: "1分钟以下",
-  },
-  {
-    value: 2,
-    label: "1-5分钟",
-  },
-  {
-    value: 3,
-    label: "5分钟以上",
-  },
-]);
+const pages_options = [
+  { value: 0, label: "全量获取" },
+  { value: 1, label: "仅获取首页" },
+  { value: 5, label: "获取前5页" },
+  { value: 10, label: "获取前10页" },
+  { value: 20, label: "获取前20页" },
+  { value: 30, label: "获取前30页" },
+  { value: 50, label: "获取前50页" },
+];
+const xhs_pages_options = pages_options.filter(item => item.value !== 0);
+const social_type_options = [
+  { value: "xhs", label: "小红书" },
+  { value: "douyin", label: "抖音" },
+];
+const douyin_sort_type_options = [
+  { value: 0, label: "综合" },
+  { value: 1, label: "最多点赞" },
+  { value: 2, label: "最多发布" },
+];
+const xhs_sort_type_options = [
+  { value: 0, label: "综合" },
+  { value: 1, label: "最热" },
+  { value: 2, label: "最新" },
+  { value: 3, label: "最多评论" },
+  { value: 4, label: "最多收藏" },
+];
+const filter_note_type_options = [
+  { value: 0, label: "综合笔记" },
+  { value: 1, label: "视频笔记" },
+  { value: 2, label: "图文笔记" },
+];
+const time_options = [
+  { value: 0, label: "不限" },
+  { value: 1, label: "一天之内" },
+  { value: 2, label: "一周之内" },
+  { value: 3, label: "半年之内" },
+];
+const filter_duration_options = [
+  { value: 0, label: "不限" },
+  { value: 1, label: "1分钟以下" },
+  { value: 2, label: "1-5分钟" },
+  { value: 3, label: "5分钟以上" },
+];
 
 const loading = ref(false);
+const isXhs = computed(() => formData1.value.social_type === 'xhs');
+const isDouyin = computed(() => formData1.value.social_type === 'douyin');
 let page = 1;
 const page_size = 20;
 let total = 0;
@@ -189,29 +107,39 @@ const saveApiKey = async () => {
   }
 };
 
-const handleClick = (tab, event) => {
-  // console.log(tab, event);
-};
+// 字段映射配置
+const FIELD_MAPPING = [
+  { key: 'aweme_id', name: '视频编号', type: FieldType.Text },
+  { key: 'title', name: '视频标题', type: FieldType.Text },
+  { key: 'tags', name: '标签', type: FieldType.Text },
+  { key: 'user_id', name: '用户ID', type: FieldType.Text },
+  { key: 'nickname', name: '作者', type: FieldType.Text },
+  { key: 'digg_count', name: '点赞数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
+  { key: 'comment_count', name: '评论数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
+  { key: 'collect_count', name: '收藏数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
+  { key: 'share_count', name: '分享数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
+  { key: 'play_url', name: '下载链接', type: FieldType.Text },
+  { key: 'cover_url', name: '封面', type: FieldType.Text },
+  { key: 'duration', name: '时长', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
+  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, isTimestamp: true },
+];
 
-// 获取数据
-// const list = [
-//   {
-//     "aweme_id": "7489802064457977099",
-//     "title": "一口气看完，从一颗细胞到恐龙再到人类，地球40亿年生命进化史 #神奇动物在抖音 #动物世界 #史前巨兽 #涨知识 #我们星球上的生命",
-//     "tags": "#神奇动物在抖音 #动物世界 #史前巨兽 #涨知识 #我们星球上的生命",
-//     "user_id": 2546116348088446,
-//     "nickname": "生物科普频道",
-//     "digg_count": 15976,
-//     "comment_count": 488,
-//     "collect_count": 7704,
-//     "share_count": 2532,
-//     "share_url": "https://www.iesdouyin.com/share/video/7489802064457977099/?region=CN&mid=7489804212239387403&u_code=163dhmj1j&did=MS4wLjABAAAA0I2Fvf0q86KfatgObYhpWwORula16zHvO5QfGLuOo_VB_nKpjB3_NUa0dZ8xzlro&iid=MS4wLjABAAAANwkJuWIRFOzg5uCpDRpMj4OX-QryoDgn-yYlXQnRwQQ&with_sec_did=1&video_share_track_ver=&titleType=title&share_sign=zsBi4GDwFD7P.g5p9.YOiFL2kqZ1IXu2p7LGuI3MN0E-&share_version=190600&ts=1758101124&from_aid=6383&from_ssr=1&share_track_info=%7B%22link_description_type%22%3A%22%22%7D",
-//     "play_url": "https://www.douyin.com/aweme/v1/play/?video_id=v0d00fg10000cvohssnog65sqil2vuc0&line=0&file_id=cc712c5a15504925bc3bf2b53616a7c4&sign=5d722aeaf56ed178a1ab2f21d4258373&is_play_url=1&source=PackSourceEnum_PUBLISH",
-//     "cover_url": "https://p3-pc-sign.douyinpic.com/tos-cn-p-0015/ooeejLz2AOf7AGz8QwIBlUAi3oIB4PPaACCxQq~tplv-dy-360p.jpeg?lk3s=138a59ce&x-expires=1759309200&x-signature=%2BBGUqTcG%2FSCn4JGokkHpoh4UajE%3D&from=327834062&s=PackSourceEnum_PUBLISH&se=false&sc=origin_cover&biz_tag=pcweb_cover&l=20250917172524CD2C6A3997CBF81F5F50",
-//     "duration": 2996,
-//     "create_time": 1743855820
-//   }
-// ];
+// 公共轮询函数
+const pollTaskStatus = (task_id, timerRef, checkFn, onSuccess) => {
+  let time = 0;
+  timerRef.value && clearInterval(timerRef.value);
+  timerRef.value = setInterval(() => {
+    time += 3;
+    if (time >= 600) {
+      clearInterval(timerRef.value);
+      timerRef.value = null;
+      showErrorMsg("获取数据超时，请稍后重试");
+      loading.value = false;
+    } else {
+      checkFn(task_id, onSuccess);
+    }
+  }, 3000);
+};
 
 const resetParams = () => {
   loading.value = false;
@@ -231,95 +159,57 @@ const createAndWriteData = async (list, type, task_id) => {
     return;
   }
   try {
-    const fields = [
-      { type: FieldType.Text, name: "视频编号" },
-      { type: FieldType.Text, name: "视频标题" },
-      { type: FieldType.Text, name: "标签" },
-      { type: FieldType.Text, name: "用户ID" },
-      { type: FieldType.Text, name: "作者" },
-      { type: FieldType.Number, name: "点赞数" }, // Number类型,小红书平台可能不支持，可能返回字符串 12.1万
-      { type: FieldType.Number, name: "评论数" },
-      { type: FieldType.Number, name: "收藏数" },
-      { type: FieldType.Number, name: "分享数" },
-      { type: FieldType.Text, name: "下载链接" },
-      { type: FieldType.Text, name: "封面" },
-      { type: FieldType.Number, name: "时长" },
-      { type: FieldType.DateTime, name: "发布时间" },
-    ];
-    // console.log("🚀 ~ createAndWriteData ~ fields:", fields)
     // 创建表格，创建表格中的字段
-    if (!type) { // 第一次请求
+    if (!type) {
       let tableName = '';
-      if (activeName.value == "1") { // 主页
+      if (activeName.value == "1") {
         const firstItem = list[0];
         tableName = firstItem?.nickname || '社媒数据助手';
-      } else if (activeName.value == "2") { // 关键词搜索
+      } else if (activeName.value == "2") {
         tableName = formData1.value.keyword
       }
-      // 创建表格
-      const { tableId, index } = await createSequentialTable(tableName);
+      const { tableId } = await createSequentialTable(tableName);
       const newTable = await bitable.base.getTable(tableId);
-      // console.log("🚀 ~ createAndWriteData ~ newTable:", newTable)
       await bitable.ui.switchToTable(tableId);
-      // 修改表格中第一个字段
       const first_field = await newTable.getField('文本');
-      // 批量添加字段（并行处理提高效率）
-      const fieldPromises = fields.map((config, index) => {
+      const fieldPromises = FIELD_MAPPING.map((config, index) => {
         if (index === 0 && first_field) {
-          return newTable.setField(first_field.id, {
-            ...config,
-          })
+          return newTable.setField(first_field.id, { type: config.type, name: config.name });
         }
-        return newTable.addField({
-          ...config,
-        })
-      }
-      );
-      const createdFields = await Promise.all(fieldPromises);
-      // console.log(`表格"${tableName}"创建成功，包含${createdFields.length}个字段`);
+        return newTable.addField({ type: config.type, name: config.name });
+      });
+      await Promise.all(fieldPromises);
     }
     // 写入数据
     const activeTable = await bitable.base.getActiveTable();
-    // console.log("🚀 ~ createAndWriteData ~ activeTable:", activeTable, fields)
     const fieldList = [];
-    for (const config of fields) {
+    for (const config of FIELD_MAPPING) {
       const field = await activeTable.getField(config.name);
       if (!field) {
         console.error(`表格中未找到字段：${config.name}`);
       }
-      fieldList.push(field);
+      fieldList.push({ field, config });
     };
-    // console.log("🚀 ~ createAndWriteData ~ fieldList:", fieldList)
-    if (fieldList.length != fields.length) {
+    if (fieldList.length != FIELD_MAPPING.length) {
       console.error(`表格中获取的字段错误：` + fieldList.length);
       return;
     }
     let records = [];
     for (const item of list) {
       let record = [];
-      record.push(await fieldList[0].createCell(item.aweme_id));
-      record.push(await fieldList[1].createCell(item.title));
-      record.push(await fieldList[2].createCell(item.tags));
-      record.push(await fieldList[3].createCell(item.user_id));
-      record.push(await fieldList[4].createCell(item.nickname));
-      await fieldList[5].setFormatter(NumberFormatter.INTEGER);
-      record.push(await fieldList[5].createCell(item.digg_count));
-      await fieldList[6].setFormatter(NumberFormatter.INTEGER);
-      record.push(await fieldList[6].createCell(item.comment_count));
-      await fieldList[7].setFormatter(NumberFormatter.INTEGER);
-      record.push(await fieldList[7].createCell(item.collect_count));
-      await fieldList[8].setFormatter(NumberFormatter.INTEGER);
-      record.push(await fieldList[8].createCell(item.share_count));
-      record.push(await fieldList[9].createCell(item.play_url));
-      record.push(await fieldList[10].createCell(item.cover_url));
-      await fieldList[11].setFormatter(NumberFormatter.INTEGER);
-      record.push(await fieldList[11].createCell(item.duration));
-      record.push(await fieldList[12].createCell(item.create_time ? item.create_time * 1000 : ''));
+      for (const { field, config } of fieldList) {
+        if (config.formatter) {
+          await field.setFormatter(config.formatter);
+        }
+        let value = item[config.key];
+        if (config.isTimestamp && value) {
+          value = value * 1000;
+        }
+        record.push(await field.createCell(value));
+      }
       records.push(record);
     }
-    // 写入记录
     const recordIds = await activeTable.addRecords(records);
-    // console.log(`成功添加 ${recordIds.length} 条数据`, ' - ' + total + ' - ', page + ' - ', total > page);
 
     if (total > page) {
       page += 1;
@@ -426,32 +316,12 @@ const postProfileTask = async () => {
 };
 
 const closeProfileInterval = () => {
-  profile_timer && clearInterval(profile_timer);
-  profile_timer = null;
-};
-
-// 主页 轮询获取任务状态
-const getProfileTaskInterval = (task_id) => {
-  const requestFn = () => {
-    let time = 0;
-    closeProfileInterval();
-    profile_timer = setInterval(() => {
-      time += 3;
-      if (time >= 600) {
-        closeProfileInterval();
-        showErrorMsg("获取数据超时，请稍后重试");
-        loading.value = false;
-      } else {
-        getProfileTask(task_id);
-        console.log('time: ~~~~~~', time);
-      }
-    }, 3000)
-  }
-  requestFn();
+  profile_timer.value && clearInterval(profile_timer.value);
+  profile_timer.value = null;
 };
 
 // 主页 获取任务状态
-const getProfileTask = async (task_id) => {
+const getProfileTask = async (task_id, onSuccess) => {
   await request({
     url: "/social/api/v1/feishu/social/task?task_id=" + task_id,
     method: "get",
@@ -463,23 +333,29 @@ const getProfileTask = async (task_id) => {
       let res = response.data;
       if (res.sta == 0) {
         const { status } = res.data;
-        if (status == 0) { // 进行中
-          // 继续轮询
-        } else if (status == 1) { // 成功
+        if (status == 1) { // 成功
           closeProfileInterval();
-          page = 1;
-          getList(task_id);
+          onSuccess();
         } else if (status == 2) { // 失败
           closeProfileInterval();
           showErrorMsg("获取数据失败，请稍后重试");
           loading.value = false;
         }
+        // status == 0 继续轮询
       }
     })
     .catch(function (error) {
       console.log(error);
     });
-}
+};
+
+// 主页 轮询获取任务状态
+const getProfileTaskInterval = (task_id) => {
+  pollTaskStatus(task_id, profile_timer, getProfileTask, () => {
+    page = 1;
+    getList(task_id);
+  });
+};
 
 // 获取帖子列表
 const getList = async (task_id, type) => {
@@ -526,7 +402,7 @@ const getProfileData = async () => {
   await postProfileTask();
 };
 
-const getSearchTask = async (task_id) => {
+const getSearchTask = async (task_id, onSuccess) => {
   await request({
     url: "/social/api/v1/feishu/keyword/task?task_id=" + task_id,
     method: "get",
@@ -538,17 +414,15 @@ const getSearchTask = async (task_id) => {
       let res = response.data;
       if (res.sta == 0) {
         const { status } = res.data;
-        if (status == 0) { // 进行中
-          // 继续轮询
-        } else if (status == 1) { // 成功
+        if (status == 1) { // 成功
           closeSearchInterval();
-          page = 1;
-          getList(task_id);
+          onSuccess();
         } else if (status == 2) { // 失败
           closeSearchInterval();
           showErrorMsg("获取数据失败，请稍后重试");
           loading.value = false;
         }
+        // status == 0 继续轮询
       }
     })
     .catch(function (error) {
@@ -557,27 +431,15 @@ const getSearchTask = async (task_id) => {
 }
 
 const closeSearchInterval = () => {
-  search_timer && clearInterval(search_timer);
-  search_timer = null;
+  search_timer.value && clearInterval(search_timer.value);
+  search_timer.value = null;
 };
 
 const getSearchTaskInterval = (task_id) => {
-  const requestFn = () => {
-    let time = 0;
-    closeSearchInterval();
-    search_timer = setInterval(() => {
-      time += 3;
-      if (time >= 600) {
-        closeSearchInterval();
-        showErrorMsg("获取数据超时，请稍后重试");
-        loading.value = false;
-      } else {
-        getSearchTask(task_id);
-        console.log('time: ~~~~~~', time);
-      }
-    }, 3000)
-  }
-  requestFn();
+  pollTaskStatus(task_id, search_timer, getSearchTask, () => {
+    page = 1;
+    getList(task_id);
+  });
 };
 
 // 关键词搜索 提交任务
@@ -639,10 +501,8 @@ const commit = () => {
     return;
   }
   if (activeName.value == "1") {
-    // 主页批量获取
-    // console.log("commit", formData.value);
     const { url } = formData.value;
-    if (!String(url)) {
+    if (!url || !url.trim()) {
       showErrorMsg("请输入博主主页链接");
       return;
     }
@@ -650,10 +510,8 @@ const commit = () => {
     //
     bitable.bridge.setData("profile_url", formData.value.url);
   } else if (activeName.value == "2") {
-    // 关键词搜索获取
-    // console.log("commit", formData1.value);
     const { keyword } = formData1.value;
-    if (!String(keyword)) {
+    if (!keyword || !keyword.trim()) {
       showErrorMsg("请输入关键词");
       return;
     }
@@ -664,8 +522,10 @@ const commit = () => {
   }
 };
 
-// 处理数据写入中的异常
-const handleError = async (recordId) => { };
+onUnmounted(() => {
+  profile_timer.value && clearInterval(profile_timer.value);
+  search_timer.value && clearInterval(search_timer.value);
+});
 </script>
 
 <template>
@@ -764,13 +624,13 @@ const handleError = async (recordId) => { };
               </el-tooltip>
             </div>
             <el-select v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
-              <el-option v-if="formData1.social_type == 'douyin'" v-for="tl in douyin_sort_type_options" :key="tl.value"
+              <el-option v-if="isDouyin" v-for="tl in douyin_sort_type_options" :key="tl.value"
                 :label="tl.label" :value="tl.value" />
-              <el-option v-if="formData1.social_type == 'xhs'" v-for="tl in xhs_sort_type_options" :key="tl.value"
+              <el-option v-if="isXhs" v-for="tl in xhs_sort_type_options" :key="tl.value"
                 :label="tl.label" :value="tl.value" />
             </el-select>
           </el-form-item>
-          <el-form-item label="" v-if="formData1.social_type == 'xhs'">
+          <el-form-item label="" v-if="isXhs">
             <div slot="label" class="c-label">
               笔记类型
               <el-tooltip effect="dark" placement="top">
@@ -783,7 +643,7 @@ const handleError = async (recordId) => { };
               <el-option v-for="tl in filter_note_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
             </el-select>
           </el-form-item>
-          <el-form-item label="" v-if="formData1.social_type == 'xhs'">
+          <el-form-item label="" v-if="isXhs">
             <div slot="label" class="c-label">
               发布时间
               <el-tooltip effect="dark" placement="top">
@@ -796,7 +656,7 @@ const handleError = async (recordId) => { };
               <el-option v-for="tl in time_options" :key="tl.value" :label="tl.label" :value="tl.value" />
             </el-select>
           </el-form-item>
-          <el-form-item label="" v-if="formData1.social_type == 'douyin'">
+          <el-form-item label="" v-if="isDouyin">
             <div slot="label" class="c-label">
               发布时间
               <el-tooltip effect="dark" placement="top">
@@ -809,7 +669,7 @@ const handleError = async (recordId) => { };
               <el-option v-for="tl in time_options" :key="tl.value" :label="tl.label" :value="tl.value" />
             </el-select>
           </el-form-item>
-          <el-form-item label="" v-if="formData1.social_type == 'douyin'">
+          <el-form-item label="" v-if="isDouyin">
             <div slot="label" class="c-label">
               筛选时长
               <el-tooltip effect="dark" placement="top">
@@ -832,7 +692,7 @@ const handleError = async (recordId) => { };
               </el-tooltip>
             </div>
             <el-select v-model="formData1.pages" placeholder="请选择" style="width: 100%">
-              <el-option v-for="tl in (formData1.social_type == 'xhs' ? xhs_pages_options : pages_options)"
+              <el-option v-for="tl in (isXhs ? xhs_pages_options : pages_options)"
                 :key="tl.value" :label="tl.label" :value="tl.value" />
             </el-select>
           </el-form-item>
@@ -900,7 +760,6 @@ const handleError = async (recordId) => { };
   font-size: 14px;
 }
 
-.create-tabs {}
 
 .commit-btn {
   background: #a8071a;
