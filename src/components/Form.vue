@@ -624,10 +624,10 @@ onUnmounted(() => {
               </el-tooltip>
             </div>
             <el-select v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
-              <el-option v-if="isDouyin" v-for="tl in douyin_sort_type_options" :key="tl.value"
-                :label="tl.label" :value="tl.value" />
-              <el-option v-if="isXhs" v-for="tl in xhs_sort_type_options" :key="tl.value"
-                :label="tl.label" :value="tl.value" />
+              <el-option v-if="isDouyin" v-for="tl in douyin_sort_type_options" :key="tl.value" :label="tl.label"
+                :value="tl.value" />
+              <el-option v-if="isXhs" v-for="tl in xhs_sort_type_options" :key="tl.value" :label="tl.label"
+                :value="tl.value" />
             </el-select>
           </el-form-item>
           <el-form-item label="" v-if="isXhs">
@@ -692,8 +692,8 @@ onUnmounted(() => {
               </el-tooltip>
             </div>
             <el-select v-model="formData1.pages" placeholder="请选择" style="width: 100%">
-              <el-option v-for="tl in (isXhs ? xhs_pages_options : pages_options)"
-                :key="tl.value" :label="tl.label" :value="tl.value" />
+              <el-option v-for="tl in (isXhs ? xhs_pages_options : pages_options)" :key="tl.value" :label="tl.label"
+                :value="tl.value" />
             </el-select>
           </el-form-item>
         </el-form>
