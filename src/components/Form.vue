@@ -14,7 +14,7 @@ const activeName = ref("1");
 const formData = ref({ radio: 1, url: "", pages: 1 });
 const formData1 = ref({
   radio: 1,
-  social_type: "xhs",
+  social_type: "douyin",
   keyword: "",
   sort_type: 0, // xhs
   filter_note_type: 0, // xhs
@@ -34,7 +34,7 @@ const pages_options = [
 ];
 const xhs_pages_options = pages_options.filter(item => item.value !== 0);
 const social_type_options = [
-  { value: "xhs", label: "小红书" },
+  // { value: "xhs", label: "小红书" },
   { value: "douyin", label: "抖音" },
 ];
 const douyin_sort_type_options = [
@@ -89,7 +89,7 @@ onMounted(async () => {
     formData1.value.keyword = search_keyword;
   }
   if (search_platform && typeof search_platform == "string") {
-    formData1.value.social_type = search_platform;
+    formData1.value.social_type = 'douyin'; // search_platform;
   }
 });
 
