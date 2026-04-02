@@ -11,10 +11,11 @@ const api_key = ref("");
 const api_key_disabled = ref(true);
 
 const activeName = ref("1");
+const handleClick = () => { };
 const formData = ref({ radio: 1, url: "", pages: 1 });
 const formData1 = ref({
   radio: 1,
-  social_type: "douyin",
+  social_type: "", // 动态使用 social_type_options 第一个值
   keyword: "",
   sort_type: 0, // xhs
   filter_note_type: 0, // xhs
@@ -33,10 +34,21 @@ const pages_options = [
   { value: 50, label: "获取前50页" },
 ];
 const xhs_pages_options = pages_options.filter(item => item.value !== 0);
-const social_type_options = [
-  // { value: "xhs", label: "小红书" },
+
+// 平台标签映射
+const PLATFORM_LABELS = {
+  xhs: '小红书',
+  douyin: '抖音',
+};
+
+const TYPE_OPTIONS = [
+  { value: "xhs", label: "小红书" },
   { value: "douyin", label: "抖音" },
-];
+]
+
+const social_type_options = ref([
+  ...TYPE_OPTIONS
+]);
 const douyin_sort_type_options = [
   { value: 0, label: "综合" },
   { value: 1, label: "最多点赞" },
@@ -76,8 +88,11 @@ let total = 0;
 
 onMounted(async () => {
   const key = await bitable.bridge.getData("api_key");
-  if (key && typeof key === "string") {
+  // 只有 key 非空且为字符串且不是清除标记时才使用
+  if (key && typeof key === "string" && key.trim() && key !== "__cleared__") {
     api_key.value = key;
+    // 有 api_key 则获取平台配置
+    await fetchPlatformConfig();
   }
   const profile_url = await bitable.bridge.getData("profile_url");
   const search_platform = await bitable.bridge.getData("search_platform");
@@ -88,22 +103,62 @@ onMounted(async () => {
   if (search_keyword && typeof search_keyword == "string") {
     formData1.value.keyword = search_keyword;
   }
-  if (search_platform && typeof search_platform == "string") {
-    formData1.value.social_type = 'douyin'; // search_platform;
+  if (search_platform && typeof search_platform == "string" && social_type_options.value.some(opt => opt.value === search_platform)) {
+    formData1.value.social_type = search_platform;
+  } else {
+    formData1.value.social_type = social_type_options.value[0]?.value || "";
   }
 });
 
 const saveApiKey = async () => {
   if (api_key.value === "") {
+    // 清除存储的 api_key，使用特殊标记值
+    api_key_disabled.value = true;
+    await bitable.bridge.setData("api_key", "__cleared__");
+    // 重置平台列表为默认值
+    social_type_options.value = [
+      ...TYPE_OPTIONS
+    ];
+    formData1.value.social_type = social_type_options.value[0]?.value || "";
     return;
   } else {
     api_key_disabled.value = true;
-    bitable.bridge.setData("api_key", api_key.value);
+    await bitable.bridge.setData("api_key", api_key.value);
     ElMessage({
       message: "保存成功",
       type: "success",
       plain: true,
     });
+    // 保存成功后重新获取平台配置
+    fetchPlatformConfig();
+  }
+};
+
+// 获取平台配置
+const fetchPlatformConfig = async () => {
+  try {
+    const response = await request({
+      url: "/social/api/v1/feishu/social/config",
+      method: "get",
+      headers: {
+        'authorization': `Bearer ${api_key.value}`,
+      },
+    });
+    const res = response.data;
+    if (res.sta === 0 && res.data?.value) {
+      social_type_options.value = res.data.value.map(platform => ({
+        value: platform,
+        label: PLATFORM_LABELS[platform] || platform
+      }));
+      // 如果当前选中平台不在新列表中，重置为第一个
+      if (!social_type_options.value.some(opt => opt.value === formData1.value.social_type)) {
+        formData1.value.social_type = social_type_options.value[0]?.value || "";
+      }
+      // console.log("🚀 ~ fetchPlatformConfig ~ social_type_options:", social_type_options)
+    }
+  } catch (error) {
+    console.error('获取平台配置失败:', error);
+    // 保持默认列表
   }
 };
 
