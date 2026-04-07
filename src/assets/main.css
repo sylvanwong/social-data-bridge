@@ -1,1 +1,12 @@
 @import 'reset-css';
+
+/* Element Plus 主题色配置 */
+:root {
+  --el-color-primary: #A8071A;
+  --el-color-primary-light-3: #c43344;
+  --el-color-primary-light-5: #d65b6a;
+  --el-color-primary-light-7: #e88391;
+  --el-color-primary-light-8: #f1a7b2;
+  --el-color-primary-light-9: #f8c9cf;
+  --el-color-primary-dark-2: #860515;
+}

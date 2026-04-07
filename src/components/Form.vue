@@ -41,6 +41,9 @@ const PLATFORM_LABELS = {
   douyin: '抖音',
 };
 
+// API key 清除标记
+const API_KEY_CLEARED_MARKER = "__cleared__";
+
 const TYPE_OPTIONS = [
   { value: "xhs", label: "小红书" },
   { value: "douyin", label: "抖音" },
@@ -89,7 +92,7 @@ let total = 0;
 onMounted(async () => {
   const key = await bitable.bridge.getData("api_key");
   // 只有 key 非空且为字符串且不是清除标记时才使用
-  if (key && typeof key === "string" && key.trim() && key !== "__cleared__") {
+  if (key && typeof key === "string" && key.trim() && key !== API_KEY_CLEARED_MARKER) {
     api_key.value = key;
     // 有 api_key 则获取平台配置
     await fetchPlatformConfig();
@@ -114,7 +117,7 @@ const saveApiKey = async () => {
   if (api_key.value === "") {
     // 清除存储的 api_key，使用特殊标记值
     api_key_disabled.value = true;
-    await bitable.bridge.setData("api_key", "__cleared__");
+    await bitable.bridge.setData("api_key", API_KEY_CLEARED_MARKER);
     // 重置平台列表为默认值
     social_type_options.value = [
       ...TYPE_OPTIONS
@@ -130,7 +133,7 @@ const saveApiKey = async () => {
       plain: true,
     });
     // 保存成功后重新获取平台配置
-    fetchPlatformConfig();
+    await fetchPlatformConfig();
   }
 };
 
@@ -145,7 +148,7 @@ const fetchPlatformConfig = async () => {
       },
     });
     const res = response.data;
-    if (res.sta === 0 && res.data?.value) {
+    if (res.sta === 0 && Array.isArray(res.data?.value)) {
       social_type_options.value = res.data.value.map(platform => ({
         value: platform,
         label: PLATFORM_LABELS[platform] || platform
@@ -154,11 +157,14 @@ const fetchPlatformConfig = async () => {
       if (!social_type_options.value.some(opt => opt.value === formData1.value.social_type)) {
         formData1.value.social_type = social_type_options.value[0]?.value || "";
       }
-      // console.log("🚀 ~ fetchPlatformConfig ~ social_type_options:", social_type_options)
     }
   } catch (error) {
     console.error('获取平台配置失败:', error);
-    // 保持默认列表
+    ElMessage({
+      message: "获取平台配置失败，使用默认设置",
+      type: "warning",
+      plain: true,
+    });
   }
 };
 
@@ -565,7 +571,11 @@ const commit = () => {
     //
     bitable.bridge.setData("profile_url", formData.value.url);
   } else if (activeName.value == "2") {
-    const { keyword } = formData1.value;
+    const { social_type, keyword } = formData1.value;
+    if (!social_type || !social_type.trim()) {
+      showErrorMsg("请选择平台");
+      return;
+    }
     if (!keyword || !keyword.trim()) {
       showErrorMsg("请输入关键词");
       return;
