@@ -1,7 +1,7 @@
 <script setup>
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage } from "element-plus";
-import { ref, onMounted, onUnmounted, computed } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import request from '@/utils/request'
 
 const profile_timer = ref(null);
@@ -12,9 +12,10 @@ const api_key_disabled = ref(true);
 
 const activeName = ref("1");
 const handleClick = () => { };
-const formData = ref({ radio: 1, url: "", pages: 1 });
+const formData = ref({ radio: 1, url: "", pages: 1, table_id: "" });
 const formData1 = ref({
   radio: 1,
+  table_id: "",
   social_type: "", // 动态使用 social_type_options 第一个值
   keyword: "",
   sort_type: 0, // xhs
@@ -83,6 +84,7 @@ const filter_duration_options = [
 ];
 
 const loading = ref(false);
+const table_options = ref([]);
 const isXhs = computed(() => formData1.value.social_type === 'xhs');
 const isDouyin = computed(() => formData1.value.social_type === 'douyin');
 let page = 1;
@@ -112,6 +114,30 @@ onMounted(async () => {
     formData1.value.social_type = social_type_options.value[0]?.value || "";
   }
 });
+
+const loadTableOptions = async () => {
+  try {
+    const tableList = await bitable.base.getTableList();
+    table_options.value = await Promise.all(
+      tableList.map(async (table) => ({
+        id: table.id,
+        name: await table.getName(),
+      }))
+    );
+  } catch (error) {
+    console.error("获取表格列表失败:", error);
+    showErrorMsg("获取表格列表失败，请稍后重试");
+  }
+};
+
+watch(
+  () => [formData.value.radio, formData1.value.radio],
+  ([profileRadio, searchRadio]) => {
+    if (profileRadio === 2 || searchRadio === 2) {
+      loadTableOptions();
+    }
+  }
+);
 
 const saveApiKey = async () => {
   if (api_key.value === "") {
@@ -208,8 +234,8 @@ const resetParams = () => {
   total = 0;
 };
 
-// 写入数据: 新建表格
-const createAndWriteData = async (list, type, task_id) => {
+// 写入数据
+const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
   if (!list || list.length == 0) {
     ElMessage({
       message: "获取数据异常，请稍后重试",
@@ -220,8 +246,8 @@ const createAndWriteData = async (list, type, task_id) => {
     return;
   }
   try {
-    // 创建表格，创建表格中的字段
-    if (!type) {
+    // 新建表格模式：首次写入前创建目标表
+    if (!type && !targetTableId) {
       let tableName = '';
       if (activeName.value == "1") {
         const firstItem = list[0];
@@ -242,24 +268,43 @@ const createAndWriteData = async (list, type, task_id) => {
       await Promise.all(fieldPromises);
     }
     // 写入数据
-    const activeTable = await bitable.base.getActiveTable();
+    const activeTable = targetTableId
+      ? await bitable.base.getTableById(targetTableId)
+      : await bitable.base.getActiveTable();
+    const fieldMetaList = await activeTable.getFieldMetaList();
+    const fieldIdByName = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
     const fieldList = [];
     for (const config of FIELD_MAPPING) {
-      const field = await activeTable.getField(config.name);
-      if (!field) {
-        console.error(`表格中未找到字段：${config.name}`);
+      const fieldId = fieldIdByName.get(config.name);
+      if (!fieldId) {
+        fieldList.push({ field: null, config });
+        continue;
       }
-      fieldList.push({ field, config });
-    };
-    if (fieldList.length != FIELD_MAPPING.length) {
-      console.error(`表格中获取的字段错误：` + fieldList.length);
+      try {
+        const field = await activeTable.getFieldById(fieldId);
+        fieldList.push({ field, config });
+      } catch (error) {
+        console.error(`获取字段失败：${config.name}`, error);
+        fieldList.push({ field: null, config });
+      }
+    }
+    const requiredField = fieldList.find(item => item.config.name === "视频编号" && item.field);
+    if (!requiredField) {
+      showErrorMsg("所选表格缺少必需字段：视频编号");
+      resetParams();
+      return;
+    }
+    const availableFieldList = fieldList.filter(item => !!item.field);
+    if (availableFieldList.length === 0) {
+      showErrorMsg("所选表格没有可写入字段");
+      resetParams();
       return;
     }
     let records = [];
     for (const item of list) {
       let record = [];
-      for (const { field, config } of fieldList) {
-        if (config.formatter) {
+      for (const { field, config } of availableFieldList) {
+        if (!targetTableId && config.formatter) {
           await field.setFormatter(config.formatter);
         }
         let value = item[config.key];
@@ -274,13 +319,15 @@ const createAndWriteData = async (list, type, task_id) => {
 
     if (total > page) {
       page += 1;
-      getList(task_id, 'next');
+      getList(task_id, 'next', targetTableId);
       return;
     } else {
       resetParams();
     }
   } catch (error) {
     console.error("🚀 ~ createAndWriteData ~ error:", error)
+    const errorMsg = error?.message ? `写入失败：${error.message}` : "写入失败，请稍后重试";
+    showErrorMsg(errorMsg);
     resetParams();
   }
 }
@@ -346,7 +393,7 @@ const showErrorMsg = (message) => {
 };
 
 // 主页 提交任务
-const postProfileTask = async () => {
+const postProfileTask = async (targetTableId = "") => {
   await request({
     url: "/social/api/v1/feishu/social/task",
     method: "post",
@@ -363,7 +410,7 @@ const postProfileTask = async () => {
       let res = response.data;
       if (res.sta == 0) {
         const data = res.data;
-        getProfileTaskInterval(data.task_id);
+        getProfileTaskInterval(data.task_id, targetTableId);
       } else {
         loading.value = false;
         showErrorMsg(res.msg);
@@ -411,15 +458,15 @@ const getProfileTask = async (task_id, onSuccess) => {
 };
 
 // 主页 轮询获取任务状态
-const getProfileTaskInterval = (task_id) => {
+const getProfileTaskInterval = (task_id, targetTableId = "") => {
   pollTaskStatus(task_id, profile_timer, getProfileTask, () => {
     page = 1;
-    getList(task_id);
+    getList(task_id, "", targetTableId);
   });
 };
 
 // 获取帖子列表
-const getList = async (task_id, type) => {
+const getList = async (task_id, type, targetTableId = "") => {
   await request({
     url: "/social/api/v1/feishu/post/list",
     method: "post",
@@ -438,9 +485,9 @@ const getList = async (task_id, type) => {
         const { count, data } = res.data;
         if (!type) { // 第一次请求
           total = Math.ceil(count / page_size);
-          createAndWriteData(data, '', task_id);
+          createAndWriteData(data, '', task_id, targetTableId);
         } else if (type == 'next') {
-          createAndWriteData(data, type, task_id);
+          createAndWriteData(data, type, task_id, targetTableId);
         }
       } else {
         loading.value = false;
@@ -455,12 +502,12 @@ const getList = async (task_id, type) => {
 };
 
 // 主页数据
-const getProfileData = async () => {
+const getProfileData = async (targetTableId = "") => {
   // 新建表格，表格中第一个字段为视频编号
   // createAndWriteData([]);
   // return;
   loading.value = true;
-  await postProfileTask();
+  await postProfileTask(targetTableId);
 };
 
 const getSearchTask = async (task_id, onSuccess) => {
@@ -496,15 +543,15 @@ const closeSearchInterval = () => {
   search_timer.value = null;
 };
 
-const getSearchTaskInterval = (task_id) => {
+const getSearchTaskInterval = (task_id, targetTableId = "") => {
   pollTaskStatus(task_id, search_timer, getSearchTask, () => {
     page = 1;
-    getList(task_id);
+    getList(task_id, "", targetTableId);
   });
 };
 
 // 关键词搜索 提交任务
-const postSearchTask = async () => {
+const postSearchTask = async (targetTableId = "") => {
   let filter_config = {};
   if (formData1.value.social_type == 'xhs') {
     filter_config = {
@@ -537,7 +584,7 @@ const postSearchTask = async () => {
       let res = response.data;
       if (res.sta == 0) {
         const data = res.data;
-        getSearchTaskInterval(data.task_id);
+        getSearchTaskInterval(data.task_id, targetTableId);
       } else {
         loading.value = false;
         showErrorMsg(res.msg);
@@ -551,9 +598,9 @@ const postSearchTask = async () => {
 }
 
 // 关键词搜索数据
-const getSearchData = async () => {
+const getSearchData = async (targetTableId = "") => {
   loading.value = true;
-  await postSearchTask();
+  await postSearchTask(targetTableId);
 };
 
 const commit = () => {
@@ -562,16 +609,20 @@ const commit = () => {
     return;
   }
   if (activeName.value == "1") {
-    const { url } = formData.value;
+    const { url, radio, table_id } = formData.value;
     if (!url || !url.trim()) {
       showErrorMsg("请输入博主主页链接");
       return;
     }
-    getProfileData();
+    if (radio === 2 && !table_id) {
+      showErrorMsg("请选择现有表格");
+      return;
+    }
+    getProfileData(radio === 2 ? table_id : "");
     //
     bitable.bridge.setData("profile_url", formData.value.url);
   } else if (activeName.value == "2") {
-    const { social_type, keyword } = formData1.value;
+    const { social_type, keyword, radio, table_id } = formData1.value;
     if (!social_type || !social_type.trim()) {
       showErrorMsg("请选择平台");
       return;
@@ -580,7 +631,11 @@ const commit = () => {
       showErrorMsg("请输入关键词");
       return;
     }
-    getSearchData();
+    if (radio === 2 && !table_id) {
+      showErrorMsg("请选择现有表格");
+      return;
+    }
+    getSearchData(radio === 2 ? table_id : "");
     //
     bitable.bridge.setData("search_platform", formData1.value.social_type);
     bitable.bridge.setData("search_keyword", formData1.value.keyword);
@@ -618,8 +673,14 @@ onUnmounted(() => {
           <el-form-item label="" style="margin-top: 12px">
             <el-radio-group v-model="formData.radio">
               <el-radio :value="1">新建表格</el-radio>
-              <el-radio :value="2" :disabled="true">使用现有表格</el-radio>
+              <el-radio :value="2">使用现有表格</el-radio>
             </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="formData.radio === 2" label="">
+            <div slot="label" class="c-label">选择现有表格</div>
+            <el-select v-model="formData.table_id" placeholder="请选择" style="width: 100%">
+              <el-option v-for="tl in table_options" :key="tl.id" :label="tl.name" :value="tl.id" />
+            </el-select>
           </el-form-item>
           <el-form-item>
             <div slot="label" class="c-label">
@@ -652,8 +713,14 @@ onUnmounted(() => {
           <el-form-item label="" style="margin-top: 12px">
             <el-radio-group v-model="formData1.radio">
               <el-radio :value="1">新建表格</el-radio>
-              <el-radio :value="2" :disabled="true">使用现有表格</el-radio>
+              <el-radio :value="2">使用现有表格</el-radio>
             </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="formData1.radio === 2" label="">
+            <div slot="label" class="c-label">选择现有表格</div>
+            <el-select v-model="formData1.table_id" placeholder="请选择" style="width: 100%">
+              <el-option v-for="tl in table_options" :key="tl.id" :label="tl.name" :value="tl.id" />
+            </el-select>
           </el-form-item>
           <el-form-item label="">
             <div slot="label" class="c-label">
