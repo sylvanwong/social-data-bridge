@@ -294,6 +294,19 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
       resetParams();
       return;
     }
+    
+    // 验证字段类型是否匹配
+    for (const item of fieldList) {
+      if (item.field) {
+        const fieldType = await item.field.getType();
+        if (fieldType !== item.config.type) {
+          showErrorMsg(`字段 "${item.config.name}" 类型不匹配，请调整表格字段类型`);
+          resetParams();
+          return;
+        }
+      }
+    }
+    
     const availableFieldList = fieldList.filter(item => !!item.field);
     if (availableFieldList.length === 0) {
       showErrorMsg("所选表格没有可写入字段");
@@ -618,7 +631,21 @@ const commit = () => {
       showErrorMsg("请选择现有表格");
       return;
     }
-    getProfileData(radio === 2 ? table_id : "");
+    
+    // 如果是使用现有表格，验证表格字段
+    if (radio === 2) {
+      validateTableFields(table_id).then(isValid => {
+        if (isValid) {
+          getProfileData(table_id);
+        }
+      }).catch(error => {
+        console.error("验证表格字段时出错:", error);
+        showErrorMsg("验证表格字段失败，请稍后重试");
+      });
+      return;
+    }
+    
+    getProfileData("");
     //
     bitable.bridge.setData("profile_url", formData.value.url);
   } else if (activeName.value == "2") {
@@ -635,10 +662,87 @@ const commit = () => {
       showErrorMsg("请选择现有表格");
       return;
     }
-    getSearchData(radio === 2 ? table_id : "");
+    
+    // 如果是使用现有表格，验证表格字段
+    if (radio === 2) {
+      validateTableFields(table_id).then(isValid => {
+        if (isValid) {
+          getSearchData(table_id);
+        }
+      }).catch(error => {
+        console.error("验证表格字段时出错:", error);
+        showErrorMsg("验证表格字段失败，请稍后重试");
+      });
+      return;
+    }
+    
+    getSearchData("");
     //
     bitable.bridge.setData("search_platform", formData1.value.social_type);
     bitable.bridge.setData("search_keyword", formData1.value.keyword);
+  }
+};
+
+// 验证表格字段
+const validateTableFields = async (tableId) => {
+  try {
+    const activeTable = await bitable.base.getTableById(tableId);
+    const fieldMetaList = await activeTable.getFieldMetaList();
+    const fieldIdByName = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
+    
+    // 检查是否有所需字段
+    const requiredFieldExists = FIELD_MAPPING.some(config => fieldIdByName.has(config.name));
+    if (!requiredFieldExists) {
+      showErrorMsg("所选表格缺少必需字段，请检查表格结构");
+      return false;
+    }
+    
+    // 获取实际字段对象并验证类型
+    const fieldList = [];
+    for (const config of FIELD_MAPPING) {
+      const fieldId = fieldIdByName.get(config.name);
+      if (!fieldId) {
+        fieldList.push({ field: null, config });
+        continue;
+      }
+      try {
+        const field = await activeTable.getFieldById(fieldId);
+        fieldList.push({ field, config });
+      } catch (error) {
+        console.error(`获取字段失败：${config.name}`, error);
+        fieldList.push({ field: null, config });
+      }
+    }
+    
+    // 检查是否有"视频编号"字段
+    const requiredField = fieldList.find(item => item.config.name === "视频编号" && item.field);
+    if (!requiredField) {
+      showErrorMsg("所选表格缺少必需字段：视频编号");
+      return false;
+    }
+    
+    // 验证字段类型是否匹配
+    for (const item of fieldList) {
+      if (item.field) {
+        const fieldType = await item.field.getType();
+        if (fieldType !== item.config.type) {
+          showErrorMsg(`字段 "${item.config.name}" 类型不匹配，请调整表格字段类型`);
+          return false;
+        }
+      }
+    }
+    
+    const availableFieldList = fieldList.filter(item => !!item.field);
+    if (availableFieldList.length === 0) {
+      showErrorMsg("所选表格没有可写入字段");
+      return false;
+    }
+    
+    return true;
+  } catch (error) {
+    console.error("验证表格字段时出错:", error);
+    showErrorMsg("验证表格字段失败，请稍后重试");
+    return false;
   }
 };
 
