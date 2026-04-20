@@ -614,6 +614,7 @@ const postSearchTask = async (targetTableId = "") => {
 const getSearchData = async (targetTableId = "") => {
   loading.value = true;
   await postSearchTask(targetTableId);
+      console.log(targetTableId);
 };
 
 const commit = () => {
