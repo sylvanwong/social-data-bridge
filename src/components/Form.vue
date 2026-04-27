@@ -1,6 +1,6 @@
 <script setup>
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElNotification } from "element-plus";
 import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import request from '@/utils/request'
 
@@ -84,6 +84,7 @@ const filter_duration_options = [
 ];
 
 const loading = ref(false);
+const profileProgress = ref({ text: "", done: false });
 const table_options = ref([]);
 const isXhs = computed(() => formData1.value.social_type === 'xhs');
 const isDouyin = computed(() => formData1.value.social_type === 'douyin');
@@ -211,6 +212,15 @@ const FIELD_MAPPING = [
   { key: 'create_time', name: '发布时间', type: FieldType.DateTime, isTimestamp: true },
 ];
 
+// 字段类型名称映射
+const FIELD_TYPE_NAME = {
+  [FieldType.Text]: 'Text',
+  [FieldType.Number]: 'Number',
+  [FieldType.DateTime]: 'DateTime',
+  [FieldType.Url]: 'Url',
+  [FieldType.Attachment]: 'Attachment',
+};
+
 // 公共轮询函数
 const pollTaskStatus = (task_id, timerRef, checkFn, onSuccess) => {
   let time = 0;
@@ -225,11 +235,12 @@ const pollTaskStatus = (task_id, timerRef, checkFn, onSuccess) => {
     } else {
       checkFn(task_id, onSuccess);
     }
-  }, 3000);
+  }, 2000);
 };
 
 const resetParams = () => {
   loading.value = false;
+  profileProgress.value = { text: "", done: false };
   page = 1;
   total = 0;
 };
@@ -290,7 +301,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
     }
     const requiredField = fieldList.find(item => item.config.name === "视频编号" && item.field);
     if (!requiredField) {
-      showErrorMsg("所选表格缺少必需字段：视频编号");
+      ElNotification({ title: '出错', message: `主字段"视频编号"不存在于现有表格中，无法写入数据。请确保表格中包含该字段。`, type: 'error', duration: 0 });
       resetParams();
       return;
     }
@@ -300,7 +311,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
       if (item.field) {
         const fieldType = await item.field.getType();
         if (fieldType !== item.config.type) {
-          showErrorMsg(`字段 "${item.config.name}" 类型不匹配，请调整表格字段类型`);
+          ElNotification({ title: '出错', message: `字段类型不匹配:字段"${item.config.name}" 的类型是 ${FIELD_TYPE_NAME[fieldType] || fieldType}，但Schema定义为 ${FIELD_TYPE_NAME[item.config.type] || item.config.type}，无法写入数据`, type: 'error', duration: 0 });
           resetParams();
           return;
         }
@@ -340,7 +351,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
   } catch (error) {
     console.error("🚀 ~ createAndWriteData ~ error:", error)
     const errorMsg = error?.message ? `写入失败：${error.message}` : "写入失败，请稍后重试";
-    showErrorMsg(errorMsg);
+    ElNotification({ title: '错误', message: errorMsg, type: 'error', duration: 0 });
     resetParams();
   }
 }
@@ -405,6 +416,11 @@ const showErrorMsg = (message) => {
   });
 };
 
+// 解析博主主页链接为列表（换行或中英文逗号分隔，最多100条）
+const parseUrls = (urlStr) => {
+  return urlStr.split(/[\n,，]/).map(s => s.trim()).filter(Boolean).slice(0, 100);
+};
+
 // 主页 提交任务
 const postProfileTask = async (targetTableId = "") => {
   await request({
@@ -414,7 +430,7 @@ const postProfileTask = async (targetTableId = "") => {
       'authorization': `Bearer ${api_key.value}`,
     },
     data: {
-      url: formData.value.url,
+      url: parseUrls(formData.value.url),
       pages: Number(formData.value.pages),
     },
   })
@@ -426,7 +442,7 @@ const postProfileTask = async (targetTableId = "") => {
         getProfileTaskInterval(data.task_id, targetTableId);
       } else {
         loading.value = false;
-        showErrorMsg(res.msg);
+        ElNotification({ title: '错误', message: res.msg, type: 'error', duration: 0 });
       }
     })
     .catch(function (error) {
@@ -453,16 +469,19 @@ const getProfileTask = async (task_id, onSuccess) => {
     .then(function (response) {
       let res = response.data;
       if (res.sta == 0) {
-        const { status } = res.data;
+        const { status, current_page } = res.data;
         if (status == 1) { // 成功
+          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取完成', done: true };
           closeProfileInterval();
           onSuccess();
         } else if (status == 2) { // 失败
           closeProfileInterval();
           showErrorMsg("获取数据失败，请稍后重试");
           loading.value = false;
+        } else{
+          // status == 0 继续轮询
+          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取中', done: false };
         }
-        // status == 0 继续轮询
       }
     })
     .catch(function (error) {
@@ -534,16 +553,19 @@ const getSearchTask = async (task_id, onSuccess) => {
     .then(function (response) {
       let res = response.data;
       if (res.sta == 0) {
-        const { status } = res.data;
+        const { status, current_page } = res.data;
         if (status == 1) { // 成功
+          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取完成', done: true };
           closeSearchInterval();
           onSuccess();
         } else if (status == 2) { // 失败
           closeSearchInterval();
           showErrorMsg("获取数据失败，请稍后重试");
           loading.value = false;
+        }else{
+          // status == 0 继续轮询
+          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取中', done: false };
         }
-        // status == 0 继续轮询
       }
     })
     .catch(function (error) {
@@ -691,13 +713,6 @@ const validateTableFields = async (tableId) => {
     const fieldMetaList = await activeTable.getFieldMetaList();
     const fieldIdByName = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
     
-    // 检查是否有所需字段
-    const requiredFieldExists = FIELD_MAPPING.some(config => fieldIdByName.has(config.name));
-    if (!requiredFieldExists) {
-      showErrorMsg("所选表格缺少必需字段，请检查表格结构");
-      return false;
-    }
-    
     // 获取实际字段对象并验证类型
     const fieldList = [];
     for (const config of FIELD_MAPPING) {
@@ -718,7 +733,7 @@ const validateTableFields = async (tableId) => {
     // 检查是否有"视频编号"字段
     const requiredField = fieldList.find(item => item.config.name === "视频编号" && item.field);
     if (!requiredField) {
-      showErrorMsg("所选表格缺少必需字段：视频编号");
+      ElNotification({ title: '出错', message: `主字段"视频编号"不存在于现有表格中，无法写入数据。请确保表格中包含该字段。`, type: 'error', duration: 0 });
       return false;
     }
     
@@ -727,7 +742,7 @@ const validateTableFields = async (tableId) => {
       if (item.field) {
         const fieldType = await item.field.getType();
         if (fieldType !== item.config.type) {
-          showErrorMsg(`字段 "${item.config.name}" 类型不匹配，请调整表格字段类型`);
+          ElNotification({ title: '出错', message: `字段类型不匹配:字段"${item.config.name}" 的类型是 ${FIELD_TYPE_NAME[fieldType] || fieldType}，但Schema定义为 ${FIELD_TYPE_NAME[item.config.type] || item.config.type}，无法写入数据`, type: 'error', duration: 0 });
           return false;
         }
       }
@@ -796,13 +811,13 @@ onUnmounted(() => {
                   class="help-icon" />
               </el-tooltip>
             </div>
-            <el-input v-model="formData.url" class="c-input" placeholder="" />
+            <el-input v-model="formData.url" type="textarea" :rows="4" class="c-input" placeholder="请输入博主笔记链接，最多支持100条（换行或逗号分隔），最大拉取2000行数据" />
           </el-form-item>
           <el-form-item label="">
             <div slot="label" class="c-label">
               数据提取范围
               <el-tooltip effect="dark" placement="top">
-                <template #content>每页 50 积分，实际扣费会按照<br />提取的页数进行计算</template>
+                <template #content>每页 10 积分，实际扣费会按照<br />提取的页数进行计算</template>
                 <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                   class="help-icon" />
               </el-tooltip>
@@ -923,7 +938,7 @@ onUnmounted(() => {
             <div slot="label" class="c-label">
               数据提取范围
               <el-tooltip effect="dark" placement="top">
-                <template #content>每页 50 积分，实际扣费会按照<br />提取的页数进行计算</template>
+                <template #content>每页 10 积分，实际扣费会按照<br />提取的页数进行计算</template>
                 <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                   class="help-icon" />
               </el-tooltip>
@@ -938,6 +953,10 @@ onUnmounted(() => {
     </el-tabs>
 
     <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="commit">提交</el-button>
+    <div v-if="profileProgress.text" class="profile-progress" :class="{ 'profile-progress--done': profileProgress.done }">
+      <span v-if="profileProgress.done" class="profile-progress-check">✓</span>
+      {{ profileProgress.text }}
+    </div>
   </div>
 </template>
 
@@ -1010,6 +1029,22 @@ onUnmounted(() => {
   font-size: 14px;
   margin-top: 8px;
   cursor: pointer;
+}
+
+.profile-progress {
+  text-align: center;
+  font-size: 14px;
+  color: #1D2129;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.profile-progress-check {
+  color: #67c23a;
+  font-weight: bold;
+  font-size: 16px;
 }
 
 .c-label {
