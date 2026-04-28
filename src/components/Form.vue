@@ -202,6 +202,8 @@ const FIELD_MAPPING = [
   { key: 'tags', name: '标签', type: FieldType.Text },
   { key: 'user_id', name: '用户ID', type: FieldType.Text },
   { key: 'nickname', name: '作者', type: FieldType.Text },
+  { key: 'avatar', name: '博主头像', type: FieldType.Text },
+  { key: 'note_type', name: '笔记类型', type: FieldType.Text },
   { key: 'digg_count', name: '点赞数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
   { key: 'comment_count', name: '评论数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
   { key: 'collect_count', name: '收藏数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
@@ -210,6 +212,8 @@ const FIELD_MAPPING = [
   { key: 'cover_url', name: '封面', type: FieldType.Text },
   { key: 'duration', name: '时长', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
   { key: 'create_time', name: '发布时间', type: FieldType.DateTime, isTimestamp: true },
+  { key: 'last_update_time', name: '最后更新时间', type: FieldType.DateTime, isTimestamp: true },
+  { key: 'ctime', name: '提取时间', type: FieldType.DateTime, isTimestamp: true },
 ];
 
 // 字段类型名称映射
