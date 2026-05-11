@@ -60,7 +60,7 @@ const douyin_sort_type_options = [
 ];
 const xhs_sort_type_options = [
   { value: 0, label: "综合" },
-  { value: 1, label: "最热" },
+  { value: 1, label: "最多点赞" },
   { value: 2, label: "最新" },
   { value: 3, label: "最多评论" },
   { value: 4, label: "最多收藏" },
@@ -355,9 +355,36 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
     }
   } catch (error) {
     console.error("🚀 ~ createAndWriteData ~ error:", error)
-    const errorMsg = error?.message ? `写入失败：${error.message}` : "写入失败，请稍后重试";
-    ElNotification({ title: '错误', message: errorMsg, type: 'error', duration: 0 });
-    resetParams();
+    // 表行数达上限时，创建新表继续写入
+    try {
+      let tableName = '';
+      if (activeName.value == "1") {
+        const firstItem = list[0];
+        tableName = firstItem?.nickname || '社媒数据助手';
+      } else if (activeName.value == "2") {
+        tableName = formData1.value.keyword;
+      }
+      const { tableId: newTableId } = await createSequentialTable(tableName);
+      const newTable = await bitable.base.getTable(newTableId);
+      await bitable.ui.switchToTable(newTableId);
+      const first_field = await newTable.getField('文本');
+      const fieldPromises = FIELD_MAPPING.map((config, index) => {
+        if (index === 0 && first_field) {
+          return newTable.setField(first_field.id, { type: config.type, name: config.name });
+        }
+        return newTable.addField({ type: config.type, name: config.name });
+      });
+      await Promise.all(fieldPromises);
+      // 数据写入新表，后续分页也写入新表
+      await createAndWriteData(list, type, task_id, newTableId);
+      ElNotification({ title: '温馨提示', message: '当前多维表格已达到单表存储上限！已为您自动生成新表格展示全部数据', type: 'success', duration: 3000 });
+      return;
+    } catch (retryError) {
+      console.error("🚀 ~ 创建新表重试写入失败:", retryError)
+      const errorMsg = retryError?.message ? `写入失败：${retryError.message}` : "写入失败，请稍后重试";
+      ElNotification({ title: '错误', message: errorMsg, type: 'error', duration: 0 });
+      resetParams();
+    }
   }
 }
 
@@ -435,7 +462,7 @@ const postProfileTask = async (targetTableId = "") => {
       'authorization': `Bearer ${api_key.value}`,
     },
     data: {
-      url: parseUrls(formData.value.url),
+      url: formData.value.url,
       pages: Number(formData.value.pages),
     },
   })
@@ -816,7 +843,7 @@ onUnmounted(() => {
                   class="help-icon" />
               </el-tooltip>
             </div>
-            <el-input v-model="formData.url" type="textarea" :rows="4" class="c-input" placeholder="请输入博主笔记链接，最多支持100条（换行或逗号分隔），最大拉取2000行数据" />
+            <el-input v-model="formData.url" type="textarea" :rows="4" class="c-input" placeholder="请输入正确博主笔记链接（换行或逗号分隔）" />
           </el-form-item>
           <el-form-item label="">
             <div slot="label" class="c-label">
