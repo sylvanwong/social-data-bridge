@@ -9,8 +9,8 @@ import "./style.css";
   </main>
 </template>
 
-<style scoped>
+<!-- <style scoped>
 main {
   padding: 20px;
 }
-</style>
+</style> -->
