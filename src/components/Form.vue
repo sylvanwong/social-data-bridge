@@ -6,6 +6,7 @@ import request from '@/utils/request'
 import ProfileFetch from './ProfileFetch.vue'
 import KeywordSearch from './KeywordSearch.vue'
 import CommentFetch from './CommentFetch.vue'
+import VideoDataFetch from './VideoDataFetch.vue'
 
 const api_key = ref("");
 const api_key_disabled = ref(true);
@@ -116,6 +117,17 @@ const fetchPlatformConfig = async () => {
     <div class="cards-section">
       <div class="group-title">社媒数据助手</div>
       <div class="cards-grid">
+        <div class="arco-card" @click="currentPage = 'video'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+              <line x1="8" y1="21" x2="16" y2="21"></line>
+              <line x1="12" y1="17" x2="12" y2="21"></line>
+              <polyline points="9 10 12 7 15 10"></polyline>
+            </svg>
+          </div>
+          <span class="func-name">音视频数据获取</span>
+        </div>
         <div class="arco-card" @click="currentPage = 'profile'">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -156,6 +168,9 @@ const fetchPlatformConfig = async () => {
 
   <!-- 二级页面：评论列表获取 -->
   <CommentFetch v-if="currentPage === 'comment'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：音视频数据获取 -->
+  <VideoDataFetch v-if="currentPage === 'video'" :api_key="api_key" @back="currentPage = 'home'" />
 </template>
 
 <style scoped>
