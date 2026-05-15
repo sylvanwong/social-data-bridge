@@ -7,6 +7,7 @@ import ProfileFetch from './ProfileFetch.vue'
 import KeywordSearch from './KeywordSearch.vue'
 import CommentFetch from './CommentFetch.vue'
 import VideoDataFetch from './VideoDataFetch.vue'
+import BloggerInfoFetch from './BloggerInfoFetch.vue'
 
 const api_key = ref("");
 const api_key_disabled = ref(true);
@@ -128,6 +129,16 @@ const fetchPlatformConfig = async () => {
           </div>
           <span class="func-name">音视频数据获取</span>
         </div>
+        <div class="arco-card" @click="currentPage = 'blogger'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+              <circle cx="12" cy="7" r="4"></circle>
+              <path d="M16 11l2 2 4-4"></path>
+            </svg>
+          </div>
+          <span class="func-name">博主信息获取</span>
+        </div>
         <div class="arco-card" @click="currentPage = 'profile'">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -171,6 +182,9 @@ const fetchPlatformConfig = async () => {
 
   <!-- 二级页面：音视频数据获取 -->
   <VideoDataFetch v-if="currentPage === 'video'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：博主信息获取 -->
+  <BloggerInfoFetch v-if="currentPage === 'blogger'" :api_key="api_key" @back="currentPage = 'home'" />
 </template>
 
 <style scoped>
