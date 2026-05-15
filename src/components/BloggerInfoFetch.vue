@@ -11,31 +11,24 @@ const props = defineProps({
 })
 
 const formData = ref({
-  videoLinkFieldId: '',
-  scope: 'n', // 'all' | 'selected' | 'n'
+  profileLinkFieldId: '',
+  scope: 'n',
   rowCount: 5
 });
 
 const FIELD_CONFIG = [
-  { name: "作品ID", type: FieldType.Text, getValue: (item) => item?.social_id ?? "" },
-  { name: "作者名称", type: FieldType.Text, getValue: (item) => item?.nickname ?? "" },
-  { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
-  { name: "标题", type: FieldType.Text, getValue: (item) => item?.title ?? "" },
-  { name: "标签文本", type: FieldType.Text, getValue: (item) => item?.caption ?? "" },
-  // { name: "播放数", type: FieldType.Number, getValue: (item) => Number(item?.digg_count) || 0 },
-  { name: "点赞数", type: FieldType.Number, getValue: (item) => Number(item?.digg_count) || 0 },
-  { name: "评论数", type: FieldType.Number, getValue: (item) => Number(item?.comment_count) || 0 },
-  { name: "收藏数", type: FieldType.Number, getValue: (item) => Number(item?.collect_count) || 0 },
-  { name: "分享数", type: FieldType.Number, getValue: (item) => Number(item?.share_count) || 0 },
-  { name: "下载链接", type: FieldType.Text, getValue: (item) => item?.download_addr ?? "" },
-  { name: "封面", type: FieldType.Text, getValue: (item) => item?.origin_cover ?? "" },
-  { name: "时长", type: FieldType.Number, getValue: (item) => Number(item?.duration) || 0 },
-  { name: "发布时间", type: FieldType.DateTime, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
-  { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
+  { name: "用户ID", type: FieldType.Text, getValue: (item) => item?.uid ?? "" },
+  { name: "昵称", type: FieldType.Text, getValue: (item) => item?.nickname ?? "" },
+  // { name: "头像", type: FieldType.Text, getValue: (item) => item?.avatar ?? "" },
+  { name: "个人简介", type: FieldType.Text, getValue: (item) => item?.signature ?? "" },
+  { name: "粉丝数", type: FieldType.Number, getValue: (item) => Number(item?.follower_count) || 0 },
+  { name: "关注数", type: FieldType.Number, getValue: (item) => Number(item?.following_count) || 0 },
+  { name: "获赞数", type: FieldType.Number, getValue: (item) => Number(item?.total_favorited) || 0 },
+  { name: "作品数", type: FieldType.Number, getValue: (item) => Number(item?.aweme_count) || 0 },
+  { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
 ];
 
 const fieldOptions = ref([]);
-const fieldListLoading = ref(false);
 const loading = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
@@ -68,7 +61,7 @@ const getAllVisibleRecordIdList = async (view) => {
   let pageToken = undefined;
   let allRecordIdList = [];
   let loopCount = 0;
-  const maxLoops = 100; // 防止死循环的最大保护
+  const maxLoops = 100;
 
   while (loopCount < maxLoops) {
     loopCount++;
@@ -76,9 +69,7 @@ const getAllVisibleRecordIdList = async (view) => {
       pageSize,
       pageToken
     });
-    console.log(`第 ${loopCount} 页原始结果:`, result);
 
-    // 兼容不同的返回格式
     let recordIds = [];
     let hasMore = false;
 
@@ -91,8 +82,6 @@ const getAllVisibleRecordIdList = async (view) => {
       pageToken = result.pageToken || result.nextPageToken || result.next_token;
     }
 
-    console.log(`解析后: ${recordIds.length} 条记录, hasMore: ${hasMore}, pageToken: ${pageToken}`);
-
     if (recordIds.length > 0) {
       allRecordIdList = allRecordIdList.concat(recordIds);
     }
@@ -102,26 +91,18 @@ const getAllVisibleRecordIdList = async (view) => {
     }
   }
 
-  if (loopCount >= maxLoops) {
-    console.warn('达到最大循环次数，停止获取');
-  }
-
-  console.log('总共获取到:', allRecordIdList.length, '条记录');
   return allRecordIdList;
 };
 
 const getRecordIdListByScope = async (scope, rowCount) => {
-  console.log('getRecordIdListByScope - scope:', scope, 'rowCount:', rowCount);
   const table = await bitable.base.getActiveTable();
   const view = await table.getActiveView();
 
   let recordIdList = [];
   if (scope === 'all') {
     recordIdList = await getAllVisibleRecordIdList(view);
-    console.log('执行所有行 - recordIdList总数:', recordIdList.length);
   } else if (scope === 'selected') {
     recordIdList = await view.getSelectedRecordIdList();
-    console.log('执行选中行 - recordIdList:', recordIdList);
     if (recordIdList.length === 0) {
       ElNotification({ message: '请先在表格中选择至少一行数据', type: 'warning', duration: 0 });
       return null;
@@ -129,86 +110,67 @@ const getRecordIdListByScope = async (scope, rowCount) => {
   } else {
     const allRecordIdList = await getAllVisibleRecordIdList(view);
     recordIdList = allRecordIdList.slice(0, rowCount);
-    console.log('执行前N行 - 总记录数:', allRecordIdList.length, '取前:', recordIdList.length);
   }
   return recordIdList;
 };
 
 const validateAndAddFields = async () => {
   try {
-    console.log('开始验证和添加字段...');
     const table = await bitable.base.getActiveTable();
-    console.log('获取到table对象:', table);
     const fieldList = await table.getFieldList();
-    console.log('获取到fieldList:', fieldList.length);
     const fieldMetaMap = new Map();
 
-  for (const field of fieldList) {
-    const name = await field.getName();
-    fieldMetaMap.set(name, { id: field.id, type: field.type });
-  }
-
-  console.log('当前表格字段:', Object.fromEntries(fieldMetaMap));
-
-  const missingFields = [];
-  const typeMismatchFields = [];
-
-  // 先验证所有字段
-  for (const config of FIELD_CONFIG) {
-    const fieldMeta = fieldMetaMap.get(config.name);
-
-    if (!fieldMeta) {
-      missingFields.push(config);
-    } else if (fieldMeta.type !== config.type) {
-      typeMismatchFields.push({
-        name: config.name,
-        expected: config.type,
-        actual: fieldMeta.type
-      });
+    for (const field of fieldList) {
+      const name = await field.getName();
+      fieldMetaMap.set(name, { id: field.id, type: field.type });
     }
-  }
 
-  console.log('缺失字段:', missingFields.map(f => f.name));
-  console.log('类型不匹配字段:', typeMismatchFields);
+    const missingFields = [];
+    const typeMismatchFields = [];
 
-  // 如果有类型不匹配的字段，提示错误并返回 null
-  if (typeMismatchFields.length > 0) {
-    const errorMsg = typeMismatchFields.map(f => `"${f.name}" 类型不匹配`).join(', ');
-    ElNotification({ message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 0 });
-    return null;
-  }
+    for (const config of FIELD_CONFIG) {
+      const fieldMeta = fieldMetaMap.get(config.name);
+      if (!fieldMeta) {
+        missingFields.push(config);
+      } else if (fieldMeta.type !== config.type) {
+        typeMismatchFields.push({
+          name: config.name,
+          expected: config.type,
+          actual: fieldMeta.type
+        });
+      }
+    }
 
-  // 添加缺失字段
-  for (const fieldConfig of missingFields) {
-    try {
-      console.log(`正在添加字段: ${fieldConfig.name}, 类型: ${fieldConfig.type}`);
-      const newFieldId = await table.addField({
-        type: fieldConfig.type,
-        name: fieldConfig.name
-      });
-      fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
-      console.log(`字段 ${fieldConfig.name} 添加成功，ID: ${newFieldId}`);
-    } catch (e) {
-      console.error(`添加字段 ${fieldConfig.name} 失败:`, e);
-      ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
+    if (typeMismatchFields.length > 0) {
+      const errorMsg = typeMismatchFields.map(f => `"${f.name}" 类型不匹配`).join(', ');
+      ElNotification({ message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 0 });
       return null;
     }
-  }
 
-  // 构建字段名到ID的映射
-  const fieldNameToId = {};
-  for (const [name, meta] of fieldMetaMap.entries()) {
-    fieldNameToId[name] = meta.id;
-  }
-  console.log('字段名到ID的映射:', fieldNameToId);
+    for (const fieldConfig of missingFields) {
+      try {
+        const newFieldId = await table.addField({
+          type: fieldConfig.type,
+          name: fieldConfig.name
+        });
+        fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
+      } catch (e) {
+        ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
+        return null;
+      }
+    }
 
-  if (missingFields.length > 0) {
-    ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
-  }
+    const fieldNameToId = {};
+    for (const [name, meta] of fieldMetaMap.entries()) {
+      fieldNameToId[name] = meta.id;
+    }
 
-  return fieldNameToId;
+    if (missingFields.length > 0) {
+      ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+    }
+
+    return fieldNameToId;
   } catch (error) {
-    console.error('验证/添加字段时出错:', error);
     ElNotification({ message: `字段操作失败: ${error.message || error}`, type: 'error', duration: 0});
     return null;
   }
@@ -216,20 +178,15 @@ const validateAndAddFields = async () => {
 
 const writeDataToRecord = async (recordId, item, fieldNameToId) => {
   try {
-    console.log(`开始写入记录 ${recordId}`);
     const table = await bitable.base.getActiveTable();
 
     for (const config of FIELD_CONFIG) {
       const fieldId = fieldNameToId[config.name];
-      if (!fieldId) {
-        console.warn(`字段 "${config.name}" 未找到ID，跳过`);
-        continue;
-      }
+      if (!fieldId) continue;
 
       try {
         const field = await table.getFieldById(fieldId);
         const value = config.getValue(item);
-        console.log(`写入字段 ${config.name} (${fieldId}):`, value);
         await field.setValue(recordId, value);
       } catch (e) {
         console.error(`写入字段 ${config.name} 失败:`, e);
@@ -241,7 +198,7 @@ const writeDataToRecord = async (recordId, item, fieldNameToId) => {
   }
 };
 
-const extractSocialMediaLink = (value) => {
+const extractProfileLink = (value) => {
   if (!value) return null;
 
   if (typeof value === 'string') {
@@ -263,55 +220,36 @@ const extractSocialMediaLink = (value) => {
 };
 
 const getCellValuesByFieldId = async (recordIdList, fieldId) => {
-  console.log('getCellValuesByFieldId - recordIdList:', recordIdList, 'fieldId:', fieldId);
   const table = await bitable.base.getActiveTable();
   const field = await table.getFieldById(fieldId);
-  console.log('field对象:', field, 'type:', field.type);
 
   const cellValues = await Promise.all(
     recordIdList.map(async (recordId) => {
       try {
         const cell = await field.getCell(recordId);
-        console.log(`record ${recordId} 的cell:`, cell);
         const value = await cell.getValue();
-        console.log(`record ${recordId} 的value:`, value, '类型:', Array.isArray(value) ? 'array' : typeof value);
-
-        return extractSocialMediaLink(value);
+        return extractProfileLink(value);
       } catch (e) {
-        console.error(`获取record ${recordId} 的cell值失败:`, e);
         return null;
       }
     })
   );
 
-  console.log('所有cellValues:', cellValues);
-  const filtered = cellValues.filter(value => {
-    const isValid = value && typeof value === 'string' && value.trim();
-    console.log('过滤:', value, '->', isValid);
-    return isValid;
-  });
-  console.log('过滤后的结果:', filtered);
-  return filtered;
+  return cellValues.filter(value => value && typeof value === 'string' && value.trim());
 };
 
 const handleSubmit = async () => {
-  console.log('=== 提交调试信息 ===');
-  console.log('当前选中的数据范围:', formData.value.scope);
-  console.log('选中的字段ID:', formData.value.videoLinkFieldId);
-  console.log('行数:', formData.value.rowCount);
-  console.log('api_key:', props.api_key);
-
   if (!props.api_key) {
     ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
     return;
   }
 
-  if (!formData.value.videoLinkFieldId) {
-    ElNotification({ message: '请选择视频链接字段', type: 'warning', duration: 0 });
+  if (!formData.value.profileLinkFieldId) {
+    ElNotification({ message: '请选择博主主页链接字段', type: 'warning', duration: 0 });
     return;
   }
 
-  if (formData.value.videoLinkFieldId === 'nodata') {
+  if (formData.value.profileLinkFieldId === 'nodata') {
     ElNotification({ message: '未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
     return;
   }
@@ -324,14 +262,11 @@ const handleSubmit = async () => {
       formData.value.rowCount
     );
 
-    console.log('获取到的记录ID列表:', recordIdList);
-
     if (!recordIdList) {
       loading.value = false;
       return;
     }
 
-    // 验证字段类型，自动添加缺失字段
     const fieldNameToId = await validateAndAddFields();
 
     if (!fieldNameToId) {
@@ -339,11 +274,8 @@ const handleSubmit = async () => {
       return;
     }
 
-    const linkList = await getCellValuesByFieldId(recordIdList, formData.value.videoLinkFieldId);
+    const linkList = await getCellValuesByFieldId(recordIdList, formData.value.profileLinkFieldId);
 
-    console.log('提取的视频链接:', linkList, '对应的recordIdList:', recordIdList);
-
-    // 逐个处理每个链接，获取数据并写回表格
     let successCount = 0;
     let failCount = 0;
 
@@ -355,43 +287,37 @@ const handleSubmit = async () => {
 
       try {
         showToast(`正在处理第 ${i + 1}/${linkList.length} 条...`, true);
-        console.log(`正在处理第 ${i + 1}/${linkList.length} 条:`, url);
 
         const response = await request({
-          url: '/social/api/v1/feishu/social_info',
+          url: '/social/api/v1/feishu/blogger_info',
           method: 'post',
           headers: { 'authorization': `Bearer ${props.api_key}` },
           data: { url }
         });
 
         const res = response.data;
-        console.log(`接口返回数据:`, res);
 
         if (res.sta === 0 && res.data) {
-          // 将数据写入当前记录
           await writeDataToRecord(recordId, res.data, fieldNameToId);
           successCount++;
-          console.log(`第 ${i + 1} 条处理成功`);
         } else {
-          console.error(`接口返回错误:`, res.msg);
+          ElNotification({ message: res.msg || '获取博主信息失败', type: 'error', duration: 0 });
           failCount++;
         }
       } catch (error) {
-        console.error(`处理第 ${i + 1} 条失败:`, error);
+        ElNotification({ message: error.message || '请求失败', type: 'error', duration: 0 });
         failCount++;
       }
     }
 
     showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
 
-    // 3秒后隐藏toast
     setTimeout(() => {
       hideToast();
     }, 3000);
 
   } catch (error) {
-    console.error('获取数据失败:', error);
-    ElNotification({ message: res.msg, type: 'error', duration: 0 });
+    ElNotification({ message: error.message || '获取数据失败', type: 'error', duration: 0 });
   } finally {
     loading.value = false;
   }
@@ -400,12 +326,6 @@ const handleSubmit = async () => {
 const stepNumber = (delta) => {
   let val = formData.value.rowCount || 5;
   val = Math.max(1, Math.min(100, val + delta));
-  formData.value.rowCount = val;
-};
-
-const clampNumber = () => {
-  let val = formData.value.rowCount || 5;
-  val = Math.max(1, Math.min(100, val));
   formData.value.rowCount = val;
 };
 
@@ -432,22 +352,22 @@ onMounted(() => {
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
       </span>
-      <span class="sub-page-title">音视频数据获取</span>
+      <span class="sub-page-title">博主信息获取</span>
     </div>
     <div class="form-card">
       <el-form ref="form" class="form" :model="formData" label-position="top">
         <el-form-item label="">
           <div slot="label" class="c-label">
-            视频链接
+            博主主页链接
             <el-tooltip effect="dark" placement="top">
-              <template #content>支持抖音、小红书平台的视频链接</template>
+              <template #content>支持抖音、小红书平台的博主主页链接</template>
               <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                 class="help-icon" />
             </el-tooltip>
           </div>
           <el-select
-            v-model="formData.videoLinkFieldId"
-            placeholder="选择包含视频链接的字段"
+            v-model="formData.profileLinkFieldId"
+            placeholder="选择包含博主主页链接的字段"
             style="width: 100%"
           >
             <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
