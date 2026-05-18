@@ -8,6 +8,7 @@ import KeywordSearch from './KeywordSearch.vue'
 import CommentFetch from './CommentFetch.vue'
 import VideoDataFetch from './VideoDataFetch.vue'
 import BloggerInfoFetch from './BloggerInfoFetch.vue'
+import XhsDownload from './XhsDownload.vue'
 
 const api_key = ref("");
 const api_key_disabled = ref(true);
@@ -167,6 +168,14 @@ const fetchPlatformConfig = async () => {
           </div>
           <span class="func-name">评论列表获取</span>
         </div>
+        <div class="arco-card" @click="currentPage = 'xhsDownload'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+            </svg>
+          </div>
+          <span class="func-name">小红书下载</span>
+        </div>
       </div>
     </div>
   </div>
@@ -185,6 +194,9 @@ const fetchPlatformConfig = async () => {
 
   <!-- 二级页面：博主信息获取 -->
   <BloggerInfoFetch v-if="currentPage === 'blogger'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：小红书下载 -->
+  <XhsDownload v-if="currentPage === 'xhsDownload'" :api_key="api_key" @back="currentPage = 'home'" />
 </template>
 
 <style scoped>
