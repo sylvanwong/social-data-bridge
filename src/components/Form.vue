@@ -9,6 +9,7 @@ import CommentFetch from './CommentFetch.vue'
 import VideoDataFetch from './VideoDataFetch.vue'
 import BloggerInfoFetch from './BloggerInfoFetch.vue'
 import XhsDownload from './XhsDownload.vue'
+import SeriesFetch from './SeriesFetch.vue'
 
 const api_key = ref("");
 const api_key_disabled = ref(true);
@@ -117,7 +118,7 @@ const fetchPlatformConfig = async () => {
 
     <!-- 功能分组卡片区 -->
     <div class="cards-section">
-      <div class="group-title">社媒数据助手</div>
+      <div class="group-title">音视频</div>
       <div class="cards-grid">
         <div class="arco-card" @click="currentPage = 'video'">
           <div class="func-icon">
@@ -160,6 +161,18 @@ const fetchPlatformConfig = async () => {
           </div>
           <span class="func-name">关键词搜索获取</span>
         </div>
+        <div class="arco-card" @click="currentPage = 'series'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <rect x="2" y="2" width="20" height="20" rx="2" ry="2"></rect>
+              <line x1="2" y1="8" x2="22" y2="8"></line>
+              <line x1="2" y1="16" x2="22" y2="16"></line>
+              <line x1="8" y1="8" x2="8" y2="22"></line>
+              <line x1="16" y1="8" x2="16" y2="22"></line>
+            </svg>
+          </div>
+          <span class="func-name">主页短剧获取</span>
+        </div>
         <div class="arco-card" @click="currentPage = 'comment'">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -183,6 +196,9 @@ const fetchPlatformConfig = async () => {
   <!-- 二级页面：主页批量获取 -->
   <ProfileFetch v-if="currentPage === 'profile'" :api_key="api_key" @back="currentPage = 'home'" />
 
+  <!-- 二级页面：主页短剧获取 -->
+  <SeriesFetch v-if="currentPage === 'series'" :api_key="api_key" @back="currentPage = 'home'" />
+
   <!-- 二级页面：关键词搜索获取 -->
   <KeywordSearch v-if="currentPage === 'search'" :api_key="api_key" :social_type_options="social_type_options" @back="currentPage = 'home'" />
 
@@ -202,7 +218,7 @@ const fetchPlatformConfig = async () => {
 <style scoped>
 .home-page {
   min-height: 100vh;
-  background: #F7F8FA;
+  background: #fffcfc;
 }
 
 /* Banner */
