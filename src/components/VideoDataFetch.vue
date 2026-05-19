@@ -521,7 +521,7 @@ onMounted(() => {
 <style scoped>
 .sub-page {
   min-height: 100vh;
-  background: #F2F3F5;
+  background: #fffcfc;
 }
 .sub-page-header {
   display: flex;
