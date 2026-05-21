@@ -98,13 +98,13 @@ const getFieldMetaMap = async (table) => {
   return new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
 };
 
-const setupTableFields = async (tableId) => {
+const setupTableFields = async (tableId, isNewTable = false) => {
   const table = await bitable.base.getTableById(tableId);
   const fieldMetaList = await table.getFieldMetaList();
   const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
 
   const defaultFirstField = fieldMetaList[0];
-  if (defaultFirstField && defaultFirstField.name === '文本') {
+  if (isNewTable && defaultFirstField && defaultFirstField.name === '文本') {
     await table.setField(defaultFirstField.id, {
       type: FIELD_MAPPING[0].type,
       name: FIELD_MAPPING[0].name
@@ -123,7 +123,11 @@ const setupTableFields = async (tableId) => {
       }
       continue;
     }
-    if (index === 0 && defaultFirstField && defaultFirstField.name === '文本') {
+    if (isNewTable && index === 0 && defaultFirstField && defaultFirstField.name === '文本') {
+      continue;
+    }
+    if (isNewTable) {
+      await table.addField({ type: config.type, name: config.name });
       continue;
     }
     throw new Error(`现有表格缺少字段: ${config.name}`);
@@ -251,7 +255,7 @@ const getList = async (task_id, targetTableId = "", page = 1, writeTableId = "")
         if (!currentTableId) {
           const tableName = '主页短剧获取';
           const { tableId } = await createSequentialTable(tableName);
-          await setupTableFields(tableId);
+          await setupTableFields(tableId, true);
           await bitable.ui.switchToTable(tableId);
           currentTableId = tableId;
         }

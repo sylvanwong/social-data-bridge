@@ -2,7 +2,6 @@
 import { bitable } from "@lark-base-open/js-sdk";
 import { ElMessage } from "element-plus";
 import { ref, onMounted } from "vue";
-import request from '@/utils/request'
 import ProfileFetch from './ProfileFetch.vue'
 import KeywordSearch from './KeywordSearch.vue'
 import CommentFetch from './CommentFetch.vue'
@@ -10,14 +9,16 @@ import VideoDataFetch from './VideoDataFetch.vue'
 import BloggerInfoFetch from './BloggerInfoFetch.vue'
 import XhsDownload from './XhsDownload.vue'
 import SeriesFetch from './SeriesFetch.vue'
+import HotListFetch from './HotListFetch.vue'
+import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
 const api_key = ref("");
 const api_key_disabled = ref(true);
 const currentPage = ref("home");
 
-const PLATFORM_LABELS = {
-  xhs: '小红书',
-  douyin: '抖音',
+const PLATFORM_CONFIG_NAMES = {
+  search: 'feishu_social_type',
+  hot: 'feishu_hot_type',
 };
 const API_KEY_CLEARED_MARKER = "__cleared__";
 const TYPE_OPTIONS = [
@@ -30,7 +31,7 @@ onMounted(async () => {
   const key = await bitable.bridge.getData("api_key");
   if (key && typeof key === "string" && key.trim() && key !== API_KEY_CLEARED_MARKER) {
     api_key.value = key;
-    await fetchPlatformConfig();
+    social_type_options.value = await fetchPlatformConfig(PLATFORM_CONFIG_NAMES.search, TYPE_OPTIONS);
   }
 });
 
@@ -44,27 +45,17 @@ const saveApiKey = async () => {
     api_key_disabled.value = true;
     await bitable.bridge.setData("api_key", api_key.value);
     ElMessage({ message: "保存成功", type: "success", plain: true });
-    await fetchPlatformConfig();
+    social_type_options.value = await fetchPlatformConfig(PLATFORM_CONFIG_NAMES.search, TYPE_OPTIONS);
   }
 };
 
-const fetchPlatformConfig = async () => {
+const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   try {
-    const response = await request({
-      url: "/social/api/v1/feishu/social/config",
-      method: "get",
-      headers: { 'authorization': `Bearer ${api_key.value}` },
-    });
-    const res = response.data;
-    if (res.sta === 0 && Array.isArray(res.data?.value)) {
-      social_type_options.value = res.data.value.map(platform => ({
-        value: platform,
-        label: PLATFORM_LABELS[platform] || platform
-      }));
-    }
+    return await fetchPlatformConfigOptions(api_key.value, name, fallbackOptions);
   } catch (error) {
     console.error('获取平台配置失败:', error);
     ElMessage({ message: "获取平台配置失败，使用默认设置", type: "warning", plain: true });
+    return [...fallbackOptions];
   }
 };
 </script>
@@ -181,6 +172,16 @@ const fetchPlatformConfig = async () => {
           </div>
           <span class="func-name">评论列表获取</span>
         </div>
+        <div class="arco-card" @click="currentPage = 'hot'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <line x1="12" y1="20" x2="12" y2="10"></line>
+              <line x1="18" y1="20" x2="18" y2="4"></line>
+              <line x1="6" y1="20" x2="6" y2="16"></line>
+            </svg>
+          </div>
+          <span class="func-name">热榜获取</span>
+        </div>
         <div class="arco-card" @click="currentPage = 'xhsDownload'">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -198,6 +199,14 @@ const fetchPlatformConfig = async () => {
 
   <!-- 二级页面：主页短剧获取 -->
   <SeriesFetch v-if="currentPage === 'series'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：热榜获取 -->
+  <HotListFetch
+    v-if="currentPage === 'hot'"
+    :api_key="api_key"
+    :config_name="PLATFORM_CONFIG_NAMES.hot"
+    @back="currentPage = 'home'"
+  />
 
   <!-- 二级页面：关键词搜索获取 -->
   <KeywordSearch v-if="currentPage === 'search'" :api_key="api_key" :social_type_options="social_type_options" @back="currentPage = 'home'" />
