@@ -6,6 +6,7 @@ import ProfileFetch from './ProfileFetch.vue'
 import KeywordSearch from './KeywordSearch.vue'
 import CommentFetch from './CommentFetch.vue'
 import VideoDataFetch from './VideoDataFetch.vue'
+import VideoCopySummary from './VideoCopySummary.vue'
 import BloggerInfoFetch from './BloggerInfoFetch.vue'
 import XhsDownload from './XhsDownload.vue'
 import SeriesFetch from './SeriesFetch.vue'
@@ -182,6 +183,17 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           </div>
           <span class="func-name">热榜获取</span>
         </div>
+        <div class="arco-card" @click="currentPage = 'videoCopySummary'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+              <polyline points="14 3 14 9 20 9"></polyline>
+              <line x1="8" y1="13" x2="16" y2="13"></line>
+              <line x1="8" y1="17" x2="13" y2="17"></line>
+            </svg>
+          </div>
+          <span class="func-name">视频文案摘要</span>
+        </div>
         <div class="arco-card" @click="currentPage = 'xhsDownload'">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -219,6 +231,9 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
   <!-- 二级页面：博主信息获取 -->
   <BloggerInfoFetch v-if="currentPage === 'blogger'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：视频文案摘要 -->
+  <VideoCopySummary v-if="currentPage === 'videoCopySummary'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：小红书下载 -->
   <XhsDownload v-if="currentPage === 'xhsDownload'" :api_key="api_key" @back="currentPage = 'home'" />
