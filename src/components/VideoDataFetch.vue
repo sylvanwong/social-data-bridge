@@ -479,11 +479,13 @@ onMounted(() => {
                 />
                 <div class="stepper-buttons">
                   <button
+                    type="button"
                     @click.stop="stepNumber(1)"
                     :disabled="formData.rowCount >= 100"
                     class="stepper-btn stepper-btn-up"
                   ></button>
                   <button
+                    type="button"
                     @click.stop="stepNumber(-1)"
                     :disabled="formData.rowCount <= 1"
                     class="stepper-btn stepper-btn-down"
