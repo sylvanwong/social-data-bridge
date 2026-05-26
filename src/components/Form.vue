@@ -88,7 +88,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
       <div class="api-header">
         <div class="api-title-group">
           <span class="api-title">API Key 设置</span>
-          <a class="api-link" href="https://socialdatax.com" target="_blank">点击获取API密钥</a>
+          <a class="api-link" href="https://www.52choujiang.com/assistant" target="_blank">点击获取API密钥</a>
         </div>
         <div class="api-edit" @click="api_key_disabled = !api_key_disabled">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
