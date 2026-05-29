@@ -15,6 +15,7 @@ export const FIELD_MAPPING = [
   { key: 'comment_count', name: '评论数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
   { key: 'collect_count', name: '收藏数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
   { key: 'share_count', name: '分享数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
+  { key: 'social_type', name: '平台', type: FieldType.Text },
   { key: 'share_url', name: '视频链接', type: FieldType.Text },
   { key: 'play_url', name: '下载链接', type: FieldType.Text },
   { key: 'cover_url', name: '封面', type: FieldType.Text },

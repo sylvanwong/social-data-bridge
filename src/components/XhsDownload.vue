@@ -24,6 +24,7 @@ const httpToHttps = (url) => {
 };
 
 const FIELD_CONFIG = [
+  { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
   { name: "封面链接", type: FieldType.Text, getValue: (item) => httpToHttps(item?.origin_cover) ?? "" },
   { name: "下载链接", type: FieldType.Text, getValue: (item) => {
     const data = item?.download_addr;

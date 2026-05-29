@@ -19,6 +19,7 @@ const formData = ref({
 const FIELD_CONFIG = [
   { name: "摘要", type: FieldType.Text, getValue: (item) => getSummary(item) },
   { name: "文案", type: FieldType.Text, getValue: (item) => getVideoCopy(item) },
+  { name: "平台", type: FieldType.Text, getValue: (item) => item?.platform ?? "" },
   // { name: "任务状态", type: FieldType.Text, getValue: (item) => item?.status ?? "" },
   // { name: "失败原因", type: FieldType.Text, getValue: (item) => item?.error || item?.summary_error || "" },
   // { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.updated_at ? item.updated_at * 1000 : Date.now()) },

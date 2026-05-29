@@ -25,6 +25,7 @@ const FIELD_CONFIG = [
   { name: "关注数", type: FieldType.Number, getValue: (item) => Number(item?.following_count) || 0 },
   { name: "获赞数", type: FieldType.Number, getValue: (item) => Number(item?.total_favorited) || 0 },
   { name: "作品数", type: FieldType.Number, getValue: (item) => Number(item?.aweme_count) || 0 },
+  { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
   { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
 ];
 
