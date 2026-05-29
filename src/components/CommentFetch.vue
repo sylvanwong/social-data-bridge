@@ -34,6 +34,7 @@ const FIELD_CONFIG = [
   { name: "小红书ID", type: FieldType.Text, getValue: (item) => item?.social_user_number ?? "" },
   { name: "点赞数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
   { name: "回复数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.reply_comment_total) || 0 },
+  { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
   { name: "评论时间", type: FieldType.DateTime, getValue: (item) => (item?.t_create ? item.t_create * 1000 : "") },
 ];
 const FIELD_TYPE_NAME = {
@@ -435,12 +436,18 @@ const commit = () => {
           <div slot="label" class="c-label">
             帖子链接
             <el-tooltip effect="dark" placement="top">
-              <template #content>帖子链接</template>
+              <template #content>支持多条帖子链接，<br />可换行或逗号分隔</template>
               <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                 class="help-icon" />
             </el-tooltip>
           </div>
-          <el-input v-model="formData.url" class="c-input" placeholder="请输入" />
+          <el-input
+            v-model="formData.url"
+            type="textarea"
+            :rows="4"
+            class="c-input"
+            placeholder="请输入正确帖子链接（换行或逗号分隔）"
+          />
         </el-form-item>
         <el-form-item label="">
           <div slot="label" class="c-label">

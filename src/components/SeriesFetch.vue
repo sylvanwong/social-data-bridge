@@ -43,6 +43,7 @@ const FIELD_MAPPING = [
   { key: 'description', name: '剧情简介', type: FieldType.Text },
   { key: 'nickname', name: '作者名', type: FieldType.Text },
   { key: 'user_id', name: '作者ID', type: FieldType.Text },
+  { key: 'social_type', name: '平台', type: FieldType.Text },
   { key: 'share_url', name: '短剧链接', type: FieldType.Text },
   { key: 'create_time', name: '发布时间', type: FieldType.DateTime, isTimestamp: true },
 ];
@@ -420,11 +421,17 @@ const commit = () => {
             <span class="required">*</span>
             博主主页链接
             <el-tooltip effect="dark" placement="top">
-              <template #content>仅支持抖音博主主页链接，不支持其他链接</template>
+              <template #content>仅支持抖音博主主页链接，<br />不支持其他链接</template>
               <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
             </el-tooltip>
           </div>
-          <el-input v-model="formData.profile_url" class="c-input" placeholder="https://www.douyin.com/user/..." />
+          <el-input
+            v-model="formData.profile_url"
+            type="textarea"
+            :rows="4"
+            class="c-input"
+            placeholder="请输入正确博主主页链接（换行或逗号分隔）"
+          />
         </el-form-item>
         <el-form-item>
           <div class="c-label">

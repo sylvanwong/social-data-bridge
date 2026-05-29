@@ -11,6 +11,7 @@ const FIELD_MAPPING = [
   { key: 'keyword', name: '热搜标题', type: FieldType.Text },
   { key: 'hot_value', name: '热度值', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
   { key: 'tag', name: '标签', type: FieldType.Text },
+  { key: 'social_type', name: '平台', type: FieldType.Text },
 ];
 
 const props = defineProps({
