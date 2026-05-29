@@ -26,11 +26,43 @@ export const FIELD_MAPPING = [
 ];
 
 export const FIELD_TYPE_NAME = {
-  [FieldType.Text]: 'Text',
-  [FieldType.Number]: 'Number',
-  [FieldType.DateTime]: 'DateTime',
-  [FieldType.Url]: 'Url',
-  [FieldType.Attachment]: 'Attachment',
+  [FieldType.Text]: '文本',
+  [FieldType.Number]: '数字',
+  [FieldType.SingleSelect]: '单选',
+  [FieldType.MultiSelect]: '多选',
+  [FieldType.DateTime]: '日期时间',
+  [FieldType.Url]: '链接',
+  [FieldType.Attachment]: '附件',
+};
+
+const getAllowedFieldTypes = (config) => {
+  if (config.key === 'nickname') {
+    return [FieldType.Text, FieldType.SingleSelect];
+  }
+  return [config.type];
+};
+
+const isFieldTypeCompatible = (fieldType, config) => {
+  return getAllowedFieldTypes(config).includes(fieldType);
+};
+
+const getExpectedFieldTypeName = (config) => {
+  return getAllowedFieldTypes(config)
+    .map(type => FIELD_TYPE_NAME[type] || type)
+    .join(' / ');
+};
+
+const normalizeCellValue = (value, config, fieldType) => {
+  let nextValue = value;
+  if (config.isTimestamp && nextValue) {
+    nextValue = nextValue * 1000;
+  }
+
+  if (config.key === 'nickname' && fieldType === FieldType.SingleSelect) {
+    return nextValue ? nextValue : null;
+  }
+
+  return nextValue;
 };
 
 export const showErrorMsg = (message) => {
@@ -112,8 +144,9 @@ export const validateTableFields = async (tableId) => {
     for (const item of fieldList) {
       if (item.field) {
         const fieldType = await item.field.getType();
-        if (fieldType !== item.config.type) {
-          ElNotification({ title: '出错', message: `字段类型不匹配:字段"${item.config.name}" 的类型是 ${FIELD_TYPE_NAME[fieldType] || fieldType}，但Schema定义为 ${FIELD_TYPE_NAME[item.config.type] || item.config.type}，无法写入数据`, type: 'error', duration: 0 });
+        item.fieldType = fieldType;
+        if (!isFieldTypeCompatible(fieldType, item.config)) {
+          ElNotification({ title: '出错', message: `现有表格中的“${item.config.name}”字段类型为“${FIELD_TYPE_NAME[fieldType] || fieldType}”，当前仅支持“${getExpectedFieldTypeName(item.config)}”，请调整后重试。`, type: 'error', duration: 0 });
           return false;
         }
       }
@@ -242,8 +275,9 @@ export const useSocialData = (getTableName, api_key) => {
       for (const item of fieldList) {
         if (item.field) {
           const fieldType = await item.field.getType();
-          if (fieldType !== item.config.type) {
-            ElNotification({ title: '出错', message: `字段类型不匹配:字段"${item.config.name}" 的类型是 ${FIELD_TYPE_NAME[fieldType] || fieldType}，但Schema定义为 ${FIELD_TYPE_NAME[item.config.type] || item.config.type}，无法写入数据`, type: 'error', duration: 0 });
+          item.fieldType = fieldType;
+          if (!isFieldTypeCompatible(fieldType, item.config)) {
+            ElNotification({ title: '出错', message: `现有表格中的“${item.config.name}”字段类型为“${FIELD_TYPE_NAME[fieldType] || fieldType}”，当前仅支持“${getExpectedFieldTypeName(item.config)}”，请调整后重试。`, type: 'error', duration: 0 });
             resetParams();
             return;
           }
@@ -260,14 +294,11 @@ export const useSocialData = (getTableName, api_key) => {
       let records = [];
       for (const item of list) {
         let record = [];
-        for (const { field, config } of availableFieldList) {
+        for (const { field, config, fieldType } of availableFieldList) {
           if (!targetTableId && config.formatter) {
             await field.setFormatter(config.formatter);
           }
-          let value = item[config.key];
-          if (config.isTimestamp && value) {
-            value = value * 1000;
-          }
+          const value = normalizeCellValue(item[config.key], config, fieldType);
           record.push(await field.createCell(value));
         }
         records.push(record);
