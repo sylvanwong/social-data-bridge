@@ -430,7 +430,7 @@ const commit = () => {
             type="textarea"
             :rows="4"
             class="c-input"
-            placeholder="请输入正确博主主页链接（换行或逗号分隔）"
+            placeholder="请输入正确的博主主页链接，支持批量添加，多个链接可换行或用逗号分隔"
           />
         </el-form-item>
         <el-form-item>

@@ -36,7 +36,7 @@ export const FIELD_TYPE_NAME = {
 };
 
 const getAllowedFieldTypes = (config) => {
-  if (config.key === 'nickname') {
+  if (config.key === 'nickname' || config.key === 'note_type') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
   return [config.type];
@@ -58,7 +58,7 @@ const normalizeCellValue = (value, config, fieldType) => {
     nextValue = nextValue * 1000;
   }
 
-  if (config.key === 'nickname' && fieldType === FieldType.SingleSelect) {
+  if ((config.key === 'nickname' || config.key === 'note_type') && fieldType === FieldType.SingleSelect) {
     return nextValue ? nextValue : null;
   }
 
