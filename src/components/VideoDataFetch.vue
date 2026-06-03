@@ -33,6 +33,40 @@ const FIELD_CONFIG = [
   { name: "发布时间", type: FieldType.DateTime, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
   { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
 ];
+const FIELD_TYPE_NAME = {
+  [FieldType.Text]: '文本',
+  [FieldType.Number]: '数字',
+  [FieldType.SingleSelect]: '单选',
+  [FieldType.MultiSelect]: '多选',
+  [FieldType.DateTime]: '日期时间',
+  [FieldType.Url]: '链接',
+  [FieldType.Attachment]: '附件',
+};
+
+const getAllowedFieldTypes = (config) => {
+  if (config.name === '作者名称' || config.name === '平台') {
+    return [FieldType.Text, FieldType.SingleSelect];
+  }
+  return [config.type];
+};
+
+const isFieldTypeCompatible = (fieldType, config) => {
+  return getAllowedFieldTypes(config).includes(fieldType);
+};
+
+const getExpectedFieldTypeName = (config) => {
+  return getAllowedFieldTypes(config)
+    .map(type => FIELD_TYPE_NAME[type] || type)
+    .join(' / ');
+};
+
+const normalizeFieldValue = (value, config, fieldType) => {
+  if ((config.name === '作者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect) {
+    return value ? value : null;
+  }
+
+  return value;
+};
 
 const fieldOptions = ref([]);
 const fieldListLoading = ref(false);
@@ -159,10 +193,10 @@ const validateAndAddFields = async () => {
 
     if (!fieldMeta) {
       missingFields.push(config);
-    } else if (fieldMeta.type !== config.type) {
+    } else if (!isFieldTypeCompatible(fieldMeta.type, config)) {
       typeMismatchFields.push({
         name: config.name,
-        expected: config.type,
+        expected: getExpectedFieldTypeName(config),
         actual: fieldMeta.type
       });
     }
@@ -173,7 +207,9 @@ const validateAndAddFields = async () => {
 
   // 如果有类型不匹配的字段，提示错误并返回 null
   if (typeMismatchFields.length > 0) {
-    const errorMsg = typeMismatchFields.map(f => `"${f.name}" 类型不匹配`).join(', ');
+    const errorMsg = typeMismatchFields
+      .map(f => `"${f.name}" 需为 ${f.expected}，当前为 ${FIELD_TYPE_NAME[f.actual] || f.actual}`)
+      .join('；');
     ElNotification({ message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 0 });
     return null;
   }
@@ -228,7 +264,8 @@ const writeDataToRecord = async (recordId, item, fieldNameToId) => {
 
       try {
         const field = await table.getFieldById(fieldId);
-        const value = config.getValue(item);
+        const fieldType = await field.getType();
+        const value = normalizeFieldValue(config.getValue(item), config, fieldType);
         console.log(`写入字段 ${config.name} (${fieldId}):`, value);
         await field.setValue(recordId, value);
       } catch (e) {
