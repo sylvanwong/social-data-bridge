@@ -241,7 +241,26 @@ const writeDataToRecord = async (recordId, item, fieldNameToId) => {
   }
 };
 
-const extractSocialMediaLink = (value) => {
+const writeErrorMessageToFirstField = async (recordId, message, fieldNameToId) => {
+  const firstFieldName = FIELD_CONFIG[0]?.name;
+  const fieldId = firstFieldName ? fieldNameToId[firstFieldName] : "";
+
+  if (!fieldId) {
+    console.warn("未找到第一个字段，无法写入错误信息");
+    return;
+  }
+
+  try {
+    const table = await bitable.base.getActiveTable();
+    const field = await table.getFieldById(fieldId);
+    await field.setValue(recordId, message);
+    console.log(`已将错误信息写入字段 ${firstFieldName}:`, message);
+  } catch (error) {
+    console.error("写入错误信息失败:", error);
+  }
+};
+
+const extractUrlHint = (value) => {
   if (!value) return null;
 
   if (typeof value === 'string') {
@@ -250,11 +269,8 @@ const extractSocialMediaLink = (value) => {
 
   if (Array.isArray(value)) {
     for (const item of value) {
-      if (item.type === 'url' && item.link) {
-        const link = item.link;
-        if (link.includes('douyin.com') || link.includes('xhslink.com') || link.includes('xiaohongshu.com')) {
-          return link;
-        }
+      if (item?.type === 'url' && typeof item.link === 'string' && item.link.trim()) {
+        return item.link.trim();
       }
     }
   }
@@ -268,7 +284,7 @@ const getCellValuesByFieldId = async (recordIdList, fieldId) => {
   const field = await table.getFieldById(fieldId);
   console.log('field对象:', field, 'type:', field.type);
 
-  const cellValues = await Promise.all(
+  const rows = await Promise.all(
     recordIdList.map(async (recordId) => {
       try {
         const cell = await field.getCell(recordId);
@@ -276,7 +292,18 @@ const getCellValuesByFieldId = async (recordIdList, fieldId) => {
         const value = await cell.getValue();
         console.log(`record ${recordId} 的value:`, value, '类型:', Array.isArray(value) ? 'array' : typeof value);
 
-        return extractSocialMediaLink(value);
+        const url = extractUrlHint(value);
+        const hasRawValue = value !== null && value !== undefined && (!Array.isArray(value) || value.length > 0);
+
+        if (!url && !hasRawValue) {
+          return null;
+        }
+
+        return {
+          recordId,
+          url,
+          rawValue: value
+        };
       } catch (e) {
         console.error(`获取record ${recordId} 的cell值失败:`, e);
         return null;
@@ -284,10 +311,10 @@ const getCellValuesByFieldId = async (recordIdList, fieldId) => {
     })
   );
 
-  console.log('所有cellValues:', cellValues);
-  const filtered = cellValues.filter(value => {
-    const isValid = value && typeof value === 'string' && value.trim();
-    console.log('过滤:', value, '->', isValid);
+  console.log('所有cellValues:', rows);
+  const filtered = rows.filter(item => {
+    const isValid = item && (item.url || item.rawValue !== null && item.rawValue !== undefined);
+    console.log('过滤:', item, '->', isValid);
     return isValid;
   });
   console.log('过滤后的结果:', filtered);
@@ -339,29 +366,32 @@ const handleSubmit = async () => {
       return;
     }
 
-    const linkList = await getCellValuesByFieldId(recordIdList, formData.value.videoLinkFieldId);
+    const rowList = await getCellValuesByFieldId(recordIdList, formData.value.videoLinkFieldId);
 
-    console.log('提取的视频链接:', linkList, '对应的recordIdList:', recordIdList);
-
+    console.log('提取的视频链接:', rowList, '对应的recordIdList:', recordIdList);
+    // return
     // 逐个处理每个链接，获取数据并写回表格
     let successCount = 0;
     let failCount = 0;
 
-    showToast(`准备处理 ${linkList.length} 条数据...`, true);
+    showToast(`准备处理 ${rowList.length} 条数据...`, true);
 
-    for (let i = 0; i < linkList.length; i++) {
-      const url = linkList[i];
-      const recordId = recordIdList[i];
+    for (let i = 0; i < rowList.length; i++) {
+      const { url, recordId, rawValue } = rowList[i];
 
       try {
-        showToast(`正在处理第 ${i + 1}/${linkList.length} 条...`, true);
-        console.log(`正在处理第 ${i + 1}/${linkList.length} 条:`, url);
+        showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
+        console.log(`正在处理第 ${i + 1}/${rowList.length} 条:`, { url, rawValue });
 
         const response = await request({
           url: '/social/api/v1/feishu/social_info',
           method: 'post',
           headers: { 'authorization': `Bearer ${props.api_key}` },
-          data: { url }
+          data: {
+            url,
+            raw_value: rawValue,
+            source: 'feishu_bitable_video_fetch'
+          }
         });
 
         const res = response.data;
@@ -373,11 +403,15 @@ const handleSubmit = async () => {
           successCount++;
           console.log(`第 ${i + 1} 条处理成功`);
         } else {
-          console.error(`接口返回错误:`, res.msg);
+          const errorMessage = res?.msg || res?.message || '获取音视频数据失败';
+          console.error(`接口返回错误:`, errorMessage);
+          await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId);
           failCount++;
         }
       } catch (error) {
-        console.error(`处理第 ${i + 1} 条失败:`, error);
+        const errorMessage = error?.response?.data?.msg || error?.message || '请求失败';
+        console.error(`处理第 ${i + 1} 条失败:`, errorMessage);
+        await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId);
         failCount++;
       }
     }
