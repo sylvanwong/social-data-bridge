@@ -253,10 +253,7 @@ const extractVideoLink = (value) => {
   if (Array.isArray(value)) {
     for (const item of value) {
       if (item.type === "url" && item.link) {
-        const link = item.link;
-        if (link.includes("douyin.com") || link.includes("xhslink.com") || link.includes("xiaohongshu.com")) {
-          return link;
-        }
+        return item.link.trim() || null;
       }
     }
   }
@@ -464,7 +461,7 @@ onUnmounted(() => {
           <div slot="label" class="c-label">
             视频链接
             <el-tooltip effect="dark" placement="top">
-              <template #content>支持抖音、小红书平台的视频链接</template>
+              <template #content>支持抖音、小红书、快手平台的视频链接</template>
               <img
                 src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                 class="help-icon"

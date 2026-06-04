@@ -49,7 +49,7 @@ const isFieldTypeCompatible = (fieldType, config) => {
 const getExpectedFieldTypeName = (config) => {
   return getAllowedFieldTypes(config)
     .map(type => FIELD_TYPE_NAME[type] || type)
-    .join(' / ');
+    .join('、');
 };
 
 const normalizeCellValue = (value, config, fieldType) => {
@@ -146,7 +146,7 @@ export const validateTableFields = async (tableId) => {
         const fieldType = await item.field.getType();
         item.fieldType = fieldType;
         if (!isFieldTypeCompatible(fieldType, item.config)) {
-          ElNotification({ title: '出错', message: `现有表格中的“${item.config.name}”字段类型为“${FIELD_TYPE_NAME[fieldType] || fieldType}”，当前仅支持“${getExpectedFieldTypeName(item.config)}”，请调整后重试。`, type: 'error', duration: 0 });
+          ElNotification({ title: '出错', message: `字段"${item.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(item.config)}类型，请修改后，点击插件顶部右上角关闭按钮，再重新进入操作`, type: 'error', duration: 0 });
           return false;
         }
       }
@@ -277,7 +277,7 @@ export const useSocialData = (getTableName, api_key) => {
           const fieldType = await item.field.getType();
           item.fieldType = fieldType;
           if (!isFieldTypeCompatible(fieldType, item.config)) {
-            ElNotification({ title: '出错', message: `现有表格中的“${item.config.name}”字段类型为“${FIELD_TYPE_NAME[fieldType] || fieldType}”，当前仅支持“${getExpectedFieldTypeName(item.config)}”，请调整后重试。`, type: 'error', duration: 0 });
+            ElNotification({ title: '出错', message: `字段"${item.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(item.config)}类型，请修改后，点击插件顶部右上角关闭按钮，再重新进入操作`, type: 'error', duration: 0 });
             resetParams();
             return;
           }

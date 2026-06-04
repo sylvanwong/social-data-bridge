@@ -67,6 +67,7 @@ const filter_duration_options = [
 
 const isXhs = computed(() => formData1.value.social_type === 'xhs');
 const isDouyin = computed(() => formData1.value.social_type === 'douyin');
+const isKuaishou = computed(() => formData1.value.social_type === 'kuaishou');
 
 const getTableName = () => formData1.value.keyword || '社媒数据助手';
 
@@ -187,6 +188,19 @@ watch(
   }
 );
 
+watch(
+  () => formData1.value.social_type,
+  (socialType) => {
+    if (socialType === 'kuaishou') {
+      formData1.value.sort_type = 0;
+      formData1.value.filter_note_type = 0;
+      formData1.value.filter_note_time = 0;
+      formData1.value.publish_time = 0;
+      formData1.value.filter_duration = 0;
+    }
+  }
+);
+
 onMounted(async () => {
   const search_platform = await bitable.bridge.getData("search_platform");
   const search_keyword = await bitable.bridge.getData("search_keyword");
@@ -283,7 +297,7 @@ const commit = () => {
           </div>
           <el-input v-model="formData1.keyword" class="c-input" placeholder="请输入" />
         </el-form-item>
-        <el-form-item label="">
+        <el-form-item label="" v-if="!isKuaishou">
           <div slot="label" class="c-label">
             排序方式
             <el-tooltip effect="dark" placement="top">

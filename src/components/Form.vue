@@ -25,6 +25,7 @@ const API_KEY_CLEARED_MARKER = "__cleared__";
 const TYPE_OPTIONS = [
   { value: "xhs", label: "小红书" },
   { value: "douyin", label: "抖音" },
+  { value: "kuaishou", label: "快手" },
 ]
 const social_type_options = ref([...TYPE_OPTIONS]);
 

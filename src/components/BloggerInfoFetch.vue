@@ -209,10 +209,7 @@ const extractProfileLink = (value) => {
   if (Array.isArray(value)) {
     for (const item of value) {
       if (item.type === 'url' && item.link) {
-        const link = item.link;
-        if (link.includes('douyin.com') || link.includes('xhslink.com') || link.includes('xiaohongshu.com')) {
-          return link;
-        }
+        return item.link.trim() || null;
       }
     }
   }
@@ -224,19 +221,20 @@ const getCellValuesByFieldId = async (recordIdList, fieldId) => {
   const table = await bitable.base.getActiveTable();
   const field = await table.getFieldById(fieldId);
 
-  const cellValues = await Promise.all(
+  const rows = await Promise.all(
     recordIdList.map(async (recordId) => {
       try {
         const cell = await field.getCell(recordId);
         const value = await cell.getValue();
-        return extractProfileLink(value);
+        const url = extractProfileLink(value);
+        return url ? { recordId, url } : null;
       } catch (e) {
         return null;
       }
     })
   );
 
-  return cellValues.filter(value => value && typeof value === 'string' && value.trim());
+  return rows.filter(item => item && item.url);
 };
 
 const handleSubmit = async () => {
@@ -275,19 +273,18 @@ const handleSubmit = async () => {
       return;
     }
 
-    const linkList = await getCellValuesByFieldId(recordIdList, formData.value.profileLinkFieldId);
+    const rowList = await getCellValuesByFieldId(recordIdList, formData.value.profileLinkFieldId);
 
     let successCount = 0;
     let failCount = 0;
 
-    showToast(`准备处理 ${linkList.length} 条数据...`, true);
+    showToast(`准备处理 ${rowList.length} 条数据...`, true);
 
-    for (let i = 0; i < linkList.length; i++) {
-      const url = linkList[i];
-      const recordId = recordIdList[i];
+    for (let i = 0; i < rowList.length; i++) {
+      const { url, recordId } = rowList[i];
 
       try {
-        showToast(`正在处理第 ${i + 1}/${linkList.length} 条...`, true);
+        showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
 
         const response = await request({
           url: '/social/api/v1/feishu/blogger_info',
@@ -361,7 +358,7 @@ onMounted(() => {
           <div slot="label" class="c-label">
             博主主页链接
             <el-tooltip effect="dark" placement="top">
-              <template #content>支持抖音、小红书平台的博主主页链接</template>
+              <template #content>支持抖音、小红书、快手平台的博主主页链接</template>
               <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                 class="help-icon" />
             </el-tooltip>
