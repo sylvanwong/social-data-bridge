@@ -208,9 +208,9 @@ const validateAndAddFields = async () => {
   // 如果有类型不匹配的字段，提示错误并返回 null
   if (typeMismatchFields.length > 0) {
     const errorMsg = typeMismatchFields
-      .map(f => `"${f.name}" 需为 ${f.expected}，当前为 ${FIELD_TYPE_NAME[f.actual] || f.actual}`)
+      .map(f => `字段"${f.name}" 类型不匹配，仅支持${f.expected}类型，请修改后，点击插件顶部右上角关闭按钮，再重新进入操作`)
       .join('；');
-    ElNotification({ message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 0 });
+    ElNotification({ message: errorMsg, type: 'error', duration: 0 });
     return null;
   }
 
@@ -511,7 +511,7 @@ onMounted(() => {
           <div slot="label" class="c-label">
             视频链接
             <el-tooltip effect="dark" placement="top">
-              <template #content>支持抖音、小红书平台的视频链接</template>
+              <template #content>支持抖音、小红书、快手平台的视频链接</template>
               <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                 class="help-icon" />
             </el-tooltip>

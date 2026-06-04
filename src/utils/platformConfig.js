@@ -3,6 +3,7 @@ import request from '@/utils/request'
 export const PLATFORM_LABELS = {
   xhs: '小红书',
   douyin: '抖音',
+  kuaishou: '快手',
 };
 
 export const mapPlatformOptions = (platforms = []) =>
