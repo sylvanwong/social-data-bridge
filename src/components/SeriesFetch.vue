@@ -177,7 +177,7 @@ const normalizeValue = (value, config) => {
   return value;
 };
 
-const writeDataToTable = async (table, list, targetTableId = "", offset = 0, totalCount = list.length) => {
+const writeDataToTable = async (table, list, isExistingTable = false, offset = 0, totalCount = list.length) => {
   const fieldMetaMap = await getFieldMetaMap(table);
   const fieldList = [];
 
@@ -185,7 +185,7 @@ const writeDataToTable = async (table, list, targetTableId = "", offset = 0, tot
     const fieldId = fieldMetaMap.get(config.name);
     if (!fieldId) continue;
     const field = await table.getFieldById(fieldId);
-    if (config.formatter && !targetTableId) {
+    if (config.formatter && !isExistingTable) {
       await field.setFormatter(config.formatter);
     }
     fieldList.push({ field, config });
@@ -265,7 +265,7 @@ const getList = async (task_id, targetTableId = "", page = 1, writeTableId = "")
         if (page === 1) {
           showToast(`准备处理 ${totalCount} 条数据...`, true);
         }
-        await writeDataToTable(table, data, currentTableId, (page - 1) * listPageSize, totalCount);
+        await writeDataToTable(table, data, Boolean(targetTableId), (page - 1) * listPageSize, totalCount);
 
         if (page * listPageSize < totalCount) {
           await getList(task_id, targetTableId, page + 1, currentTableId);
