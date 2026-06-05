@@ -218,6 +218,9 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
     const fieldList = [];
     for (const config of fields) {
       const field = await activeTable.getField(config.name);
+      if (config.formatter) {
+        await field.setFormatter(config.formatter);
+      }
       fieldList.push(field);
     }
     let records = [];

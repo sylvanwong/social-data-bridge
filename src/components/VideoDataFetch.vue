@@ -1,5 +1,5 @@
 <script setup>
-import { bitable, FieldType } from "@lark-base-open/js-sdk";
+import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ref, onMounted } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
@@ -22,14 +22,14 @@ const FIELD_CONFIG = [
   { name: "标题", type: FieldType.Text, getValue: (item) => item?.title ?? "" },
   { name: "标签文本", type: FieldType.Text, getValue: (item) => item?.caption ?? "" },
   // { name: "播放数", type: FieldType.Number, getValue: (item) => Number(item?.digg_count) || 0 },
-  { name: "点赞数", type: FieldType.Number, getValue: (item) => Number(item?.digg_count) || 0 },
-  { name: "评论数", type: FieldType.Number, getValue: (item) => Number(item?.comment_count) || 0 },
-  { name: "收藏数", type: FieldType.Number, getValue: (item) => Number(item?.collect_count) || 0 },
-  { name: "分享数", type: FieldType.Number, getValue: (item) => Number(item?.share_count) || 0 },
+  { name: "点赞数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
+  { name: "评论数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.comment_count) || 0 },
+  { name: "收藏数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.collect_count) || 0 },
+  { name: "分享数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.share_count) || 0 },
   { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
   { name: "下载链接", type: FieldType.Text, getValue: (item) => item?.download_addr ?? "" },
   { name: "封面", type: FieldType.Text, getValue: (item) => item?.origin_cover ?? "" },
-  { name: "时长", type: FieldType.Number, getValue: (item) => Number(item?.duration) || 0 },
+  { name: "时长", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.duration) || 0 },
   { name: "发布时间", type: FieldType.DateTime, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
   { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
 ];
@@ -222,6 +222,10 @@ const validateAndAddFields = async () => {
         type: fieldConfig.type,
         name: fieldConfig.name
       });
+      if (fieldConfig.formatter) {
+        const newField = await table.getFieldById(newFieldId);
+        await newField.setFormatter(fieldConfig.formatter);
+      }
       fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
       console.log(`字段 ${fieldConfig.name} 添加成功，ID: ${newFieldId}`);
     } catch (e) {

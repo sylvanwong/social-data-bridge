@@ -1,5 +1,5 @@
 <script setup>
-import { bitable, FieldType } from "@lark-base-open/js-sdk";
+import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ref, onMounted } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
@@ -21,10 +21,10 @@ const FIELD_CONFIG = [
   { name: "昵称", type: FieldType.Text, getValue: (item) => item?.nickname ?? "" },
   // { name: "头像", type: FieldType.Text, getValue: (item) => item?.avatar ?? "" },
   { name: "个人简介", type: FieldType.Text, getValue: (item) => item?.signature ?? "" },
-  { name: "粉丝数", type: FieldType.Number, getValue: (item) => Number(item?.follower_count) || 0 },
-  { name: "关注数", type: FieldType.Number, getValue: (item) => Number(item?.following_count) || 0 },
-  { name: "获赞数", type: FieldType.Number, getValue: (item) => Number(item?.total_favorited) || 0 },
-  { name: "作品数", type: FieldType.Number, getValue: (item) => Number(item?.aweme_count) || 0 },
+  { name: "粉丝数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.follower_count) || 0 },
+  { name: "关注数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.following_count) || 0 },
+  { name: "获赞数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.total_favorited) || 0 },
+  { name: "作品数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.aweme_count) || 0 },
   { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
   { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
 ];
@@ -154,6 +154,10 @@ const validateAndAddFields = async () => {
           type: fieldConfig.type,
           name: fieldConfig.name
         });
+        if (fieldConfig.formatter) {
+          const newField = await table.getFieldById(newFieldId);
+          await newField.setFormatter(fieldConfig.formatter);
+        }
         fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
       } catch (e) {
         ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
