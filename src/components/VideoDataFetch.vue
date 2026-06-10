@@ -19,6 +19,7 @@ const formData = ref({
 const FIELD_CONFIG = [
   { name: "作品ID", type: FieldType.Text, getValue: (item) => item?.social_id ?? "" },
   { name: "作者名称", type: FieldType.Text, getValue: (item) => item?.nickname ?? "" },
+  { name: "作者主页链接", type: FieldType.Url, getValue: (item) => item?.profile_url ?? "" },
   { name: "标题", type: FieldType.Text, getValue: (item) => item?.title ?? "" },
   { name: "标签文本", type: FieldType.Text, getValue: (item) => item?.caption ?? "" },
   // { name: "播放数", type: FieldType.Number, getValue: (item) => Number(item?.digg_count) || 0 },
