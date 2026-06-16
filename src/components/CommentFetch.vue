@@ -38,11 +38,23 @@ const FIELD_CONFIG = [
   { name: "评论时间", type: FieldType.DateTime, getValue: (item) => (item?.t_create ? item.t_create * 1000 : "") },
 ];
 const FIELD_TYPE_NAME = {
-  [FieldType.Text]: 'Text',
-  [FieldType.Number]: 'Number',
-  [FieldType.DateTime]: 'DateTime',
-  [FieldType.Url]: 'Url',
-  [FieldType.Attachment]: 'Attachment',
+  [FieldType.Text]: '文本',
+  [FieldType.Number]: '数字',
+  [FieldType.SingleSelect]: '单选',
+  [FieldType.DateTime]: '日期时间',
+  [FieldType.Url]: '链接',
+  [FieldType.Attachment]: '附件',
+};
+
+const getAllowedFieldTypes = (config) => {
+  if (config.name === '作者名称' || config.name === '平台') {
+    return [FieldType.Text, FieldType.SingleSelect];
+  }
+  return [config.type];
+};
+
+const isFieldTypeCompatible = (fieldType, config) => {
+  return getAllowedFieldTypes(config).includes(fieldType);
 };
 
 const reply_pages_options = [
@@ -201,7 +213,11 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
         const record = [];
         for (const config of availableMappings) {
           const field = existingFieldMap.get(config.name);
-          record.push(await field.createCell(config.getValue(item)));
+          const fieldType = await field.getType();
+          const value = (config.name === '作者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect
+            ? (config.getValue(item) || null)
+            : config.getValue(item);
+          record.push(await field.createCell(value));
         }
         records.push(record);
       }
@@ -228,7 +244,11 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
       let record = [];
       for (let i = 0; i < fields.length; i++) {
         const mapping = FIELD_CONFIG[i];
-        record.push(await fieldList[i].createCell(mapping.getValue(item)));
+        const fieldType = await fieldList[i].getType();
+        const value = (mapping.name === '作者名称' || mapping.name === '平台') && fieldType === FieldType.SingleSelect
+          ? (mapping.getValue(item) || null)
+          : mapping.getValue(item);
+        record.push(await fieldList[i].createCell(value));
       }
       records.push(record);
     }
@@ -364,8 +384,8 @@ const validateTableFields = async (tableId) => {
       const fieldId = fieldIdByName.get(config.name);
       if (!fieldId) continue;
       const fieldMeta = fieldMetaList.find(meta => meta.id === fieldId);
-      if (config.type && fieldMeta.type !== config.type) {
-        ElNotification({ title: '出错', message: `字段类型不匹配:字段"${config.name}" 的类型是 ${FIELD_TYPE_NAME[fieldMeta.type] || fieldMeta.type}，但Schema定义为 ${FIELD_TYPE_NAME[config.type] || config.type}，无法写入数据`, type: 'error', duration: 0 });
+      if (config.type && !isFieldTypeCompatible(fieldMeta.type, config)) {
+        ElNotification({ title: '出错', message: `字段类型不匹配:字段"${config.name}" 的类型是 ${FIELD_TYPE_NAME[fieldMeta.type] || fieldMeta.type}，仅支持 ${getAllowedFieldTypes(config).map(type => FIELD_TYPE_NAME[type] || type).join(' / ')}`, type: 'error', duration: 0 });
         return false;
       }
     }

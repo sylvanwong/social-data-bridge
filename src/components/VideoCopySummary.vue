@@ -24,6 +24,21 @@ const FIELD_CONFIG = [
   // { name: "失败原因", type: FieldType.Text, getValue: (item) => item?.error || item?.summary_error || "" },
   // { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.updated_at ? item.updated_at * 1000 : Date.now()) },
 ];
+const FIELD_TYPE_NAME = {
+  [FieldType.Text]: '文本',
+  [FieldType.SingleSelect]: '单选',
+};
+
+const getAllowedFieldTypes = (config) => {
+  if (config.name === '平台') {
+    return [FieldType.Text, FieldType.SingleSelect];
+  }
+  return [config.type];
+};
+
+const isFieldTypeCompatible = (fieldType, config) => {
+  return getAllowedFieldTypes(config).includes(fieldType);
+};
 
 const fieldOptions = ref([]);
 const loading = ref(false);
@@ -178,17 +193,17 @@ const validateAndAddFields = async () => {
       const fieldMeta = fieldMetaMap.get(config.name);
       if (!fieldMeta) {
         missingFields.push(config);
-      } else if (fieldMeta.type !== config.type) {
+      } else if (!isFieldTypeCompatible(fieldMeta.type, config)) {
         typeMismatchFields.push({
           name: config.name,
-          expected: config.type,
+          expected: getAllowedFieldTypes(config).map(type => FIELD_TYPE_NAME[type] || type).join(' / '),
           actual: fieldMeta.type,
         });
       }
     }
 
     if (typeMismatchFields.length > 0) {
-      const errorMsg = typeMismatchFields.map((field) => `"${field.name}" 类型不匹配`).join(", ");
+      const errorMsg = typeMismatchFields.map((field) => `"${field.name}" 类型不匹配，仅支持${field.expected}`).join(", ");
       ElNotification({ message: `字段类型错误: ${errorMsg}`, type: "error", duration: 0 });
       return null;
     }
@@ -232,7 +247,11 @@ const writeDataToRecord = async (recordId, item, fieldNameToId) => {
 
       try {
         const field = await table.getFieldById(fieldId);
-        await field.setValue(recordId, config.getValue(item));
+        const fieldType = await field.getType();
+        const value = config.name === '平台' && fieldType === FieldType.SingleSelect
+          ? (config.getValue(item) || null)
+          : config.getValue(item);
+        await field.setValue(recordId, value);
       } catch (error) {
         console.error(`写入字段 ${config.name} 失败:`, error);
       }

@@ -47,6 +47,31 @@ const FIELD_MAPPING = [
   { key: 'share_url', name: '短剧链接', type: FieldType.Text },
   { key: 'create_time', name: '发布时间', type: FieldType.DateTime, isTimestamp: true },
 ];
+const FIELD_TYPE_NAME = {
+  [FieldType.Text]: '文本',
+  [FieldType.Number]: '数字',
+  [FieldType.SingleSelect]: '单选',
+  [FieldType.DateTime]: '日期时间',
+  [FieldType.Url]: '链接',
+  [FieldType.Attachment]: '附件',
+};
+
+const getAllowedFieldTypes = (config) => {
+  if (config.key === 'nickname' || config.key === 'social_type') {
+    return [FieldType.Text, FieldType.SingleSelect];
+  }
+  return [config.type];
+};
+
+const isFieldTypeCompatible = (fieldType, config) => {
+  return getAllowedFieldTypes(config).includes(fieldType);
+};
+
+const getExpectedFieldTypeName = (config) => {
+  return getAllowedFieldTypes(config)
+    .map(type => FIELD_TYPE_NAME[type] || type)
+    .join(' / ');
+};
 
 const getTableName = (list) => {
   const firstItem = list[0];
@@ -119,8 +144,8 @@ const setupTableFields = async (tableId, isNewTable = false) => {
     if (fieldId) {
       const field = await table.getFieldById(fieldId);
       const fieldType = await field.getType();
-      if (fieldType !== config.type) {
-        throw new Error(`字段类型不匹配: ${config.name}`);
+      if (!isFieldTypeCompatible(fieldType, config)) {
+        throw new Error(`字段类型不匹配: ${config.name}，仅支持${getExpectedFieldTypeName(config)}`);
       }
       continue;
     }
@@ -167,12 +192,21 @@ const createSequentialTable = async (baseTableName) => {
   return await bitable.base.addTable({ name: `${baseTableName}${maxIndex + 1}` });
 };
 
-const normalizeValue = (value, config) => {
+const normalizeValue = (value, config, fieldType) => {
   if (config.isTimestamp && value) {
     return value * 1000;
   }
+  if ((config.key === 'nickname' || config.key === 'social_type') && fieldType === FieldType.SingleSelect) {
+    return value ? value : null;
+  }
+  if ((config.key === 'nickname' || config.key === 'social_type') && value && typeof value === 'string') {
+    return value;
+  }
+  if ((config.key === 'nickname' || config.key === 'social_type') && value !== undefined && value !== null) {
+    return value;
+  }
   if (value === undefined || value === null) {
-    return "";
+    return null;
   }
   return value;
 };
@@ -195,7 +229,8 @@ const writeDataToTable = async (table, list, isExistingTable = false, offset = 0
   for (const item of list) {
     const record = [];
     for (const { field, config } of fieldList) {
-      record.push(await field.createCell(normalizeValue(item[config.key], config)));
+      const fieldType = await field.getType();
+      record.push(await field.createCell(normalizeValue(item[config.key], config, fieldType)));
     }
     records.push(record);
     showToast(`正在写入第 ${offset + records.length}/${totalCount} 条...`, true);
