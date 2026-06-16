@@ -211,7 +211,7 @@ const writeDataToRecord = async (recordId, item, fieldNameToId) => {
       try {
         const field = await table.getFieldById(fieldId);
         const fieldType = await field.getType();
-        const value = config.name === '平台' && fieldType === FieldType.SingleSelect
+        const value = (config.name === '平台' || config.name === '昵称') && fieldType === FieldType.SingleSelect
           ? (config.getValue(item) || null)
           : config.getValue(item);
         await field.setValue(recordId, value);
