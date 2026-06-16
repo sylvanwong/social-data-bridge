@@ -13,6 +13,31 @@ const FIELD_MAPPING = [
   { key: 'tag', name: '标签', type: FieldType.Text },
   { key: 'social_type', name: '平台', type: FieldType.Text },
 ];
+const FIELD_TYPE_NAME = {
+  [FieldType.Text]: '文本',
+  [FieldType.Number]: '数字',
+  [FieldType.SingleSelect]: '单选',
+  [FieldType.DateTime]: '日期时间',
+  [FieldType.Url]: '链接',
+  [FieldType.Attachment]: '附件',
+};
+
+const getAllowedFieldTypes = (config) => {
+  if (config.key === 'social_type') {
+    return [FieldType.Text, FieldType.SingleSelect];
+  }
+  return [config.type];
+};
+
+const isFieldTypeCompatible = (fieldType, config) => {
+  return getAllowedFieldTypes(config).includes(fieldType);
+};
+
+const getExpectedFieldTypeName = (config) => {
+  return getAllowedFieldTypes(config)
+    .map(type => FIELD_TYPE_NAME[type] || type)
+    .join(' / ');
+};
 
 const props = defineProps({
   api_key: String,
@@ -91,8 +116,8 @@ const setupTableFields = async (tableId, isNewTable = false) => {
     if (fieldId) {
       const field = await table.getFieldById(fieldId);
       const fieldType = await field.getType();
-      if (fieldType !== config.type) {
-        throw new Error(`字段类型不匹配: ${config.name}`);
+      if (!isFieldTypeCompatible(fieldType, config)) {
+        throw new Error(`字段类型不匹配: ${config.name}，仅支持${getExpectedFieldTypeName(config)}`);
       }
       continue;
     }
@@ -165,7 +190,10 @@ watch(
   }
 );
 
-const normalizeValue = (value) => {
+const normalizeValue = (value, config, fieldType) => {
+  if (config?.key === 'social_type' && fieldType === FieldType.SingleSelect) {
+    return value ? value : null;
+  }
   if (value === undefined || value === null) {
     return "";
   }
@@ -209,7 +237,8 @@ const writeDataToTable = async (table, list, isExistingTable = false) => {
   for (const item of list) {
     const record = [];
     for (const { field, config } of fieldList) {
-      record.push(await field.createCell(normalizeValue(item[config.key])));
+      const fieldType = await field.getType();
+      record.push(await field.createCell(normalizeValue(item[config.key], config, fieldType)));
     }
     records.push(record);
     showToast(`正在写入第 ${records.length}/${list.length} 条...`, true);

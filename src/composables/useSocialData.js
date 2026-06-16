@@ -36,7 +36,7 @@ export const FIELD_TYPE_NAME = {
 };
 
 const getAllowedFieldTypes = (config) => {
-  if (config.key === 'nickname' || config.key === 'note_type') {
+  if (config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
   return [config.type];
@@ -52,17 +52,28 @@ const getExpectedFieldTypeName = (config) => {
     .join('、');
 };
 
-const normalizeCellValue = (value, config, fieldType) => {
+const normalizeTextCompatibleValue = (value) => {
+  return value ?? "";
+};
+
+const normalizeSelectCompatibleValue = (value) => {
+  if (!value) {
+    return null;
+  }
+  return String(value).trim() || null;
+};
+
+const normalizeCellValue = async (table, field, value, config, fieldType) => {
   let nextValue = value;
   if (config.isTimestamp && nextValue) {
     nextValue = nextValue * 1000;
   }
 
-  if ((config.key === 'nickname' || config.key === 'note_type') && fieldType === FieldType.SingleSelect) {
-    return nextValue ? nextValue : null;
+  if ((config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') && fieldType === FieldType.SingleSelect) {
+    return normalizeSelectCompatibleValue(nextValue);
   }
 
-  return nextValue;
+  return normalizeTextCompatibleValue(nextValue);
 };
 
 export const showErrorMsg = (message) => {
@@ -298,7 +309,7 @@ export const useSocialData = (getTableName, api_key) => {
           if (!targetTableId && config.formatter) {
             await field.setFormatter(config.formatter);
           }
-          const value = normalizeCellValue(item[config.key], config, fieldType);
+          const value = await normalizeCellValue(activeTable, field, item[config.key], config, fieldType);
           record.push(await field.createCell(value));
         }
         records.push(record);

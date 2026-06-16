@@ -28,6 +28,25 @@ const FIELD_CONFIG = [
   { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
   { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
 ];
+const FIELD_TYPE_NAME = {
+  [FieldType.Text]: '文本',
+  [FieldType.Number]: '数字',
+  [FieldType.SingleSelect]: '单选',
+  [FieldType.DateTime]: '日期时间',
+  [FieldType.Url]: '链接',
+  [FieldType.Attachment]: '附件',
+};
+
+const getAllowedFieldTypes = (config) => {
+  if (config.name === '平台' || config.name === '昵称') {
+    return [FieldType.Text, FieldType.SingleSelect];
+  }
+  return [config.type];
+};
+
+const isFieldTypeCompatible = (fieldType, config) => {
+  return getAllowedFieldTypes(config).includes(fieldType);
+};
 
 const fieldOptions = ref([]);
 const loading = ref(false);
@@ -133,17 +152,17 @@ const validateAndAddFields = async () => {
       const fieldMeta = fieldMetaMap.get(config.name);
       if (!fieldMeta) {
         missingFields.push(config);
-      } else if (fieldMeta.type !== config.type) {
+      } else if (!isFieldTypeCompatible(fieldMeta.type, config)) {
         typeMismatchFields.push({
           name: config.name,
-          expected: config.type,
+          expected: getAllowedFieldTypes(config).map(type => FIELD_TYPE_NAME[type] || type).join(' / '),
           actual: fieldMeta.type
         });
       }
     }
 
     if (typeMismatchFields.length > 0) {
-      const errorMsg = typeMismatchFields.map(f => `"${f.name}" 类型不匹配`).join(', ');
+      const errorMsg = typeMismatchFields.map(f => `"${f.name}" 类型不匹配，仅支持${f.expected}`).join(', ');
       ElNotification({ message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 0 });
       return null;
     }
@@ -191,7 +210,10 @@ const writeDataToRecord = async (recordId, item, fieldNameToId) => {
 
       try {
         const field = await table.getFieldById(fieldId);
-        const value = config.getValue(item);
+        const fieldType = await field.getType();
+        const value = (config.name === '平台' || config.name === '昵称') && fieldType === FieldType.SingleSelect
+          ? (config.getValue(item) || null)
+          : config.getValue(item);
         await field.setValue(recordId, value);
       } catch (e) {
         console.error(`写入字段 ${config.name} 失败:`, e);

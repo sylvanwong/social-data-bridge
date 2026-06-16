@@ -42,6 +42,22 @@ const FIELD_CONFIG = [
     return [];
   }, getFileName: () => 'download' },
 ];
+const FIELD_TYPE_NAME = {
+  [FieldType.Text]: '文本',
+  [FieldType.SingleSelect]: '单选',
+  [FieldType.Attachment]: '附件',
+};
+
+const getAllowedFieldTypes = (config) => {
+  if (config.name === '平台') {
+    return [FieldType.Text, FieldType.SingleSelect];
+  }
+  return [config.type];
+};
+
+const isFieldTypeCompatible = (fieldType, config) => {
+  return getAllowedFieldTypes(config).includes(fieldType);
+};
 
 const buildProxyDownloadUrl = (url, fileName) => {
   const params = new URLSearchParams({
@@ -175,17 +191,17 @@ const validateAndAddFields = async () => {
       const fieldMeta = fieldMetaMap.get(config.name);
       if (!fieldMeta) {
         missingFields.push(config);
-      } else if (fieldMeta.type !== config.type) {
+      } else if (!isFieldTypeCompatible(fieldMeta.type, config)) {
         typeMismatchFields.push({
           name: config.name,
-          expected: config.type,
+          expected: getAllowedFieldTypes(config).map(type => FIELD_TYPE_NAME[type] || type).join(' / '),
           actual: fieldMeta.type
         });
       }
     }
 
     if (typeMismatchFields.length > 0) {
-      const errorMsg = typeMismatchFields.map(f => `"${f.name}" 类型不匹配`).join(', ');
+      const errorMsg = typeMismatchFields.map(f => `"${f.name}" 类型不匹配，仅支持${f.expected}`).join(', ');
       ElNotification({ message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 0 });
       return null;
     }
@@ -267,7 +283,10 @@ const writeDataToRecord = async (recordId, item, fieldNameToId) => {
             }
           }
         } else {
-          const value = config.getValue(item);
+          const fieldType = await field.getType();
+          const value = config.name === '平台' && fieldType === FieldType.SingleSelect
+            ? (config.getValue(item) || null)
+            : config.getValue(item);
           await field.setValue(recordId, value);
         }
       } catch (e) {
