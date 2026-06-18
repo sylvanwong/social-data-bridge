@@ -232,11 +232,18 @@ const extractProfileLink = (value) => {
     return value.trim() || null;
   }
 
+  if (typeof value === 'object') {
+    const keys = ['link', 'url', 'text', 'content', 'value', 'displayText'];
+    for (const key of keys) {
+      const nested = extractProfileLink(value[key]);
+      if (nested) return nested;
+    }
+  }
+
   if (Array.isArray(value)) {
     for (const item of value) {
-      if (item.type === 'url' && item.link) {
-        return item.link.trim() || null;
-      }
+      const nested = extractProfileLink(item);
+      if (nested) return nested;
     }
   }
 
@@ -253,14 +260,18 @@ const getCellValuesByFieldId = async (recordIdList, fieldId) => {
         const cell = await field.getCell(recordId);
         const value = await cell.getValue();
         const url = extractProfileLink(value);
-        return url ? { recordId, url } : null;
+        if (!url) {
+          return null;
+        }
+
+        return { recordId, url };
       } catch (e) {
         return null;
       }
     })
   );
 
-  return rows.filter(item => item && item.url);
+  return rows.filter(item => item && typeof item.url === 'string' && item.url.trim());
 };
 
 const handleSubmit = async () => {
@@ -384,7 +395,7 @@ onMounted(() => {
           <div slot="label" class="c-label">
             博主主页链接
             <el-tooltip effect="dark" placement="top">
-              <template #content>支持抖音、小红书、快手平台的博主主页链接</template>
+              <template #content>支持抖音、小红书、快手、微博、微信平台的博主主页链接</template>
               <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                 class="help-icon" />
             </el-tooltip>
