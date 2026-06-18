@@ -26,6 +26,8 @@ const TYPE_OPTIONS = [
   { value: "xhs", label: "小红书" },
   { value: "douyin", label: "抖音" },
   { value: "kuaishou", label: "快手" },
+  { value: "weibo", label: "微博" },
+  { value: "wechat", label: "微信" },
 ]
 const social_type_options = ref([...TYPE_OPTIONS]);
 
