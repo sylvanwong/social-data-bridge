@@ -203,7 +203,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <path d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
             </svg>
           </div>
-          <span class="func-name">小红书下载</span>
+          <span class="func-name">链接转附件</span>
         </div>
       </div>
     </div>
@@ -238,7 +238,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   <!-- 二级页面：视频文案摘要 -->
   <VideoCopySummary v-if="currentPage === 'videoCopySummary'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：小红书下载 -->
+  <!-- 二级页面：链接转附件 -->
   <XhsDownload v-if="currentPage === 'xhsDownload'" :api_key="api_key" @back="currentPage = 'home'" />
 </template>
 

@@ -24,6 +24,9 @@ const listPageSize = 20;
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
+const FIELD_SELECTION_STORAGE_KEY = 'series_fetch_selected_fields_v1';
+const selectedFieldKeys = ref([]);
+const fieldSelectionReady = ref(false);
 
 const pages_options = [
   { value: 1, label: "获取第1页" },
@@ -34,18 +37,18 @@ const pages_options = [
 ];
 
 const FIELD_MAPPING = [
-  { key: 'series_id', name: '短剧ID', type: FieldType.Text },
-  { key: 'title', name: '短剧名', type: FieldType.Text },
-  { key: 'cover_url', name: '封面', type: FieldType.Text },
-  { key: 'play_count', name: '播放数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
-  { key: 'total_episode_count', name: '总集数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
-  { key: 'updated_episode_count', name: '最新集数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
-  { key: 'description', name: '剧情简介', type: FieldType.Text },
-  { key: 'nickname', name: '作者名', type: FieldType.Text },
-  { key: 'user_id', name: '作者ID', type: FieldType.Text },
-  { key: 'social_type', name: '平台', type: FieldType.Text },
-  { key: 'share_url', name: '短剧链接', type: FieldType.Text },
-  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, isTimestamp: true },
+  { key: 'series_id', name: '短剧ID', type: FieldType.Text, defaultSelected: true, required: true },
+  { key: 'title', name: '短剧名', type: FieldType.Text, defaultSelected: true },
+  { key: 'cover_url', name: '封面', type: FieldType.Text, defaultSelected: true },
+  { key: 'play_count', name: '播放数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'total_episode_count', name: '总集数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'updated_episode_count', name: '最新集数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'description', name: '剧情简介', type: FieldType.Text, defaultSelected: true },
+  { key: 'nickname', name: '作者名', type: FieldType.Text, defaultSelected: true },
+  { key: 'user_id', name: '作者ID', type: FieldType.Text, defaultSelected: true },
+  { key: 'social_type', name: '平台', type: FieldType.Text, defaultSelected: true },
+  { key: 'share_url', name: '短剧链接', type: FieldType.Text, defaultSelected: true },
+  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true },
 ];
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
@@ -76,6 +79,46 @@ const getExpectedFieldTypeName = (config) => {
 const getTableName = (list) => {
   const firstItem = list[0];
   return firstItem?.nickname ? `${firstItem.nickname}的短剧列表` : '主页短剧获取';
+};
+
+const getDefaultSelectedFieldKeys = () => FIELD_MAPPING
+  .filter(field => field.defaultSelected || field.required)
+  .map(field => field.key);
+
+const getActiveFieldMapping = () => {
+  const selectedKeySet = new Set(selectedFieldKeys.value);
+  return FIELD_MAPPING.filter(field => field.required || selectedKeySet.has(field.key));
+};
+
+const loadSelectedFieldKeys = async () => {
+  const defaultKeys = getDefaultSelectedFieldKeys();
+
+  try {
+    const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+
+    if (!Array.isArray(savedValue)) {
+      selectedFieldKeys.value = defaultKeys;
+      return;
+    }
+
+    const validKeys = savedValue.filter(key => FIELD_MAPPING.some(field => field.key === key));
+    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const mergedKeys = Array.from(new Set([...validKeys, ...requiredKeys]));
+    selectedFieldKeys.value = mergedKeys.length > 0 ? mergedKeys : defaultKeys;
+  } catch (error) {
+    console.error('读取字段勾选状态失败:', error);
+    selectedFieldKeys.value = defaultKeys;
+  }
+};
+
+const saveSelectedFieldKeys = async (keys) => {
+  try {
+    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const nextKeys = Array.from(new Set([...keys, ...requiredKeys]));
+    await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...nextKeys]);
+  } catch (error) {
+    console.error('保存字段勾选状态失败:', error);
+  }
 };
 
 const resetParams = () => {
@@ -214,8 +257,9 @@ const normalizeValue = (value, config, fieldType) => {
 const writeDataToTable = async (table, list, isExistingTable = false, offset = 0, totalCount = list.length) => {
   const fieldMetaMap = await getFieldMetaMap(table);
   const fieldList = [];
+  const activeFieldMapping = getActiveFieldMapping();
 
-  for (const config of FIELD_MAPPING) {
+  for (const config of activeFieldMapping) {
     const fieldId = fieldMetaMap.get(config.name);
     if (!fieldId) continue;
     const field = await table.getFieldById(fieldId);
@@ -388,6 +432,8 @@ onMounted(async () => {
   if (series_profile_url && typeof series_profile_url === "string") {
     formData.value.profile_url = series_profile_url;
   }
+  await loadSelectedFieldKeys();
+  fieldSelectionReady.value = true;
 });
 
 const commit = () => {
@@ -416,6 +462,22 @@ const commit = () => {
   getSeriesData("");
   bitable.bridge.setData("series_profile_url", profile_url);
 };
+
+watch(selectedFieldKeys, (keys) => {
+  if (!fieldSelectionReady.value) {
+    return;
+  }
+
+  const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+  const mergedKeys = Array.from(new Set([...keys, ...requiredKeys]));
+
+  if (mergedKeys.length !== keys.length) {
+    selectedFieldKeys.value = mergedKeys;
+    return;
+  }
+
+  saveSelectedFieldKeys(mergedKeys);
+}, { deep: true });
 </script>
 
 <template>
@@ -479,6 +541,21 @@ const commit = () => {
           <el-select v-model="formData.pages" placeholder="请选择" style="width: 100%">
             <el-option v-for="option in pages_options" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
+        </el-form-item>
+
+        <el-form-item label="" style="margin-top: 12px">
+          <div class="c-label">选择需要的字段</div>
+          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+            <el-checkbox
+              v-for="field in FIELD_MAPPING"
+              :key="field.key"
+              :label="field.key"
+              :disabled="field.required"
+              class="field-checkbox-item"
+            >
+              {{ field.name }}
+            </el-checkbox>
+          </el-checkbox-group>
         </el-form-item>
       </el-form>
 
@@ -620,6 +697,61 @@ const commit = () => {
   width: 16px;
   height: 16px;
   margin-left: 4px;
+}
+
+.field-checkbox-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  width: 100%;
+}
+
+.field-checkbox-item {
+  margin-right: 0;
+}
+
+.field-checkbox-group :deep(.el-checkbox) {
+  margin-right: 0;
+  align-items: center;
+}
+
+.field-checkbox-group :deep(.el-checkbox__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  line-height: 22px;
+}
+
+.field-checkbox-group :deep(.el-checkbox__inner) {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox:hover .el-checkbox__inner) {
+  border-color: #86909C;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background: #A8071A;
+  border-color: #A8071A;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner) {
+  background: #F7F8FA;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner::after) {
+  border-color: #C9CDD4;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled + .el-checkbox__label) {
+  color: #C9CDD4;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
+  color: #1D2129;
 }
 
 .toast-wrap {

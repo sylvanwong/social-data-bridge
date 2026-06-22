@@ -4,25 +4,25 @@ import { ref, onUnmounted } from "vue";
 import request from '@/utils/request'
 
 export const FIELD_MAPPING = [
-  { key: 'aweme_id', name: '视频编号', type: FieldType.Text },
-  { key: 'title', name: '视频标题', type: FieldType.Text },
-  { key: 'tags', name: '标签', type: FieldType.Text },
-  { key: 'user_id', name: '用户ID', type: FieldType.Text },
-  { key: 'nickname', name: '作者', type: FieldType.Text },
-  { key: 'avatar', name: '博主头像', type: FieldType.Text },
-  { key: 'note_type', name: '笔记类型', type: FieldType.Text },
-  { key: 'digg_count', name: '点赞数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
-  { key: 'comment_count', name: '评论数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
-  { key: 'collect_count', name: '收藏数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
-  { key: 'share_count', name: '分享数', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
-  { key: 'social_type', name: '平台', type: FieldType.Text },
-  { key: 'share_url', name: '视频链接', type: FieldType.Text },
-  { key: 'play_url', name: '下载链接', type: FieldType.Text },
-  { key: 'cover_url', name: '封面', type: FieldType.Text },
-  { key: 'duration', name: '时长', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
-  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, isTimestamp: true },
-  { key: 'last_update_time', name: '最后更新时间', type: FieldType.DateTime, isTimestamp: true },
-  { key: 'ctime', name: '提取时间', type: FieldType.DateTime, isTimestamp: true },
+  { key: 'aweme_id', name: '视频编号', type: FieldType.Text, defaultSelected: true, required: true },
+  { key: 'title', name: '视频标题', type: FieldType.Text, defaultSelected: true },
+  { key: 'tags', name: '标签', type: FieldType.Text, defaultSelected: true },
+  { key: 'user_id', name: '用户ID', type: FieldType.Text, defaultSelected: true },
+  { key: 'nickname', name: '作者', type: FieldType.Text, defaultSelected: true },
+  { key: 'avatar', name: '博主头像', type: FieldType.Text, defaultSelected: true },
+  { key: 'note_type', name: '笔记类型', type: FieldType.Text, defaultSelected: true },
+  { key: 'digg_count', name: '点赞数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'comment_count', name: '评论数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'collect_count', name: '收藏数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'share_count', name: '分享数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'social_type', name: '平台', type: FieldType.Text, defaultSelected: true },
+  { key: 'share_url', name: '视频链接', type: FieldType.Text, defaultSelected: true },
+  { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
+  { key: 'cover_url', name: '封面', type: FieldType.Text, defaultSelected: true },
+  { key: 'duration', name: '时长', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true },
+  { key: 'last_update_time', name: '最后更新时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true },
+  { key: 'ctime', name: '提取时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true },
 ];
 
 export const FIELD_TYPE_NAME = {
@@ -177,6 +177,15 @@ export const validateTableFields = async (tableId) => {
   }
 };
 
+export const getDefaultSelectedFieldKeys = () => FIELD_MAPPING
+  .filter(field => field.defaultSelected || field.required)
+  .map(field => field.key);
+
+export const getActiveFieldMapping = (selectedFieldKeys = []) => {
+  const selectedKeySet = new Set(selectedFieldKeys);
+  return FIELD_MAPPING.filter(field => field.required || selectedKeySet.has(field.key));
+};
+
 export const useSocialData = (getTableName, api_key) => {
   const loading = ref(false);
   const profileProgress = ref({ text: "", done: false });
@@ -213,7 +222,7 @@ export const useSocialData = (getTableName, api_key) => {
     timer.value = null;
   };
 
-  const getList = async (task_id, type, targetTableId = "") => {
+  const getList = async (task_id, type, targetTableId = "", selectedFieldKeys = []) => {
     await request({
       url: "/social/api/v1/feishu/post/list",
       method: "post",
@@ -226,9 +235,9 @@ export const useSocialData = (getTableName, api_key) => {
           const { count, data } = res.data;
           if (!type) {
             total = Math.ceil(count / page_size);
-            createAndWriteData(data, '', task_id, targetTableId);
+            createAndWriteData(data, '', task_id, targetTableId, selectedFieldKeys);
           } else if (type == 'next') {
-            createAndWriteData(data, type, task_id, targetTableId);
+            createAndWriteData(data, type, task_id, targetTableId, selectedFieldKeys);
           }
         } else {
           loading.value = false;
@@ -242,12 +251,14 @@ export const useSocialData = (getTableName, api_key) => {
       });
   };
 
-  const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
+  const createAndWriteData = async (list, type, task_id, targetTableId = "", selectedFieldKeys = []) => {
     if (!list || list.length == 0) {
       ElMessage({ message: "获取数据异常，请稍后重试", type: "warning", plain: true });
       resetParams();
       return;
     }
+    const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys);
+
     try {
       if (!type && !targetTableId) {
         const tableName = getTableName(list);
@@ -261,7 +272,7 @@ export const useSocialData = (getTableName, api_key) => {
       const fieldMetaList = await activeTable.getFieldMetaList();
       const fieldIdByName = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
       const fieldList = [];
-      for (const config of FIELD_MAPPING) {
+      for (const config of activeFieldMapping) {
         const fieldId = fieldIdByName.get(config.name);
         if (!fieldId) {
           fieldList.push({ field: null, config });
@@ -318,7 +329,7 @@ export const useSocialData = (getTableName, api_key) => {
 
       if (total > page) {
         page += 1;
-        getList(task_id, 'next', targetTableId);
+        getList(task_id, 'next', targetTableId, selectedFieldKeys);
         return;
       } else {
         resetParams();
@@ -329,7 +340,7 @@ export const useSocialData = (getTableName, api_key) => {
         const tableName = getTableName(list);
         const { tableId: newTableId } = await createSequentialTable(tableName);
         await setupTableFields(newTableId);
-        await createAndWriteData(list, type, task_id, newTableId);
+        await createAndWriteData(list, type, task_id, newTableId, selectedFieldKeys);
         ElNotification({ title: '温馨提示', message: '当前多维表格已达到单表存储上限！已为您自动生成新表格展示全部数据', type: 'success', duration: 3000 });
         return;
       } catch (retryError) {

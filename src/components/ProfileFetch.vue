@@ -3,7 +3,7 @@ import { bitable } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
 import { ref, onMounted, onUnmounted, watch } from "vue";
 import request from '@/utils/request'
-import { useSocialData, showErrorMsg } from '@/composables/useSocialData'
+import { useSocialData, showErrorMsg, FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 
 const props = defineProps({
   api_key: String,
@@ -11,6 +11,9 @@ const props = defineProps({
 
 const formData = ref({ radio: 1, url: "", pages: 1, table_id: "" });
 const table_options = ref([]);
+const FIELD_SELECTION_STORAGE_KEY = 'profile_batch_selected_fields_v1';
+const selectedFieldKeys = ref([]);
+const fieldSelectionReady = ref(false);
 
 const pages_options = [
   { value: 0, label: "全量获取" },
@@ -39,6 +42,37 @@ const {
 } = useSocialData(getTableName, props.api_key);
 
 const timer = ref(null);
+
+const loadSelectedFieldKeys = async () => {
+  const defaultKeys = getDefaultSelectedFieldKeys();
+
+  try {
+    const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+
+    if (!Array.isArray(savedValue)) {
+      selectedFieldKeys.value = defaultKeys;
+      return;
+    }
+
+    const validKeys = savedValue.filter(key => FIELD_MAPPING.some(field => field.key === key));
+    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const mergedKeys = Array.from(new Set([...validKeys, ...requiredKeys]));
+    selectedFieldKeys.value = mergedKeys.length > 0 ? mergedKeys : defaultKeys;
+  } catch (error) {
+    console.error('读取字段勾选状态失败:', error);
+    selectedFieldKeys.value = defaultKeys;
+  }
+};
+
+const saveSelectedFieldKeys = async (keys) => {
+  try {
+    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const nextKeys = Array.from(new Set([...keys, ...requiredKeys]));
+    await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...nextKeys]);
+  } catch (error) {
+    console.error('保存字段勾选状态失败:', error);
+  }
+};
 
 const getProfileTask = async (task_id, onSuccess) => {
   await request({
@@ -70,7 +104,7 @@ const getProfileTask = async (task_id, onSuccess) => {
 
 const getProfileTaskInterval = (task_id, targetTableId = "") => {
   pollTaskStatus(task_id, getProfileTask, () => {
-    getList(task_id, "", targetTableId);
+    getList(task_id, "", targetTableId, selectedFieldKeys.value);
   });
 };
 
@@ -133,6 +167,8 @@ onMounted(async () => {
   if (profile_url && typeof profile_url == "string") {
     formData.value.url = profile_url;
   }
+  await loadSelectedFieldKeys();
+  fieldSelectionReady.value = true;
 });
 
 const commit = () => {
@@ -163,6 +199,22 @@ const commit = () => {
   getProfileData("");
   bitable.bridge.setData("profile_url", formData.value.url);
 };
+
+watch(selectedFieldKeys, (keys) => {
+  if (!fieldSelectionReady.value) {
+    return;
+  }
+
+  const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+  const mergedKeys = Array.from(new Set([...keys, ...requiredKeys]));
+
+  if (mergedKeys.length !== keys.length) {
+    selectedFieldKeys.value = mergedKeys;
+    return;
+  }
+
+  saveSelectedFieldKeys(mergedKeys);
+}, { deep: true });
 </script>
 
 <template>
@@ -212,6 +264,21 @@ const commit = () => {
           <el-select v-model="formData.pages" placeholder="请选择" style="width: 100%">
             <el-option v-for="tl in pages_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
+        </el-form-item>
+
+        <el-form-item label="" style="margin-top: 12px">
+          <div slot="label" class="c-label">选择需要的字段</div>
+          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+            <el-checkbox
+              v-for="field in FIELD_MAPPING"
+              :key="field.key"
+              :label="field.key"
+              :disabled="field.required"
+              class="field-checkbox-item"
+            >
+              {{ field.name }}
+            </el-checkbox>
+          </el-checkbox-group>
         </el-form-item>
       </el-form>
 
@@ -322,5 +389,60 @@ const commit = () => {
   width: 16px;
   height: 16px;
   margin-left: 4px;
+}
+
+.field-checkbox-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  width: 100%;
+}
+
+.field-checkbox-item {
+  margin-right: 0;
+}
+
+.field-checkbox-group :deep(.el-checkbox) {
+  margin-right: 0;
+  align-items: center;
+}
+
+.field-checkbox-group :deep(.el-checkbox__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  line-height: 22px;
+}
+
+.field-checkbox-group :deep(.el-checkbox__inner) {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox:hover .el-checkbox__inner) {
+  border-color: #86909C;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background: #A8071A;
+  border-color: #A8071A;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner) {
+  background: #F7F8FA;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner::after) {
+  border-color: #C9CDD4;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled + .el-checkbox__label) {
+  color: #C9CDD4;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
+  color: #1D2129;
 }
 </style>

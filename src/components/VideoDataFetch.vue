@@ -1,6 +1,6 @@
 <script setup>
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
 
@@ -17,23 +17,24 @@ const formData = ref({
 });
 
 const FIELD_CONFIG = [
-  { name: "作品ID", type: FieldType.Text, getValue: (item) => item?.social_id ?? "" },
-  { name: "作者名称", type: FieldType.Text, getValue: (item) => item?.nickname ?? "" },
-  { name: "作者主页链接", type: FieldType.Url, getValue: (item) => item?.profile_url ?? "" },
-  { name: "标题", type: FieldType.Text, getValue: (item) => item?.title ?? "" },
-  { name: "标签文本", type: FieldType.Text, getValue: (item) => item?.caption ?? "" },
+  { key: "social_id", name: "作品ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_id ?? "" },
+  { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
+  { key: "profile_url", name: "作者主页链接", type: FieldType.Url, defaultSelected: true, getValue: (item) => item?.profile_url ?? "" },
+  { key: "title", name: "标题", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.title ?? "" },
+  { key: "caption", name: "标签文本", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.caption ?? "" },
   // { name: "播放数", type: FieldType.Number, getValue: (item) => Number(item?.digg_count) || 0 },
-  { name: "点赞数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
-  { name: "评论数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.comment_count) || 0 },
-  { name: "收藏数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.collect_count) || 0 },
-  { name: "分享数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.share_count) || 0 },
-  { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
-  { name: "下载链接", type: FieldType.Text, getValue: (item) => item?.download_addr ?? "" },
-  { name: "封面", type: FieldType.Text, getValue: (item) => item?.origin_cover ?? "" },
-  { name: "时长", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.duration) || 0 },
-  { name: "发布时间", type: FieldType.DateTime, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
-  { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
+  { key: "digg_count", name: "点赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
+  { key: "comment_count", name: "评论数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.comment_count) || 0 },
+  { key: "collect_count", name: "收藏数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.collect_count) || 0 },
+  { key: "share_count", name: "分享数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.share_count) || 0 },
+  { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
+  { key: "download_addr", name: "下载链接", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.download_addr ?? "" },
+  { key: "origin_cover", name: "封面", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.origin_cover ?? "" },
+  { key: "duration", name: "时长", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.duration) || 0 },
+  { key: "t_create", name: "发布时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
+  { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
 ];
+const FIELD_SELECTION_STORAGE_KEY = 'video_data_selected_fields_v1';
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
   [FieldType.Number]: '数字',
@@ -75,6 +76,43 @@ const loading = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
+const selectedFieldKeys = ref([]);
+const fieldSelectionReady = ref(false);
+
+const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
+  .filter(field => field.defaultSelected)
+  .map(field => field.key);
+
+const getActiveFieldConfigs = () => FIELD_CONFIG.filter(field =>
+  selectedFieldKeys.value.includes(field.key)
+);
+
+const loadSelectedFieldKeys = async () => {
+  const defaultKeys = getDefaultSelectedFieldKeys();
+
+  try {
+    const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+
+    if (!Array.isArray(savedValue)) {
+      selectedFieldKeys.value = defaultKeys;
+      return;
+    }
+
+    const validKeys = savedValue.filter(key => FIELD_CONFIG.some(field => field.key === key));
+    selectedFieldKeys.value = validKeys.length > 0 ? validKeys : defaultKeys;
+  } catch (error) {
+    console.error('读取字段勾选状态失败:', error);
+    selectedFieldKeys.value = defaultKeys;
+  }
+};
+
+const saveSelectedFieldKeys = async (keys) => {
+  try {
+    await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...keys]);
+  } catch (error) {
+    console.error('保存字段勾选状态失败:', error);
+  }
+};
 
 const getFieldListByType = async () => {
   try {
@@ -169,7 +207,7 @@ const getRecordIdListByScope = async (scope, rowCount) => {
   return recordIdList;
 };
 
-const validateAndAddFields = async () => {
+const validateAndAddFields = async (activeFieldConfigs) => {
   try {
     console.log('开始验证和添加字段...');
     const table = await bitable.base.getActiveTable();
@@ -189,7 +227,7 @@ const validateAndAddFields = async () => {
   const typeMismatchFields = [];
 
   // 先验证所有字段
-  for (const config of FIELD_CONFIG) {
+  for (const config of activeFieldConfigs) {
     const fieldMeta = fieldMetaMap.get(config.name);
 
     if (!fieldMeta) {
@@ -255,12 +293,12 @@ const validateAndAddFields = async () => {
   }
 };
 
-const writeDataToRecord = async (recordId, item, fieldNameToId) => {
+const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs) => {
   try {
     console.log(`开始写入记录 ${recordId}`);
     const table = await bitable.base.getActiveTable();
 
-    for (const config of FIELD_CONFIG) {
+    for (const config of activeFieldConfigs) {
       const fieldId = fieldNameToId[config.name];
       if (!fieldId) {
         console.warn(`字段 "${config.name}" 未找到ID，跳过`);
@@ -283,8 +321,8 @@ const writeDataToRecord = async (recordId, item, fieldNameToId) => {
   }
 };
 
-const writeErrorMessageToFirstField = async (recordId, message, fieldNameToId) => {
-  const firstFieldName = FIELD_CONFIG[0]?.name;
+const writeErrorMessageToFirstField = async (recordId, message, fieldNameToId, activeFieldConfigs) => {
+  const firstFieldName = activeFieldConfigs[0]?.name || FIELD_CONFIG[0]?.name;
   const fieldId = firstFieldName ? fieldNameToId[firstFieldName] : "";
 
   if (!fieldId) {
@@ -385,6 +423,12 @@ const handleSubmit = async () => {
     return;
   }
 
+  const activeFieldConfigs = getActiveFieldConfigs();
+  if (activeFieldConfigs.length === 0) {
+    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
+    return;
+  }
+
   loading.value = true;
 
   try {
@@ -401,7 +445,7 @@ const handleSubmit = async () => {
     }
 
     // 验证字段类型，自动添加缺失字段
-    const fieldNameToId = await validateAndAddFields();
+    const fieldNameToId = await validateAndAddFields(activeFieldConfigs);
 
     if (!fieldNameToId) {
       loading.value = false;
@@ -441,19 +485,19 @@ const handleSubmit = async () => {
 
         if (res.sta === 0 && res.data) {
           // 将数据写入当前记录
-          await writeDataToRecord(recordId, res.data, fieldNameToId);
+          await writeDataToRecord(recordId, res.data, fieldNameToId, activeFieldConfigs);
           successCount++;
           console.log(`第 ${i + 1} 条处理成功`);
         } else {
           const errorMessage = res?.msg || res?.message || '获取音视频数据失败';
           console.error(`接口返回错误:`, errorMessage);
-          await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId);
+          await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
           failCount++;
         }
       } catch (error) {
         const errorMessage = error?.response?.data?.msg || error?.message || '请求失败';
         console.error(`处理第 ${i + 1} 条失败:`, errorMessage);
-        await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId);
+        await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
         failCount++;
       }
     }
@@ -496,8 +540,21 @@ const hideToast = () => {
 };
 
 onMounted(() => {
-  getFieldListByType();
+  Promise.all([
+    getFieldListByType(),
+    loadSelectedFieldKeys()
+  ]).finally(() => {
+    fieldSelectionReady.value = true;
+  });
 });
+
+watch(selectedFieldKeys, (keys) => {
+  if (!fieldSelectionReady.value) {
+    return;
+  }
+
+  saveSelectedFieldKeys(keys);
+}, { deep: true });
 </script>
 
 <template>
@@ -570,6 +627,20 @@ onMounted(() => {
               </div>
             </el-radio>
           </el-radio-group>
+        </el-form-item>
+
+        <el-form-item label="" style="margin-top: 12px">
+          <div slot="label" class="c-label">选择需要的字段</div>
+          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+            <el-checkbox
+              v-for="field in FIELD_CONFIG"
+              :key="field.key"
+              :label="field.key"
+              class="field-checkbox-item"
+            >
+              {{ field.name }}
+            </el-checkbox>
+          </el-checkbox-group>
         </el-form-item>
       </el-form>
 
@@ -781,6 +852,48 @@ onMounted(() => {
 .custom-stepper-input input::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
+}
+
+.field-checkbox-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  width: 100%;
+}
+
+.field-checkbox-item {
+  margin-right: 0;
+}
+
+.field-checkbox-group :deep(.el-checkbox) {
+  margin-right: 0;
+  align-items: center;
+}
+
+.field-checkbox-group :deep(.el-checkbox__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  line-height: 22px;
+}
+
+.field-checkbox-group :deep(.el-checkbox__inner) {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox:hover .el-checkbox__inner) {
+  border-color: #86909C;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background: #A8071A;
+  border-color: #A8071A;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
+  color: #1D2129;
 }
 
 .stepper-buttons {
