@@ -60,6 +60,9 @@ const loading = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
+const FIELD_SELECTION_STORAGE_KEY = 'hot_list_selected_fields_v1';
+const selectedFieldKeys = ref([]);
+const fieldSelectionReady = ref(false);
 
 const showToast = (text, isLoading = true) => {
   toastText.value = text;
@@ -73,6 +76,40 @@ const hideToast = () => {
 
 const showErrorMsg = (message) => {
   ElNotification({ message, type: "error", duration: 0 });
+};
+
+const getDefaultSelectedFieldKeys = () => FIELD_MAPPING.map(field => field.key);
+
+const getActiveFieldMapping = () => {
+  const selectedKeySet = new Set(selectedFieldKeys.value);
+  return FIELD_MAPPING.filter(field => selectedKeySet.has(field.key));
+};
+
+const loadSelectedFieldKeys = async () => {
+  const defaultKeys = getDefaultSelectedFieldKeys();
+
+  try {
+    const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+
+    if (!Array.isArray(savedValue)) {
+      selectedFieldKeys.value = defaultKeys;
+      return;
+    }
+
+    const validKeys = savedValue.filter(key => FIELD_MAPPING.some(field => field.key === key));
+    selectedFieldKeys.value = validKeys.length > 0 ? validKeys : defaultKeys;
+  } catch (error) {
+    console.error('读取字段勾选状态失败:', error);
+    selectedFieldKeys.value = defaultKeys;
+  }
+};
+
+const saveSelectedFieldKeys = async (keys) => {
+  try {
+    await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...keys]);
+  } catch (error) {
+    console.error('保存字段勾选状态失败:', error);
+  }
 };
 
 const createSequentialTable = async (baseTableName) => {
@@ -97,6 +134,7 @@ const createSequentialTable = async (baseTableName) => {
 };
 
 const setupTableFields = async (tableId, isNewTable = false) => {
+  const activeFieldMapping = getActiveFieldMapping();
   const table = await bitable.base.getTableById(tableId);
   const fieldMetaList = await table.getFieldMetaList();
   const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
@@ -104,14 +142,14 @@ const setupTableFields = async (tableId, isNewTable = false) => {
   const defaultFirstField = fieldMetaList[0];
   if (isNewTable && defaultFirstField && defaultFirstField.name === '文本') {
     await table.setField(defaultFirstField.id, {
-      type: FIELD_MAPPING[0].type,
-      name: FIELD_MAPPING[0].name
+      type: activeFieldMapping[0].type,
+      name: activeFieldMapping[0].name
     });
-    fieldMetaMap.set(FIELD_MAPPING[0].name, defaultFirstField.id);
+    fieldMetaMap.set(activeFieldMapping[0].name, defaultFirstField.id);
   }
 
-  for (let index = 0; index < FIELD_MAPPING.length; index++) {
-    const config = FIELD_MAPPING[index];
+  for (let index = 0; index < activeFieldMapping.length; index++) {
+    const config = activeFieldMapping[index];
     const fieldId = fieldMetaMap.get(config.name);
     if (fieldId) {
       const field = await table.getFieldById(fieldId);
@@ -134,6 +172,10 @@ const setupTableFields = async (tableId, isNewTable = false) => {
 
 const validateTableFields = async (tableId) => {
   try {
+    if (getActiveFieldMapping().length === 0) {
+      showErrorMsg("请至少选择一个需要更新的字段");
+      return false;
+    }
     await setupTableFields(tableId);
     return true;
   } catch (error) {
@@ -211,11 +253,12 @@ const extractList = (payload) => {
 };
 
 const writeDataToTable = async (table, list, isExistingTable = false) => {
+  const activeFieldMapping = getActiveFieldMapping();
   const fieldMetaList = await table.getFieldMetaList();
   const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
   const fieldList = [];
 
-  for (const config of FIELD_MAPPING) {
+  for (const config of activeFieldMapping) {
     const fieldId = fieldMetaMap.get(config.name);
     if (!fieldId) continue;
     const field = await table.getFieldById(fieldId);
@@ -253,6 +296,10 @@ const submit = async (targetTableId = "") => {
   }
   if (!formData.value.platform) {
     showErrorMsg("请选择平台");
+    return;
+  }
+  if (getActiveFieldMapping().length === 0) {
+    showErrorMsg("请至少选择一个需要更新的字段");
     return;
   }
 
@@ -320,7 +367,17 @@ const commit = () => {
 
 onMounted(async () => {
   await loadPlatformOptions();
+  await loadSelectedFieldKeys();
+  fieldSelectionReady.value = true;
 });
+
+watch(selectedFieldKeys, (keys) => {
+  if (!fieldSelectionReady.value) {
+    return;
+  }
+
+  saveSelectedFieldKeys(keys);
+}, { deep: true });
 </script>
 
 <template>
@@ -358,6 +415,20 @@ onMounted(async () => {
           <el-select v-model="formData.platform" placeholder="请选择" style="width: 100%">
             <el-option v-for="option in platformOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
+        </el-form-item>
+
+        <el-form-item label="" style="margin-top: 12px">
+          <div class="c-label">选择需要的字段</div>
+          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+            <el-checkbox
+              v-for="field in FIELD_MAPPING"
+              :key="field.key"
+              :label="field.key"
+              class="field-checkbox-item"
+            >
+              {{ field.name }}
+            </el-checkbox>
+          </el-checkbox-group>
         </el-form-item>
       </el-form>
 
@@ -443,6 +514,48 @@ onMounted(async () => {
 .radio-block {
   width: 100%;
 }
+.field-checkbox-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  width: 100%;
+}
+
+.field-checkbox-item {
+  margin-right: 0;
+}
+
+.field-checkbox-group :deep(.el-checkbox) {
+  margin-right: 0;
+  align-items: center;
+}
+
+.field-checkbox-group :deep(.el-checkbox__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  line-height: 22px;
+}
+
+.field-checkbox-group :deep(.el-checkbox__inner) {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox:hover .el-checkbox__inner) {
+  border-color: #86909C;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background: #A8071A;
+  border-color: #A8071A;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
+  color: #1D2129;
+}
+
 .required {
   color: #F53F3F;
   margin-right: 4px;

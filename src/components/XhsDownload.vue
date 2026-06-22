@@ -1,6 +1,6 @@
 <script setup>
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
 
@@ -24,17 +24,17 @@ const httpToHttps = (url) => {
 };
 
 const FIELD_CONFIG = [
-  { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
-  { name: "封面链接", type: FieldType.Text, getValue: (item) => httpToHttps(item?.origin_cover) ?? "" },
-  { name: "下载链接", type: FieldType.Text, getValue: (item) => {
+  { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
+  { key: "origin_cover_text", name: "封面链接", type: FieldType.Text, defaultSelected: true, getValue: (item) => httpToHttps(item?.origin_cover) ?? "" },
+  { key: "download_addr_text", name: "下载链接", type: FieldType.Text, defaultSelected: true, getValue: (item) => {
     const data = item?.download_addr;
     if (typeof data === 'string') {
       return data.split(' ').map(url => httpToHttps(url)).join(' ');
     }
     return "";
   } },
-  { name: "封面附件", type: FieldType.Attachment, getUrls: (item) => (item?.origin_cover && typeof item.origin_cover === 'string') ? [httpToHttps(item.origin_cover)] : [], getFileName: () => 'cover' },
-  { name: "下载附件", type: FieldType.Attachment, getUrls: (item) => {
+  { key: "origin_cover_attachment", name: "封面附件", type: FieldType.Attachment, defaultSelected: true, getUrls: (item) => (item?.origin_cover && typeof item.origin_cover === 'string') ? [httpToHttps(item.origin_cover)] : [], getFileName: () => 'cover' },
+  { key: "download_addr_attachment", name: "下载附件", type: FieldType.Attachment, defaultSelected: true, getUrls: (item) => {
     const data = item?.download_addr;
     if (typeof data === 'string') {
       return data.split(' ').filter(url => url && url.trim()).map(url => httpToHttps(url));
@@ -42,6 +42,7 @@ const FIELD_CONFIG = [
     return [];
   }, getFileName: () => 'download' },
 ];
+const FIELD_SELECTION_STORAGE_KEY = 'xhs_download_selected_fields_v1';
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
   [FieldType.SingleSelect]: '单选',
@@ -90,6 +91,43 @@ const loading = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
+const selectedFieldKeys = ref([]);
+const fieldSelectionReady = ref(false);
+
+const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
+  .filter(field => field.defaultSelected)
+  .map(field => field.key);
+
+const getActiveFieldConfigs = () => FIELD_CONFIG.filter(field =>
+  selectedFieldKeys.value.includes(field.key)
+);
+
+const loadSelectedFieldKeys = async () => {
+  const defaultKeys = getDefaultSelectedFieldKeys();
+
+  try {
+    const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+
+    if (!Array.isArray(savedValue)) {
+      selectedFieldKeys.value = defaultKeys;
+      return;
+    }
+
+    const validKeys = savedValue.filter(key => FIELD_CONFIG.some(field => field.key === key));
+    selectedFieldKeys.value = validKeys.length > 0 ? validKeys : defaultKeys;
+  } catch (error) {
+    console.error('读取字段勾选状态失败:', error);
+    selectedFieldKeys.value = defaultKeys;
+  }
+};
+
+const saveSelectedFieldKeys = async (keys) => {
+  try {
+    await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...keys]);
+  } catch (error) {
+    console.error('保存字段勾选状态失败:', error);
+  }
+};
 
 const getFieldListByType = async () => {
   try {
@@ -173,7 +211,7 @@ const getRecordIdListByScope = async (scope, rowCount) => {
   return recordIdList;
 };
 
-const validateAndAddFields = async () => {
+const validateAndAddFields = async (activeFieldConfigs) => {
   try {
     const table = await bitable.base.getActiveTable();
     const fieldList = await table.getFieldList();
@@ -187,7 +225,7 @@ const validateAndAddFields = async () => {
     const missingFields = [];
     const typeMismatchFields = [];
 
-    for (const config of FIELD_CONFIG) {
+    for (const config of activeFieldConfigs) {
       const fieldMeta = fieldMetaMap.get(config.name);
       if (!fieldMeta) {
         missingFields.push(config);
@@ -242,11 +280,11 @@ const getFinalFileName = (url, baseName, index, total) => {
   return `${name}${ext}`;
 };
 
-const writeDataToRecord = async (recordId, item, fieldNameToId) => {
+const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs) => {
   try {
     const table = await bitable.base.getActiveTable();
 
-    for (const config of FIELD_CONFIG) {
+    for (const config of activeFieldConfigs) {
       const fieldId = fieldNameToId[config.name];
       if (!fieldId) continue;
 
@@ -356,6 +394,12 @@ const handleSubmit = async () => {
     return;
   }
 
+  const activeFieldConfigs = getActiveFieldConfigs();
+  if (activeFieldConfigs.length === 0) {
+    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
+    return;
+  }
+
   loading.value = true;
 
   try {
@@ -369,7 +413,7 @@ const handleSubmit = async () => {
       return;
     }
 
-    const fieldNameToId = await validateAndAddFields();
+    const fieldNameToId = await validateAndAddFields(activeFieldConfigs);
 
     if (!fieldNameToId) {
       loading.value = false;
@@ -399,7 +443,7 @@ const handleSubmit = async () => {
         const res = response.data;
 
         if (res.sta === 0 && res.data) {
-          await writeDataToRecord(recordId, res.data, fieldNameToId);
+          await writeDataToRecord(recordId, res.data, fieldNameToId, activeFieldConfigs);
           successCount++;
         } else {
           ElNotification({ message: res.msg || '获取小红书内容失败', type: 'error', duration: 0 });
@@ -441,8 +485,21 @@ const hideToast = () => {
 };
 
 onMounted(() => {
-  getFieldListByType();
+  Promise.all([
+    getFieldListByType(),
+    loadSelectedFieldKeys()
+  ]).finally(() => {
+    fieldSelectionReady.value = true;
+  });
 });
+
+watch(selectedFieldKeys, (keys) => {
+  if (!fieldSelectionReady.value) {
+    return;
+  }
+
+  saveSelectedFieldKeys(keys);
+}, { deep: true });
 </script>
 
 <template>
@@ -453,7 +510,7 @@ onMounted(() => {
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
       </span>
-      <span class="sub-page-title">小红书下载</span>
+      <span class="sub-page-title">链接转附件</span>
     </div>
     <div class="form-card">
       <el-form ref="form" class="form" :model="formData" label-position="top">
@@ -513,6 +570,20 @@ onMounted(() => {
               </div>
             </el-radio>
           </el-radio-group>
+        </el-form-item>
+
+        <el-form-item label="" style="margin-top: 12px">
+          <div slot="label" class="c-label">选择需要的字段</div>
+          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+            <el-checkbox
+              v-for="field in FIELD_CONFIG"
+              :key="field.key"
+              :label="field.key"
+              class="field-checkbox-item"
+            >
+              {{ field.name }}
+            </el-checkbox>
+          </el-checkbox-group>
         </el-form-item>
       </el-form>
 
@@ -724,6 +795,48 @@ onMounted(() => {
 .custom-stepper-input input::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
+}
+
+.field-checkbox-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  width: 100%;
+}
+
+.field-checkbox-item {
+  margin-right: 0;
+}
+
+.field-checkbox-group :deep(.el-checkbox) {
+  margin-right: 0;
+  align-items: center;
+}
+
+.field-checkbox-group :deep(.el-checkbox__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  line-height: 22px;
+}
+
+.field-checkbox-group :deep(.el-checkbox__inner) {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox:hover .el-checkbox__inner) {
+  border-color: #86909C;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background: #A8071A;
+  border-color: #A8071A;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
+  color: #1D2129;
 }
 
 .stepper-buttons {

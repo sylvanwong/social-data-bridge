@@ -22,20 +22,23 @@ const profileProgress = ref({ text: "", done: false });
 let page = 1;
 const page_size = 20;
 let total = 0;
+const FIELD_SELECTION_STORAGE_KEY = 'comment_fetch_selected_fields_v1';
+const selectedFieldKeys = ref([]);
+const fieldSelectionReady = ref(false);
 
 const EXISTING_TABLE_REQUIRED_FIELD = "评论ID";
 const FIELD_CONFIG = [
-  { name: "评论ID", type: FieldType.Text, getValue: (item) => item?.cid ?? "" },
-  { name: "上级评论ID", type: FieldType.Text, getValue: (item) => item?.reply_id ?? "" },
-  { name: "作品ID", type: FieldType.Text, getValue: (item) => item?.note_id ?? "" },
-  { name: "评论内容", type: FieldType.Text, getValue: (item) => item?.text ?? "" },
-  { name: "作者名称", type: FieldType.Text, getValue: (item) => item?.nickname ?? "" },
-  { name: "作者ID", type: FieldType.Text, getValue: (item) => item?.uid ?? "" },
-  { name: "小红书ID", type: FieldType.Text, getValue: (item) => item?.social_user_number ?? "" },
-  { name: "点赞数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
-  { name: "回复数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.reply_comment_total) || 0 },
-  { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
-  { name: "评论时间", type: FieldType.DateTime, getValue: (item) => (item?.t_create ? item.t_create * 1000 : "") },
+  { key: "cid", name: "评论ID", type: FieldType.Text, defaultSelected: true, required: true, getValue: (item) => item?.cid ?? "" },
+  { key: "reply_id", name: "上级评论ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.reply_id ?? "" },
+  { key: "note_id", name: "作品ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.note_id ?? "" },
+  { key: "text", name: "评论内容", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.text ?? "" },
+  { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
+  { key: "uid", name: "作者ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.uid ?? "" },
+  { key: "social_user_number", name: "小红书ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_user_number ?? "" },
+  { key: "digg_count", name: "点赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
+  { key: "reply_comment_total", name: "回复数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.reply_comment_total) || 0 },
+  { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
+  { key: "t_create", name: "评论时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.t_create ? item.t_create * 1000 : "") },
 ];
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
@@ -81,6 +84,46 @@ const showErrorMsg = (message) => {
   ElMessage({ message, type: "error", plain: true });
 };
 
+const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
+  .filter(field => field.defaultSelected || field.required)
+  .map(field => field.key);
+
+const getActiveFieldConfigs = () => {
+  const selectedKeySet = new Set(selectedFieldKeys.value);
+  return FIELD_CONFIG.filter(field => field.required || selectedKeySet.has(field.key));
+};
+
+const loadSelectedFieldKeys = async () => {
+  const defaultKeys = getDefaultSelectedFieldKeys();
+
+  try {
+    const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+
+    if (!Array.isArray(savedValue)) {
+      selectedFieldKeys.value = defaultKeys;
+      return;
+    }
+
+    const validKeys = savedValue.filter(key => FIELD_CONFIG.some(field => field.key === key));
+    const requiredKeys = FIELD_CONFIG.filter(field => field.required).map(field => field.key);
+    const mergedKeys = Array.from(new Set([...validKeys, ...requiredKeys]));
+    selectedFieldKeys.value = mergedKeys.length > 0 ? mergedKeys : defaultKeys;
+  } catch (error) {
+    console.error('读取字段勾选状态失败:', error);
+    selectedFieldKeys.value = defaultKeys;
+  }
+};
+
+const saveSelectedFieldKeys = async (keys) => {
+  try {
+    const requiredKeys = FIELD_CONFIG.filter(field => field.required).map(field => field.key);
+    const nextKeys = Array.from(new Set([...keys, ...requiredKeys]));
+    await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...nextKeys]);
+  } catch (error) {
+    console.error('保存字段勾选状态失败:', error);
+  }
+};
+
 const resetParams = () => {
   loading.value = false;
   profileProgress.value = { text: "", done: false };
@@ -98,6 +141,8 @@ onMounted(async () => {
   if (note_url && typeof note_url == "string") {
     formData.value.url = note_url;
   }
+  await loadSelectedFieldKeys();
+  fieldSelectionReady.value = true;
 });
 
 onUnmounted(() => {
@@ -166,7 +211,8 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
     return;
   }
   try {
-    const fields = FIELD_CONFIG.map(({ name, type, formatter }) => formatter ? { name, type, formatter } : { name, type });
+    const activeFieldConfigs = getActiveFieldConfigs();
+    const fields = activeFieldConfigs.map(({ name, type, formatter }) => formatter ? { name, type, formatter } : { name, type });
 
     if (!type && !targetTableId) {
       const tableName = '社媒评论加载工具';
@@ -202,7 +248,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
         resetParams();
         return;
       }
-      const availableMappings = FIELD_CONFIG.filter(config => existingFieldMap.has(config.name));
+      const availableMappings = activeFieldConfigs.filter(config => existingFieldMap.has(config.name));
       if (availableMappings.length === 0) {
         showErrorMsg("所选表格没有可写入字段");
         resetParams();
@@ -243,7 +289,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
     for (const item of list) {
       let record = [];
       for (let i = 0; i < fields.length; i++) {
-        const mapping = FIELD_CONFIG[i];
+        const mapping = activeFieldConfigs[i];
         const fieldType = await fieldList[i].getType();
         const value = (mapping.name === '作者名称' || mapping.name === '平台') && fieldType === FieldType.SingleSelect
           ? (mapping.getValue(item) || null)
@@ -380,7 +426,7 @@ const validateTableFields = async (tableId) => {
       ElNotification({ title: '出错', message: `主字段"评论ID"不存在于现有表格中，无法写入数据。请确保表格中包含该字段。`, type: 'error', duration: 0 });
       return false;
     }
-    for (const config of FIELD_CONFIG) {
+    for (const config of getActiveFieldConfigs()) {
       const fieldId = fieldIdByName.get(config.name);
       if (!fieldId) continue;
       const fieldMeta = fieldMetaList.find(meta => meta.id === fieldId);
@@ -389,7 +435,7 @@ const validateTableFields = async (tableId) => {
         return false;
       }
     }
-    const availableMappings = FIELD_CONFIG.filter(config => fieldIdByName.has(config.name));
+    const availableMappings = getActiveFieldConfigs().filter(config => fieldIdByName.has(config.name));
     if (availableMappings.length === 0) {
       showErrorMsg("所选表格没有可写入字段");
       return false;
@@ -429,6 +475,22 @@ const commit = () => {
   getNoteData();
   bitable.bridge.setData("note_url", formData.value.url);
 };
+
+watch(selectedFieldKeys, (keys) => {
+  if (!fieldSelectionReady.value) {
+    return;
+  }
+
+  const requiredKeys = FIELD_CONFIG.filter(field => field.required).map(field => field.key);
+  const mergedKeys = Array.from(new Set([...keys, ...requiredKeys]));
+
+  if (mergedKeys.length !== keys.length) {
+    selectedFieldKeys.value = mergedKeys;
+    return;
+  }
+
+  saveSelectedFieldKeys(mergedKeys);
+}, { deep: true });
 </script>
 
 <template>
@@ -490,6 +552,21 @@ const commit = () => {
           <el-select v-model="formData.reply_pages" placeholder="请选择" style="width: 100%">
             <el-option v-for="tl in reply_pages_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
+        </el-form-item>
+
+        <el-form-item label="" style="margin-top: 12px">
+          <div slot="label" class="c-label">选择需要的字段</div>
+          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+            <el-checkbox
+              v-for="field in FIELD_CONFIG"
+              :key="field.key"
+              :label="field.key"
+              :disabled="field.required"
+              class="field-checkbox-item"
+            >
+              {{ field.name }}
+            </el-checkbox>
+          </el-checkbox-group>
         </el-form-item>
       </el-form>
 
@@ -600,5 +677,60 @@ const commit = () => {
   width: 16px;
   height: 16px;
   margin-left: 4px;
+}
+
+.field-checkbox-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  width: 100%;
+}
+
+.field-checkbox-item {
+  margin-right: 0;
+}
+
+.field-checkbox-group :deep(.el-checkbox) {
+  margin-right: 0;
+  align-items: center;
+}
+
+.field-checkbox-group :deep(.el-checkbox__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  line-height: 22px;
+}
+
+.field-checkbox-group :deep(.el-checkbox__inner) {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox:hover .el-checkbox__inner) {
+  border-color: #86909C;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background: #A8071A;
+  border-color: #A8071A;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner) {
+  background: #F7F8FA;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner::after) {
+  border-color: #C9CDD4;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled + .el-checkbox__label) {
+  color: #C9CDD4;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
+  color: #1D2129;
 }
 </style>

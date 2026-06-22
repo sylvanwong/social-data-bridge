@@ -1,6 +1,6 @@
 <script setup>
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
 
@@ -17,17 +17,18 @@ const formData = ref({
 });
 
 const FIELD_CONFIG = [
-  { name: "用户ID", type: FieldType.Text, getValue: (item) => item?.uid ?? "" },
-  { name: "昵称", type: FieldType.Text, getValue: (item) => item?.nickname ?? "" },
+  { key: "uid", name: "用户ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.uid ?? "" },
+  { key: "nickname", name: "昵称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
   // { name: "头像", type: FieldType.Text, getValue: (item) => item?.avatar ?? "" },
-  { name: "个人简介", type: FieldType.Text, getValue: (item) => item?.signature ?? "" },
-  { name: "粉丝数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.follower_count) || 0 },
-  { name: "关注数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.following_count) || 0 },
-  { name: "获赞数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.total_favorited) || 0 },
-  { name: "作品数", type: FieldType.Number, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.aweme_count) || 0 },
-  { name: "平台", type: FieldType.Text, getValue: (item) => item?.social_type ?? "" },
-  { name: "更新时间", type: FieldType.DateTime, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
+  { key: "signature", name: "个人简介", type: FieldType.Text, defaultSelected: false, getValue: (item) => item?.signature ?? "" },
+  { key: "follower_count", name: "粉丝数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.follower_count) || 0 },
+  { key: "following_count", name: "关注数", type: FieldType.Number, defaultSelected: false, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.following_count) || 0 },
+  { key: "total_favorited", name: "获赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.total_favorited) || 0 },
+  { key: "aweme_count", name: "作品数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.aweme_count) || 0 },
+  { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
+  { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
 ];
+const FIELD_SELECTION_STORAGE_KEY = 'blogger_info_selected_fields_v1';
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
   [FieldType.Number]: '数字',
@@ -53,6 +54,43 @@ const loading = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
+const selectedFieldKeys = ref([]);
+const fieldSelectionReady = ref(false);
+
+const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
+  .filter(field => field.defaultSelected)
+  .map(field => field.key);
+
+const getActiveFieldConfigs = () => FIELD_CONFIG.filter(field =>
+  selectedFieldKeys.value.includes(field.key)
+);
+
+const loadSelectedFieldKeys = async () => {
+  const defaultKeys = getDefaultSelectedFieldKeys();
+
+  try {
+    const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+
+    if (!Array.isArray(savedValue)) {
+      selectedFieldKeys.value = defaultKeys;
+      return;
+    }
+
+    const validKeys = savedValue.filter(key => FIELD_CONFIG.some(field => field.key === key));
+    selectedFieldKeys.value = validKeys.length > 0 ? validKeys : defaultKeys;
+  } catch (error) {
+    console.error('读取字段勾选状态失败:', error);
+    selectedFieldKeys.value = defaultKeys;
+  }
+};
+
+const saveSelectedFieldKeys = async (keys) => {
+  try {
+    await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...keys]);
+  } catch (error) {
+    console.error('保存字段勾选状态失败:', error);
+  }
+};
 
 const getFieldListByType = async () => {
   try {
@@ -134,7 +172,7 @@ const getRecordIdListByScope = async (scope, rowCount) => {
   return recordIdList;
 };
 
-const validateAndAddFields = async () => {
+const validateAndAddFields = async (activeFieldConfigs) => {
   try {
     const table = await bitable.base.getActiveTable();
     const fieldList = await table.getFieldList();
@@ -148,7 +186,7 @@ const validateAndAddFields = async () => {
     const missingFields = [];
     const typeMismatchFields = [];
 
-    for (const config of FIELD_CONFIG) {
+    for (const config of activeFieldConfigs) {
       const fieldMeta = fieldMetaMap.get(config.name);
       if (!fieldMeta) {
         missingFields.push(config);
@@ -200,11 +238,11 @@ const validateAndAddFields = async () => {
   }
 };
 
-const writeDataToRecord = async (recordId, item, fieldNameToId) => {
+const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs) => {
   try {
     const table = await bitable.base.getActiveTable();
 
-    for (const config of FIELD_CONFIG) {
+    for (const config of activeFieldConfigs) {
       const fieldId = fieldNameToId[config.name];
       if (!fieldId) continue;
 
@@ -290,6 +328,12 @@ const handleSubmit = async () => {
     return;
   }
 
+  const activeFieldConfigs = getActiveFieldConfigs();
+  if (activeFieldConfigs.length === 0) {
+    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
+    return;
+  }
+
   loading.value = true;
 
   try {
@@ -303,7 +347,7 @@ const handleSubmit = async () => {
       return;
     }
 
-    const fieldNameToId = await validateAndAddFields();
+    const fieldNameToId = await validateAndAddFields(activeFieldConfigs);
 
     if (!fieldNameToId) {
       loading.value = false;
@@ -333,7 +377,7 @@ const handleSubmit = async () => {
         const res = response.data;
 
         if (res.sta === 0 && res.data) {
-          await writeDataToRecord(recordId, res.data, fieldNameToId);
+          await writeDataToRecord(recordId, res.data, fieldNameToId, activeFieldConfigs);
           successCount++;
         } else {
           ElNotification({ message: res.msg || '获取博主信息失败', type: 'error', duration: 0 });
@@ -375,8 +419,21 @@ const hideToast = () => {
 };
 
 onMounted(() => {
-  getFieldListByType();
+  Promise.all([
+    getFieldListByType(),
+    loadSelectedFieldKeys()
+  ]).finally(() => {
+    fieldSelectionReady.value = true;
+  });
 });
+
+watch(selectedFieldKeys, (keys) => {
+  if (!fieldSelectionReady.value) {
+    return;
+  }
+
+  saveSelectedFieldKeys(keys);
+}, { deep: true });
 </script>
 
 <template>
@@ -449,6 +506,20 @@ onMounted(() => {
               </div>
             </el-radio>
           </el-radio-group>
+        </el-form-item>
+
+        <el-form-item label="" style="margin-top: 12px">
+          <div slot="label" class="c-label">选择需要的字段</div>
+          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+            <el-checkbox
+              v-for="field in FIELD_CONFIG"
+              :key="field.key"
+              :label="field.key"
+              class="field-checkbox-item"
+            >
+              {{ field.name }}
+            </el-checkbox>
+          </el-checkbox-group>
         </el-form-item>
       </el-form>
 
@@ -660,6 +731,48 @@ onMounted(() => {
 .custom-stepper-input input::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
+}
+
+.field-checkbox-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  width: 100%;
+}
+
+.field-checkbox-item {
+  margin-right: 0;
+}
+
+.field-checkbox-group :deep(.el-checkbox) {
+  margin-right: 0;
+  align-items: center;
+}
+
+.field-checkbox-group :deep(.el-checkbox__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  line-height: 22px;
+}
+
+.field-checkbox-group :deep(.el-checkbox__inner) {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox:hover .el-checkbox__inner) {
+  border-color: #86909C;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  background: #A8071A;
+  border-color: #A8071A;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
+  color: #1D2129;
 }
 
 .stepper-buttons {
