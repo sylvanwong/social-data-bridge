@@ -510,7 +510,7 @@ watch(selectedFieldKeys, (keys) => {
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
       </span>
-      <span class="sub-page-title">链接转附件</span>
+      <span class="sub-page-title">小红书下载</span>
     </div>
     <div class="form-card">
       <el-form ref="form" class="form" :model="formData" label-position="top">

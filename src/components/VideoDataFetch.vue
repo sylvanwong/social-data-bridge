@@ -33,6 +33,7 @@ const FIELD_CONFIG = [
   { key: "duration", name: "时长", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.duration) || 0 },
   { key: "t_create", name: "发布时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
   { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
+  { key: "note_url", name: "视频链接", type: FieldType.Text, defaultSelected: false, getValue: (item) => item?.note_url ?? "" },
 ];
 const FIELD_SELECTION_STORAGE_KEY = 'video_data_selected_fields_v1';
 const FIELD_TYPE_NAME = {
