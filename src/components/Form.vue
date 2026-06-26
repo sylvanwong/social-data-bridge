@@ -9,6 +9,7 @@ import VideoDataFetch from './VideoDataFetch.vue'
 import VideoCopySummary from './VideoCopySummary.vue'
 import BloggerInfoFetch from './BloggerInfoFetch.vue'
 import XhsDownload from './XhsDownload.vue'
+import UrlToAttachment from './UrlToAttachment.vue'
 import SeriesFetch from './SeriesFetch.vue'
 import HotListFetch from './HotListFetch.vue'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
@@ -203,6 +204,15 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <path d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
             </svg>
           </div>
+          <span class="func-name">小红书下载</span>
+        </div>
+        <!-- 链接转附件 -->
+        <div class="arco-card" @click="currentPage = 'urlToAttachment'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+            </svg>
+          </div>
           <span class="func-name">链接转附件</span>
         </div>
       </div>
@@ -238,8 +248,11 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   <!-- 二级页面：视频文案摘要 -->
   <VideoCopySummary v-if="currentPage === 'videoCopySummary'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：链接转附件 -->
+  <!-- 二级页面：小红书下载 -->
   <XhsDownload v-if="currentPage === 'xhsDownload'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：链接转附件 -->
+  <UrlToAttachment v-if="currentPage === 'urlToAttachment'" :api_key="api_key" @back="currentPage = 'home'" />
 </template>
 
 <style scoped>
