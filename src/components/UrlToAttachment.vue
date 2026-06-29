@@ -2,6 +2,7 @@
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { ref, onMounted } from "vue";
 import { ElNotification } from "element-plus";
+import { buildApiUrl } from '@/utils/request';
 
 const emit = defineEmits(['back']);
 
@@ -217,7 +218,7 @@ const buildProxyDownloadUrl = (url, fileName) => {
     url,
     file_name: fileName,
   });
-  return `/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`;
+  return buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`);
 };
 
 const downloadAttachmentAsFile = async (url, finalName) => {

@@ -3,6 +3,20 @@ import { PLUGIN_VERSION } from '@/utils/version'
 
 const env = import.meta.env;
 const baseURL = env.VITE_API_BASE_URL == '/' ? '' : env.VITE_API_BASE_URL;
+export const API_BASE_URL = baseURL;
+
+export const buildApiUrl = (path) => {
+  if (!path) return path;
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  if (!API_BASE_URL) {
+    return path;
+  }
+  const normalizedBase = API_BASE_URL.replace(/\/+$/, '');
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${normalizedBase}${normalizedPath}`;
+};
 // 创建 axios 实例
 const service = axios.create({
   baseURL: baseURL, // 自动获取当前环境的 API 基址
