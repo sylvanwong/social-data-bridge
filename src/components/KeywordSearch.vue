@@ -271,7 +271,7 @@ const commit = () => {
   }
 
   if (radio === 2) {
-    validateTableFields(table_id).then(isValid => {
+    validateTableFields(table_id, selectedFieldKeys.value).then(isValid => {
       if (isValid) getSearchData(table_id);
     }).catch(error => {
       console.error("验证表格字段时出错:", error);
