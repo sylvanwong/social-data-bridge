@@ -168,21 +168,23 @@ const getFieldMetaMap = async (table) => {
 };
 
 const setupTableFields = async (tableId, isNewTable = false) => {
+  const activeFieldMapping = getActiveFieldMapping();
   const table = await bitable.base.getTableById(tableId);
   const fieldMetaList = await table.getFieldMetaList();
   const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
+  const missingFields = [];
 
   const defaultFirstField = fieldMetaList[0];
   if (isNewTable && defaultFirstField && defaultFirstField.name === '文本') {
     await table.setField(defaultFirstField.id, {
-      type: FIELD_MAPPING[0].type,
-      name: FIELD_MAPPING[0].name
+      type: activeFieldMapping[0].type,
+      name: activeFieldMapping[0].name
     });
-    fieldMetaMap.set(FIELD_MAPPING[0].name, defaultFirstField.id);
+    fieldMetaMap.set(activeFieldMapping[0].name, defaultFirstField.id);
   }
 
-  for (let index = 0; index < FIELD_MAPPING.length; index++) {
-    const config = FIELD_MAPPING[index];
+  for (let index = 0; index < activeFieldMapping.length; index++) {
+    const config = activeFieldMapping[index];
     const fieldId = fieldMetaMap.get(config.name);
     if (fieldId) {
       const field = await table.getFieldById(fieldId);
@@ -199,7 +201,20 @@ const setupTableFields = async (tableId, isNewTable = false) => {
       await table.addField({ type: config.type, name: config.name });
       continue;
     }
-    throw new Error(`现有表格缺少字段: ${config.name}`);
+    missingFields.push(config);
+  }
+
+  for (const config of missingFields) {
+    try {
+      await table.addField({ type: config.type, name: config.name });
+    } catch (error) {
+      ElNotification({ message: `添加字段 "${config.name}" 失败`, type: 'error', duration: 0 });
+      throw error;
+    }
+  }
+
+  if (!isNewTable && missingFields.length > 0) {
+    ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
   }
 };
 

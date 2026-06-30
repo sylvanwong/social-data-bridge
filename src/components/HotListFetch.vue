@@ -7,7 +7,7 @@ import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
 const EXISTING_TABLE_REQUIRED_FIELD = "排名";
 const FIELD_MAPPING = [
-  { key: 'rank', name: '排名', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
+  { key: 'rank', name: '排名', type: FieldType.Number, formatter: NumberFormatter.INTEGER, required: true },
   { key: 'keyword', name: '热搜标题', type: FieldType.Text },
   { key: 'hot_value', name: '热度值', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
   { key: 'tag', name: '标签', type: FieldType.Text },
@@ -97,7 +97,9 @@ const loadSelectedFieldKeys = async () => {
     }
 
     const validKeys = savedValue.filter(key => FIELD_MAPPING.some(field => field.key === key));
-    selectedFieldKeys.value = validKeys.length > 0 ? validKeys : defaultKeys;
+    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const mergedKeys = Array.from(new Set([...validKeys, ...requiredKeys]));
+    selectedFieldKeys.value = mergedKeys.length > 0 ? mergedKeys : defaultKeys;
   } catch (error) {
     console.error('读取字段勾选状态失败:', error);
     selectedFieldKeys.value = defaultKeys;
@@ -106,7 +108,9 @@ const loadSelectedFieldKeys = async () => {
 
 const saveSelectedFieldKeys = async (keys) => {
   try {
-    await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...keys]);
+    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const nextKeys = Array.from(new Set([...keys, ...requiredKeys]));
+    await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...nextKeys]);
   } catch (error) {
     console.error('保存字段勾选状态失败:', error);
   }
@@ -138,6 +142,7 @@ const setupTableFields = async (tableId, isNewTable = false) => {
   const table = await bitable.base.getTableById(tableId);
   const fieldMetaList = await table.getFieldMetaList();
   const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
+  const missingFields = [];
 
   const defaultFirstField = fieldMetaList[0];
   if (isNewTable && defaultFirstField && defaultFirstField.name === '文本') {
@@ -166,7 +171,20 @@ const setupTableFields = async (tableId, isNewTable = false) => {
       await table.addField({ type: config.type, name: config.name });
       continue;
     }
-    throw new Error(`现有表格缺少字段: ${config.name}`);
+    missingFields.push(config);
+  }
+
+  for (const config of missingFields) {
+    try {
+      await table.addField({ type: config.type, name: config.name });
+    } catch (error) {
+      ElNotification({ message: `添加字段 "${config.name}" 失败`, type: 'error', duration: 0 });
+      throw error;
+    }
+  }
+
+  if (!isNewTable && missingFields.length > 0) {
+    ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
   }
 };
 
@@ -376,7 +394,15 @@ watch(selectedFieldKeys, (keys) => {
     return;
   }
 
-  saveSelectedFieldKeys(keys);
+  const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+  const mergedKeys = Array.from(new Set([...keys, ...requiredKeys]));
+
+  if (mergedKeys.length !== keys.length) {
+    selectedFieldKeys.value = mergedKeys;
+    return;
+  }
+
+  saveSelectedFieldKeys(mergedKeys);
 }, { deep: true });
 </script>
 
@@ -424,6 +450,7 @@ watch(selectedFieldKeys, (keys) => {
               v-for="field in FIELD_MAPPING"
               :key="field.key"
               :label="field.key"
+              :disabled="field.required"
               class="field-checkbox-item"
             >
               {{ field.name }}
@@ -550,6 +577,19 @@ watch(selectedFieldKeys, (keys) => {
 .field-checkbox-group :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
   background: #A8071A;
   border-color: #A8071A;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner) {
+  background: #F7F8FA;
+  border-color: #E5E6EB;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled.is-checked .el-checkbox__inner::after) {
+  border-color: #C9CDD4;
+}
+
+.field-checkbox-group :deep(.el-checkbox__input.is-disabled + .el-checkbox__label) {
+  color: #C9CDD4;
 }
 
 .field-checkbox-group :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {

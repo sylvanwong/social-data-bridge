@@ -111,11 +111,12 @@ export const createSequentialTable = async (baseTableName) => {
   }
 };
 
-export const setupTableFields = async (tableId) => {
+export const setupTableFields = async (tableId, selectedFieldKeys = []) => {
   const newTable = await bitable.base.getTable(tableId);
   await bitable.ui.switchToTable(tableId);
   const first_field = await newTable.getField('文本');
-  const fieldPromises = FIELD_MAPPING.map((config, index) => {
+  const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys);
+  const fieldPromises = activeFieldMapping.map((config, index) => {
     if (index === 0 && first_field) {
       return newTable.setField(first_field.id, { type: config.type, name: config.name });
     }
@@ -124,17 +125,19 @@ export const setupTableFields = async (tableId) => {
   await Promise.all(fieldPromises);
 };
 
-export const validateTableFields = async (tableId) => {
+export const validateTableFields = async (tableId, selectedFieldKeys = []) => {
   try {
     const activeTable = await bitable.base.getTableById(tableId);
     const fieldMetaList = await activeTable.getFieldMetaList();
     const fieldIdByName = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
+    const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys);
 
     const fieldList = [];
-    for (const config of FIELD_MAPPING) {
+    const missingFields = [];
+    for (const config of activeFieldMapping) {
       const fieldId = fieldIdByName.get(config.name);
       if (!fieldId) {
-        fieldList.push({ field: null, config });
+        missingFields.push(config);
         continue;
       }
       try {
@@ -142,14 +145,8 @@ export const validateTableFields = async (tableId) => {
         fieldList.push({ field, config });
       } catch (error) {
         console.error(`获取字段失败：${config.name}`, error);
-        fieldList.push({ field: null, config });
+        missingFields.push(config);
       }
-    }
-
-    const requiredField = fieldList.find(item => item.config.name === "视频编号" && item.field);
-    if (!requiredField) {
-      ElNotification({ title: '出错', message: `主字段"视频编号"不存在于现有表格中，无法写入数据。请确保表格中包含该字段。`, type: 'error', duration: 0 });
-      return false;
     }
 
     for (const item of fieldList) {
@@ -163,7 +160,20 @@ export const validateTableFields = async (tableId) => {
       }
     }
 
-    const availableFieldList = fieldList.filter(item => !!item.field);
+    for (const config of missingFields) {
+      try {
+        await activeTable.addField({ type: config.type, name: config.name });
+      } catch (error) {
+        ElNotification({ title: '出错', message: `添加字段 "${config.name}" 失败`, type: 'error', duration: 0 });
+        return false;
+      }
+    }
+
+    if (missingFields.length > 0) {
+      ElNotification({ title: '成功', message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+    }
+
+    const availableFieldList = [...fieldList, ...missingFields.map(config => ({ field: true, config }))];
     if (availableFieldList.length === 0) {
       showErrorMsg("所选表格没有可写入字段");
       return false;
@@ -263,7 +273,7 @@ export const useSocialData = (getTableName, api_key) => {
       if (!type && !targetTableId) {
         const tableName = getTableName(list);
         const { tableId } = await createSequentialTable(tableName);
-        await setupTableFields(tableId);
+        await setupTableFields(tableId, selectedFieldKeys);
       }
 
       const activeTable = targetTableId
@@ -339,7 +349,7 @@ export const useSocialData = (getTableName, api_key) => {
       try {
         const tableName = getTableName(list);
         const { tableId: newTableId } = await createSequentialTable(tableName);
-        await setupTableFields(newTableId);
+        await setupTableFields(newTableId, selectedFieldKeys);
         await createAndWriteData(list, type, task_id, newTableId, selectedFieldKeys);
         ElNotification({ title: '温馨提示', message: '当前多维表格已达到单表存储上限！已为您自动生成新表格展示全部数据', type: 'success', duration: 3000 });
         return;
