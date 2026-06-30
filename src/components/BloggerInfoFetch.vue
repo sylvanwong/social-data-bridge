@@ -207,15 +207,42 @@ const validateAndAddFields = async (activeFieldConfigs) => {
 
     for (const fieldConfig of missingFields) {
       try {
-        const newFieldId = await table.addField({
+        const addFieldResult = await table.addField({
           type: fieldConfig.type,
           name: fieldConfig.name
         });
+        const newFieldId = typeof addFieldResult === 'string'
+          ? addFieldResult
+          : addFieldResult?.fieldId || addFieldResult?.id || addFieldResult?.field_id;
         if (fieldConfig.formatter) {
-          const newField = await table.getFieldById(newFieldId);
-          await newField.setFormatter(fieldConfig.formatter);
+          let formatterFieldId = newFieldId;
+          if (!formatterFieldId) {
+            const latestFieldList = await table.getFieldList();
+            for (const field of latestFieldList) {
+              const name = await field.getName();
+              if (name === fieldConfig.name) {
+                formatterFieldId = field.id;
+                break;
+              }
+            }
+          }
+          if (formatterFieldId) {
+            const newField = await table.getFieldById(formatterFieldId);
+            await newField.setFormatter(fieldConfig.formatter);
+          }
         }
-        fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
+        if (newFieldId) {
+          fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
+        } else {
+          const latestFieldList = await table.getFieldList();
+          for (const field of latestFieldList) {
+            const name = await field.getName();
+            if (name === fieldConfig.name) {
+              fieldMetaMap.set(fieldConfig.name, { id: field.id, type: fieldConfig.type });
+              break;
+            }
+          }
+        }
       } catch (e) {
         ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
         return null;

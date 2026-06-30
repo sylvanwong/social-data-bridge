@@ -255,24 +255,59 @@ const validateAndAddFields = async (activeFieldConfigs) => {
   }
 
   // 添加缺失字段
-  for (const fieldConfig of missingFields) {
-    try {
-      console.log(`正在添加字段: ${fieldConfig.name}, 类型: ${fieldConfig.type}`);
-      const newFieldId = await table.addField({
-        type: fieldConfig.type,
-        name: fieldConfig.name
-      });
-      if (fieldConfig.formatter) {
-        const newField = await table.getFieldById(newFieldId);
-        await newField.setFormatter(fieldConfig.formatter);
+    for (const fieldConfig of missingFields) {
+      try {
+        console.log(`正在添加字段: ${fieldConfig.name}, 类型: ${fieldConfig.type}`);
+        const addFieldResult = await table.addField({
+          type: fieldConfig.type,
+          name: fieldConfig.name
+        });
+        const newFieldId = typeof addFieldResult === 'string'
+          ? addFieldResult
+          : addFieldResult?.fieldId || addFieldResult?.id || addFieldResult?.field_id;
+
+        if (fieldConfig.formatter) {
+          let formatterFieldId = newFieldId;
+          if (!formatterFieldId) {
+            const latestFieldList = await table.getFieldList();
+            for (const field of latestFieldList) {
+              const name = await field.getName();
+              if (name === fieldConfig.name) {
+                formatterFieldId = field.id;
+                break;
+              }
+            }
+          }
+
+          if (formatterFieldId) {
+            const newField = await table.getFieldById(formatterFieldId);
+            await newField.setFormatter(fieldConfig.formatter);
+          }
+        }
+        const finalFieldId = newFieldId || (() => {
+          const existingMeta = fieldMetaMap.get(fieldConfig.name);
+          return existingMeta?.id;
+        })();
+
+        if (!finalFieldId) {
+          const latestFieldList = await table.getFieldList();
+          for (const field of latestFieldList) {
+            const name = await field.getName();
+            if (name === fieldConfig.name) {
+              fieldMetaMap.set(fieldConfig.name, { id: field.id, type: fieldConfig.type });
+              console.log(`字段 ${fieldConfig.name} 添加成功，ID: ${field.id}`);
+              break;
+            }
+          }
+        } else {
+          fieldMetaMap.set(fieldConfig.name, { id: finalFieldId, type: fieldConfig.type });
+          console.log(`字段 ${fieldConfig.name} 添加成功，ID: ${finalFieldId}`);
+        }
+      } catch (e) {
+        console.error(`添加字段 ${fieldConfig.name} 失败:`, e);
+        ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
+        return null;
       }
-      fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
-      console.log(`字段 ${fieldConfig.name} 添加成功，ID: ${newFieldId}`);
-    } catch (e) {
-      console.error(`添加字段 ${fieldConfig.name} 失败:`, e);
-      ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
-      return null;
-    }
   }
 
   // 构建字段名到ID的映射
@@ -512,7 +547,8 @@ const handleSubmit = async () => {
 
   } catch (error) {
     console.error('获取数据失败:', error);
-    ElNotification({ message: res.msg, type: 'error', duration: 0 });
+    const errorMessage = error?.response?.data?.msg || error?.message || '获取音视频数据失败';
+    ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
   }

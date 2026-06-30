@@ -190,11 +190,26 @@ const validateAndAddFields = async () => {
 
     for (const fieldConfig of missingFields) {
       try {
-        const newFieldId = await table.addField({
+        const addFieldResult = await table.addField({
           type: fieldConfig.type,
           name: fieldConfig.name,
         });
-        fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
+        const newFieldId = typeof addFieldResult === 'string'
+          ? addFieldResult
+          : addFieldResult?.fieldId || addFieldResult?.id || addFieldResult?.field_id;
+
+        if (newFieldId) {
+          fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
+        } else {
+          const latestFieldList = await table.getFieldList();
+          for (const field of latestFieldList) {
+            const name = await field.getName();
+            if (name === fieldConfig.name) {
+              fieldMetaMap.set(fieldConfig.name, { id: field.id, type: fieldConfig.type });
+              break;
+            }
+          }
+        }
       } catch (error) {
         ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
         return null;
@@ -221,10 +236,33 @@ const buildProxyDownloadUrl = (url, fileName) => {
   return buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`);
 };
 
+const isDirectFetchImageUrl = (url) => {
+  if (typeof url !== 'string') return false;
+
+  const cleanUrl = url.split('?')[0].split('#')[0].toLowerCase();
+  return ['.jpg', '.jpeg', '.png', '.webp'].some((ext) => cleanUrl.endsWith(ext));
+};
+
 const downloadAttachmentAsFile = async (url, finalName) => {
-  const response = await fetch(buildProxyDownloadUrl(url, finalName), {
-    headers: { authorization: `Bearer ${props.api_key}` },
-  });
+  const directFetchImage = isDirectFetchImageUrl(url);
+  let response;
+
+  if (directFetchImage) {
+    try {
+      response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`直连下载失败: HTTP ${response.status}`);
+      }
+    } catch (error) {
+      response = await fetch(buildProxyDownloadUrl(url, finalName), {
+        headers: { authorization: `Bearer ${props.api_key}` },
+      });
+    }
+  } else {
+    response = await fetch(buildProxyDownloadUrl(url, finalName), {
+      headers: { authorization: `Bearer ${props.api_key}` },
+    });
+  }
 
   if (!response.ok) {
     throw new Error(`下载失败: HTTP ${response.status}`);

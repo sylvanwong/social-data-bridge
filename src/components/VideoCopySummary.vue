@@ -248,11 +248,26 @@ const validateAndAddFields = async (activeFieldConfigs) => {
 
     for (const fieldConfig of missingFields) {
       try {
-        const newFieldId = await table.addField({
+        const addFieldResult = await table.addField({
           type: fieldConfig.type,
           name: fieldConfig.name,
         });
-        fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
+        const newFieldId = typeof addFieldResult === "string"
+          ? addFieldResult
+          : addFieldResult?.fieldId || addFieldResult?.id || addFieldResult?.field_id;
+
+        if (newFieldId) {
+          fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
+        } else {
+          const latestFieldList = await table.getFieldList();
+          for (const field of latestFieldList) {
+            const name = await field.getName();
+            if (name === fieldConfig.name) {
+              fieldMetaMap.set(fieldConfig.name, { id: field.id, type: fieldConfig.type });
+              break;
+            }
+          }
+        }
       } catch (error) {
         ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: "error", duration: 0 });
         return null;
