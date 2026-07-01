@@ -1,5 +1,5 @@
 <script setup>
-import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
+import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
@@ -26,7 +26,7 @@ const FIELD_CONFIG = [
   { key: "total_favorited", name: "获赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.total_favorited) || 0 },
   { key: "aweme_count", name: "作品数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.aweme_count) || 0 },
   { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
-  { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
+  { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
 ];
 const FIELD_SELECTION_STORAGE_KEY = 'blogger_info_selected_fields_v1';
 const FIELD_TYPE_NAME = {
@@ -205,6 +205,27 @@ const validateAndAddFields = async (activeFieldConfigs) => {
       return null;
     }
 
+    const ensureFieldDisplayConfig = async (fieldId, fieldConfig) => {
+      if (!fieldId) return;
+      const field = await table.getFieldById(fieldId);
+      if (fieldConfig.formatter) {
+        await field.setFormatter(fieldConfig.formatter);
+      }
+      if (fieldConfig.dateFormat) {
+        await field.setDateFormat(fieldConfig.dateFormat);
+      }
+    };
+
+    for (const config of activeFieldConfigs) {
+      const fieldMeta = fieldMetaMap.get(config.name);
+      if (!fieldMeta) continue;
+      try {
+        await ensureFieldDisplayConfig(fieldMeta.id, config);
+      } catch (error) {
+        console.error(`设置字段 ${config.name} 格式失败:`, error);
+      }
+    }
+
     for (const fieldConfig of missingFields) {
       try {
         const addFieldResult = await table.addField({
@@ -214,23 +235,6 @@ const validateAndAddFields = async (activeFieldConfigs) => {
         const newFieldId = typeof addFieldResult === 'string'
           ? addFieldResult
           : addFieldResult?.fieldId || addFieldResult?.id || addFieldResult?.field_id;
-        if (fieldConfig.formatter) {
-          let formatterFieldId = newFieldId;
-          if (!formatterFieldId) {
-            const latestFieldList = await table.getFieldList();
-            for (const field of latestFieldList) {
-              const name = await field.getName();
-              if (name === fieldConfig.name) {
-                formatterFieldId = field.id;
-                break;
-              }
-            }
-          }
-          if (formatterFieldId) {
-            const newField = await table.getFieldById(formatterFieldId);
-            await newField.setFormatter(fieldConfig.formatter);
-          }
-        }
         if (newFieldId) {
           fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
         } else {
@@ -243,6 +247,7 @@ const validateAndAddFields = async (activeFieldConfigs) => {
             }
           }
         }
+        await ensureFieldDisplayConfig(fieldMetaMap.get(fieldConfig.name)?.id, fieldConfig);
       } catch (e) {
         ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
         return null;

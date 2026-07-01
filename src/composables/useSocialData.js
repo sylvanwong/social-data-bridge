@@ -1,4 +1,4 @@
-import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
+import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage, ElNotification } from "element-plus";
 import { ref, onUnmounted } from "vue";
 import request from '@/utils/request'
@@ -20,9 +20,9 @@ export const FIELD_MAPPING = [
   { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
   { key: 'cover_url', name: '封面', type: FieldType.Text, defaultSelected: true },
   { key: 'duration', name: '时长', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
-  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true },
-  { key: 'last_update_time', name: '最后更新时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true },
-  { key: 'ctime', name: '提取时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true },
+  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
+  { key: 'last_update_time', name: '最后更新时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
+  { key: 'ctime', name: '提取时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
 ];
 
 export const FIELD_TYPE_NAME = {
@@ -151,6 +151,15 @@ const normalizeCellValue = async (table, field, value, config, fieldType, extra 
   return normalizeTextCompatibleValue(nextValue);
 };
 
+const applyFieldDisplayConfig = async (field, config) => {
+  if (config.formatter) {
+    await field.setFormatter(config.formatter);
+  }
+  if (config.dateFormat) {
+    await field.setDateFormat(config.dateFormat);
+  }
+};
+
 export const showErrorMsg = (message) => {
   ElMessage({ message, type: "error", plain: true });
 };
@@ -198,6 +207,17 @@ export const setupTableFields = async (tableId, selectedFieldKeys = []) => {
     return newTable.addField({ type: config.type, name: config.name });
   });
   await Promise.all(fieldPromises);
+
+  for (const config of activeFieldMapping) {
+    try {
+      const field = await newTable.getField(config.name);
+      if (field) {
+        await applyFieldDisplayConfig(field, config);
+      }
+    } catch (error) {
+      console.error(`设置字段 ${config.name} 格式失败:`, error);
+    }
+  }
 };
 
 export const validateTableFields = async (tableId, selectedFieldKeys = []) => {
@@ -246,6 +266,19 @@ export const validateTableFields = async (tableId, selectedFieldKeys = []) => {
 
     if (missingFields.length > 0) {
       ElNotification({ title: '成功', message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+    }
+
+    const refreshedFieldMetaList = await activeTable.getFieldMetaList();
+    const refreshedFieldIdByName = new Map(refreshedFieldMetaList.map(meta => [meta.name, meta.id]));
+    for (const config of activeFieldMapping) {
+      const fieldId = refreshedFieldIdByName.get(config.name);
+      if (!fieldId) continue;
+      try {
+        const field = await activeTable.getFieldById(fieldId);
+        await applyFieldDisplayConfig(field, config);
+      } catch (error) {
+        console.error(`设置字段 ${config.name} 格式失败:`, error);
+      }
     }
 
     const availableFieldList = [...fieldList, ...missingFields.map(config => ({ field: true, config }))];
@@ -403,15 +436,17 @@ export const useSocialData = (getTableName, api_key) => {
         if (item.config.key === 'tags') {
           item.extra.tagOptionIdMap = await ensureTagOptions(item.field, list, item.config, item.fieldType);
         }
+        try {
+          await applyFieldDisplayConfig(item.field, item.config);
+        } catch (error) {
+          console.error(`设置字段 ${item.config.name} 格式失败:`, error);
+        }
       }
 
       let records = [];
       for (const item of list) {
         let record = [];
         for (const { field, config, fieldType } of availableFieldList) {
-          if (!targetTableId && config.formatter) {
-            await field.setFormatter(config.formatter);
-          }
           const matchedField = availableFieldList.find(fieldItem => fieldItem.field?.id === field.id && fieldItem.config.key === config.key);
           const value = await normalizeCellValue(activeTable, field, item[config.key], config, fieldType, matchedField?.extra);
           record.push(await field.createCell(value));

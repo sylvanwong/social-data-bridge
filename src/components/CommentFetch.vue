@@ -1,5 +1,5 @@
 <script setup>
-import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
+import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage, ElNotification } from "element-plus";
 import { ref, onMounted, onUnmounted, watch } from "vue";
 import request from '@/utils/request'
@@ -38,7 +38,7 @@ const FIELD_CONFIG = [
   { key: "digg_count", name: "点赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
   { key: "reply_comment_total", name: "回复数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.reply_comment_total) || 0 },
   { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
-  { key: "t_create", name: "评论时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.t_create ? item.t_create * 1000 : "") },
+  { key: "t_create", name: "评论时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.t_create ? item.t_create * 1000 : "") },
 ];
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
@@ -212,7 +212,24 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
   }
   try {
     const activeFieldConfigs = getActiveFieldConfigs();
-    const fields = activeFieldConfigs.map(({ name, type, formatter }) => formatter ? { name, type, formatter } : { name, type });
+    const fields = activeFieldConfigs.map(({ name, type, formatter, dateFormat }) => {
+      const fieldConfig = { name, type };
+      if (formatter) {
+        fieldConfig.formatter = formatter;
+      }
+      if (dateFormat) {
+        fieldConfig.dateFormat = dateFormat;
+      }
+      return fieldConfig;
+    });
+    const ensureFieldDisplayConfig = async (field, config) => {
+      if (config.formatter) {
+        await field.setFormatter(config.formatter);
+      }
+      if (config.dateFormat) {
+        await field.setDateFormat(config.dateFormat);
+      }
+    };
 
     if (!type && !targetTableId) {
       const tableName = '社媒评论加载工具';
@@ -254,6 +271,14 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
         resetParams();
         return;
       }
+      for (const config of availableMappings) {
+        const field = existingFieldMap.get(config.name);
+        try {
+          await ensureFieldDisplayConfig(field, config);
+        } catch (error) {
+          console.error(`设置字段 ${config.name} 格式失败:`, error);
+        }
+      }
       const records = [];
       for (const item of list) {
         const record = [];
@@ -280,9 +305,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
     const fieldList = [];
     for (const config of fields) {
       const field = await activeTable.getField(config.name);
-      if (config.formatter) {
-        await field.setFormatter(config.formatter);
-      }
+      await ensureFieldDisplayConfig(field, config);
       fieldList.push(field);
     }
     let records = [];
