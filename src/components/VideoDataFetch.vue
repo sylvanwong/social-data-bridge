@@ -21,7 +21,7 @@ const FIELD_CONFIG = [
   { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
   { key: "profile_url", name: "作者主页链接", type: FieldType.Url, defaultSelected: true, getValue: (item) => item?.profile_url ?? "" },
   { key: "title", name: "标题", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.title ?? "" },
-  { key: "caption", name: "标签文本", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.caption ?? "" },
+  { key: "caption", name: "标签文本", type: FieldType.MultiSelect, defaultSelected: true, getValue: (item) => item?.caption ?? "" },
   // { name: "播放数", type: FieldType.Number, getValue: (item) => Number(item?.digg_count) || 0 },
   { key: "digg_count", name: "点赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
   { key: "comment_count", name: "评论数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.comment_count) || 0 },
@@ -50,6 +50,9 @@ const getAllowedFieldTypes = (config) => {
   if (config.name === '作者名称' || config.name === '平台') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
+  if (config.name === '标签文本') {
+    return [FieldType.Text, FieldType.MultiSelect];
+  }
   return [config.type];
 };
 
@@ -63,9 +66,43 @@ const getExpectedFieldTypeName = (config) => {
     .join(' / ');
 };
 
+const normalizeTagTextValue = (value, fieldType) => {
+  if (fieldType === FieldType.MultiSelect) {
+    if (Array.isArray(value)) {
+      const tags = value
+        .map(item => typeof item === 'string' ? item.trim() : '')
+        .filter(Boolean);
+      return tags.length ? tags : null;
+    }
+
+    if (typeof value === 'string') {
+      const tags = value
+        .split(/\s+/)
+        .map(item => item.trim())
+        .filter(Boolean);
+      return tags.length ? tags : null;
+    }
+
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map(item => typeof item === 'string' ? item.trim() : '')
+      .filter(Boolean)
+      .join(' ');
+  }
+
+  return value ?? '';
+};
+
 const normalizeFieldValue = (value, config, fieldType) => {
   if ((config.name === '作者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect) {
     return value ? value : null;
+  }
+
+  if (config.name === '标签文本') {
+    return normalizeTagTextValue(value, fieldType);
   }
 
   return value;
