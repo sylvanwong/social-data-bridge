@@ -6,7 +6,7 @@ import request from '@/utils/request'
 export const FIELD_MAPPING = [
   { key: 'aweme_id', name: '视频编号', type: FieldType.Text, defaultSelected: true, required: true },
   { key: 'title', name: '视频标题', type: FieldType.Text, defaultSelected: true },
-  { key: 'tags', name: '标签', type: FieldType.Text, defaultSelected: true },
+  { key: 'tags', name: '标签', type: FieldType.MultiSelect, defaultSelected: true },
   { key: 'user_id', name: '用户ID', type: FieldType.Text, defaultSelected: true },
   { key: 'nickname', name: '作者', type: FieldType.Text, defaultSelected: true },
   { key: 'avatar', name: '博主头像', type: FieldType.Text, defaultSelected: true },
@@ -39,6 +39,9 @@ const getAllowedFieldTypes = (config) => {
   if (config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
+  if (config.key === 'tags') {
+    return [FieldType.Text, FieldType.MultiSelect];
+  }
   return [config.type];
 };
 
@@ -63,7 +66,75 @@ const normalizeSelectCompatibleValue = (value) => {
   return String(value).trim() || null;
 };
 
-const normalizeCellValue = async (table, field, value, config, fieldType) => {
+const splitTags = (value) => {
+  if (Array.isArray(value)) {
+    return value
+      .map(item => typeof item === 'string' ? item.trim() : '')
+      .filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    return value
+      .split(/\s+/)
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+const ensureTagOptions = async (field, list, config, fieldType) => {
+  if (config.key !== 'tags' || fieldType !== FieldType.MultiSelect) {
+    return null;
+  }
+
+  const tagSet = new Set();
+  for (const item of list) {
+    for (const tag of splitTags(item?.[config.key])) {
+      tagSet.add(tag);
+    }
+  }
+
+  if (tagSet.size === 0) {
+    return new Map();
+  }
+
+  const existingOptions = await field.getOptions();
+  const existingNames = new Set(existingOptions.map(option => option.name));
+  const missingOptions = [...tagSet]
+    .filter(tag => !existingNames.has(tag))
+    .map(tag => ({ name: tag }));
+
+  if (missingOptions.length > 0) {
+    await field.addOptions(missingOptions);
+  }
+
+  const latestOptions = await field.getOptions();
+  return new Map(latestOptions.map(option => [option.name, option.id]));
+};
+
+const normalizeTagsCompatibleValue = (value, fieldType, tagOptionIdMap = null) => {
+  const tags = splitTags(value);
+
+  if (fieldType === FieldType.MultiSelect) {
+    if (!tagOptionIdMap) {
+      return tags.length ? tags : [];
+    }
+
+    const optionValues = tags
+      .map(tag => {
+        const optionId = tagOptionIdMap.get(tag);
+        return optionId ? { id: optionId, text: tag } : null;
+      })
+      .filter(Boolean);
+
+    return optionValues.length ? optionValues : [];
+  }
+
+  return tags.join(' ');
+};
+
+const normalizeCellValue = async (table, field, value, config, fieldType, extra = {}) => {
   let nextValue = value;
   if (config.isTimestamp && nextValue) {
     nextValue = nextValue * 1000;
@@ -71,6 +142,10 @@ const normalizeCellValue = async (table, field, value, config, fieldType) => {
 
   if ((config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') && fieldType === FieldType.SingleSelect) {
     return normalizeSelectCompatibleValue(nextValue);
+  }
+
+  if (config.key === 'tags') {
+    return normalizeTagsCompatibleValue(nextValue, fieldType, extra.tagOptionIdMap);
   }
 
   return normalizeTextCompatibleValue(nextValue);
@@ -323,6 +398,13 @@ export const useSocialData = (getTableName, api_key) => {
         return;
       }
 
+      for (const item of availableFieldList) {
+        item.extra = {};
+        if (item.config.key === 'tags') {
+          item.extra.tagOptionIdMap = await ensureTagOptions(item.field, list, item.config, item.fieldType);
+        }
+      }
+
       let records = [];
       for (const item of list) {
         let record = [];
@@ -330,7 +412,8 @@ export const useSocialData = (getTableName, api_key) => {
           if (!targetTableId && config.formatter) {
             await field.setFormatter(config.formatter);
           }
-          const value = await normalizeCellValue(activeTable, field, item[config.key], config, fieldType);
+          const matchedField = availableFieldList.find(fieldItem => fieldItem.field?.id === field.id && fieldItem.config.key === config.key);
+          const value = await normalizeCellValue(activeTable, field, item[config.key], config, fieldType, matchedField?.extra);
           record.push(await field.createCell(value));
         }
         records.push(record);
