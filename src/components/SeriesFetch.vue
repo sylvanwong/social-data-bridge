@@ -1,5 +1,5 @@
 <script setup>
-import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
+import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
 import { ref, onMounted, watch } from "vue";
 import request from '@/utils/request'
@@ -48,7 +48,7 @@ const FIELD_MAPPING = [
   { key: 'user_id', name: '作者ID', type: FieldType.Text, defaultSelected: true },
   { key: 'social_type', name: '平台', type: FieldType.Text, defaultSelected: true },
   { key: 'share_url', name: '短剧链接', type: FieldType.Text, defaultSelected: true },
-  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true },
+  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
 ];
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
@@ -215,6 +215,24 @@ const setupTableFields = async (tableId, isNewTable = false) => {
 
   if (!isNewTable && missingFields.length > 0) {
     ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+  }
+
+  const latestFieldMetaList = await table.getFieldMetaList();
+  const latestFieldMetaMap = new Map(latestFieldMetaList.map(meta => [meta.name, meta.id]));
+  for (const config of activeFieldMapping) {
+    const fieldId = latestFieldMetaMap.get(config.name);
+    if (!fieldId) continue;
+    try {
+      const field = await table.getFieldById(fieldId);
+      if (config.formatter) {
+        await field.setFormatter(config.formatter);
+      }
+      if (config.dateFormat) {
+        await field.setDateFormat(config.dateFormat);
+      }
+    } catch (error) {
+      console.error(`设置字段 ${config.name} 格式失败:`, error);
+    }
   }
 };
 

@@ -1,5 +1,5 @@
 <script setup>
-import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
+import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
@@ -31,8 +31,8 @@ const FIELD_CONFIG = [
   { key: "download_addr", name: "下载链接", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.download_addr ?? "" },
   { key: "origin_cover", name: "封面", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.origin_cover ?? "" },
   { key: "duration", name: "时长", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.duration) || 0 },
-  { key: "t_create", name: "发布时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
-  { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
+  { key: "t_create", name: "发布时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
+  { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
   { key: "note_url", name: "视频链接", type: FieldType.Text, defaultSelected: false, getValue: (item) => item?.note_url ?? "" },
 ];
 const FIELD_SELECTION_STORAGE_KEY = 'video_data_selected_fields_v1';
@@ -291,6 +291,35 @@ const validateAndAddFields = async (activeFieldConfigs) => {
     return null;
   }
 
+  const ensureFieldDisplayConfig = async (fieldId, fieldConfig) => {
+    if (!fieldId) {
+      return;
+    }
+
+    const field = await table.getFieldById(fieldId);
+
+    if (fieldConfig.formatter) {
+      await field.setFormatter(fieldConfig.formatter);
+    }
+
+    if (fieldConfig.dateFormat) {
+      await field.setDateFormat(fieldConfig.dateFormat);
+    }
+  };
+
+  for (const config of activeFieldConfigs) {
+    const fieldMeta = fieldMetaMap.get(config.name);
+    if (!fieldMeta) {
+      continue;
+    }
+
+    try {
+      await ensureFieldDisplayConfig(fieldMeta.id, config);
+    } catch (error) {
+      console.error(`设置字段 ${config.name} 格式失败:`, error);
+    }
+  }
+
   // 添加缺失字段
     for (const fieldConfig of missingFields) {
       try {
@@ -303,24 +332,6 @@ const validateAndAddFields = async (activeFieldConfigs) => {
           ? addFieldResult
           : addFieldResult?.fieldId || addFieldResult?.id || addFieldResult?.field_id;
 
-        if (fieldConfig.formatter) {
-          let formatterFieldId = newFieldId;
-          if (!formatterFieldId) {
-            const latestFieldList = await table.getFieldList();
-            for (const field of latestFieldList) {
-              const name = await field.getName();
-              if (name === fieldConfig.name) {
-                formatterFieldId = field.id;
-                break;
-              }
-            }
-          }
-
-          if (formatterFieldId) {
-            const newField = await table.getFieldById(formatterFieldId);
-            await newField.setFormatter(fieldConfig.formatter);
-          }
-        }
         const finalFieldId = newFieldId || (() => {
           const existingMeta = fieldMetaMap.get(fieldConfig.name);
           return existingMeta?.id;
@@ -340,6 +351,8 @@ const validateAndAddFields = async (activeFieldConfigs) => {
           fieldMetaMap.set(fieldConfig.name, { id: finalFieldId, type: fieldConfig.type });
           console.log(`字段 ${fieldConfig.name} 添加成功，ID: ${finalFieldId}`);
         }
+
+        await ensureFieldDisplayConfig(fieldMetaMap.get(fieldConfig.name)?.id, fieldConfig);
       } catch (e) {
         console.error(`添加字段 ${fieldConfig.name} 失败:`, e);
         ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
