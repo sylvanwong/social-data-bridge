@@ -1,6 +1,6 @@
 <script setup>
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
 import { buildApiUrl } from '@/utils/request';
 
@@ -11,10 +11,15 @@ const props = defineProps({
 });
 
 const formData = ref({
+  mode: 'table',
+  targetType: 'current',
   urlFieldId: '',
   scope: 'n',
   rowCount: 5,
+  manualUrls: '',
+  targetTableId: '',
 });
+const MANUAL_TABLE_BASE_NAME = '链接转附件';
 
 const FIELD_CONFIG = [
   {
@@ -70,13 +75,14 @@ const getFinalFileName = (url, baseName, index, total) => {
 };
 
 const fieldOptions = ref([]);
+const tableOptions = ref([]);
 const loading = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
 const ACTIVE_FIELD_CONFIGS = FIELD_CONFIG;
 
-const getFieldListByType = async () => {
+const getFieldListByType = async ({ silent = false } = {}) => {
   try {
     const table = await bitable.base.getActiveTable();
     const fieldList = await table.getFieldList();
@@ -93,7 +99,29 @@ const getFieldListByType = async () => {
   } catch (error) {
     console.error('获取字段列表失败:', error);
     fieldOptions.value = [{ id: 'nodata', name: '获取字段列表失败' }];
-    ElNotification({ message: '当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
+    if (!silent) {
+      ElNotification({ message: '当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
+    }
+  }
+};
+
+const loadFieldOptions = async ({ silent = false } = {}) => {
+  await getFieldListByType({ silent });
+};
+
+const loadTableOptions = async () => {
+  try {
+    const tableList = await bitable.base.getTableList();
+    tableOptions.value = await Promise.all(
+      tableList.map(async (table) => ({
+        id: table.id,
+        name: await table.getName(),
+      }))
+    );
+  } catch (error) {
+    console.error('获取表格列表失败:', error);
+    tableOptions.value = [];
+    ElNotification({ message: '获取表格列表失败，请稍后重试', type: 'error', duration: 0 });
   }
 };
 
@@ -153,9 +181,11 @@ const getRecordIdListByScope = async (scope, rowCount) => {
   return allRecordIdList.slice(0, rowCount);
 };
 
-const validateAndAddFields = async () => {
+const validateAndAddFields = async (tableId = '') => {
   try {
-    const table = await bitable.base.getActiveTable();
+    const table = tableId
+      ? await bitable.base.getTableById(tableId)
+      : await bitable.base.getActiveTable();
     const fieldList = await table.getFieldList();
     const fieldMetaMap = new Map();
 
@@ -225,6 +255,52 @@ const validateAndAddFields = async () => {
   } catch (error) {
     ElNotification({ message: `字段操作失败: ${error.message || error}`, type: 'error', duration: 0 });
     return null;
+  }
+};
+
+const createSequentialTable = async (baseTableName) => {
+  const existingTables = await bitable.base.getTableMetaList();
+  const tableNames = existingTables.map((table) => table.name);
+  const existsBaseTable = tableNames.includes(baseTableName);
+  const existsSequentialTable = tableNames.some((name) => name.startsWith(`${baseTableName}`) && /\d+$/.test(name.slice(baseTableName.length)));
+  if (!existsBaseTable && !existsSequentialTable) {
+    return await bitable.base.addTable({ name: baseTableName });
+  }
+
+  const reg = new RegExp(`^${baseTableName}(\\d+)$`);
+  let maxIndex = 0;
+  tableNames.forEach((name) => {
+    const match = name.match(reg);
+    if (match) {
+      const index = parseInt(match[1], 10);
+      if (index > maxIndex) {
+        maxIndex = index;
+      }
+    }
+  });
+
+  return await bitable.base.addTable({ name: `${baseTableName}${maxIndex + 1}` });
+};
+
+const createManualTargetTable = async () => {
+  const tableMeta = await createSequentialTable(MANUAL_TABLE_BASE_NAME);
+  const tableId = tableMeta.tableId || tableMeta.id;
+  if (!tableId) {
+    throw new Error('创建新表格失败');
+  }
+  return tableId;
+};
+
+const setupNewTableFields = async (tableId) => {
+  const table = await bitable.base.getTableById(tableId);
+  const fieldMetaList = await table.getFieldMetaList();
+  const defaultFirstField = fieldMetaList[0];
+
+  if (defaultFirstField && defaultFirstField.name === '文本') {
+    await table.setField(defaultFirstField.id, {
+      type: ACTIVE_FIELD_CONFIGS[0].type,
+      name: ACTIVE_FIELD_CONFIGS[0].name,
+    });
   }
 };
 
@@ -305,6 +381,56 @@ const writeDataToRecord = async (recordId, urls, fieldNameToId, activeFieldConfi
   }
 };
 
+const createAttachmentCell = async (table, fieldId, urls) => {
+  const field = await table.getFieldById(fieldId);
+  const normalizedUrls = (Array.isArray(urls) ? urls : [urls])
+    .filter((url) => url && typeof url === 'string')
+    .map((url) => url.replace(/^http:\/\//i, 'https://'));
+
+  if (normalizedUrls.length === 0) {
+    return await field.createCell(null);
+  }
+
+  try {
+    const files = await Promise.all(
+      normalizedUrls.map(async (url, index) => {
+        const baseName = ACTIVE_FIELD_CONFIGS[0].getFileName();
+        const finalName = getFinalFileName(url, baseName, index, normalizedUrls.length);
+        return downloadAttachmentAsFile(url, finalName);
+      })
+    );
+    return await field.createCell(files.length === 1 ? files[0] : files);
+  } catch (error) {
+    console.log('附件下载失败，跳过附件写入:', error);
+    return await field.createCell(null);
+  }
+};
+
+const appendRecordsToTable = async (tableId, rows) => {
+  const table = await bitable.base.getTableById(tableId);
+  const fieldMetaMap = new Map();
+  const fieldList = await table.getFieldList();
+
+  for (const field of fieldList) {
+    const name = await field.getName();
+    fieldMetaMap.set(name, field.id);
+  }
+
+  const attachmentFieldId = fieldMetaMap.get(ACTIVE_FIELD_CONFIGS[0].name);
+  if (!attachmentFieldId) {
+    throw new Error('目标表缺少附件字段');
+  }
+
+  const records = [];
+  for (const { urls } of rows) {
+    records.push([await createAttachmentCell(table, attachmentFieldId, urls)]);
+  }
+
+  if (records.length > 0) {
+    await table.addRecords(records);
+  }
+};
+
 const extractUrl = (value) => {
   if (!value) return null;
 
@@ -370,6 +496,39 @@ const getCellValuesByFieldId = async (recordIdList, fieldId) => {
   return rows.filter((item) => item && Array.isArray(item.urls) && item.urls.length > 0);
 };
 
+const parseManualUrls = (text) => {
+  if (!text || typeof text !== 'string') {
+    return [];
+  }
+
+  return [...new Set(
+    text
+      .split(/[\n,，]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )];
+};
+
+const resolveTargetTableId = async (targetType) => {
+  if (targetType === 'new') {
+    const tableId = await createManualTargetTable();
+    await setupNewTableFields(tableId);
+    await bitable.ui.switchToTable(tableId);
+    return tableId;
+  }
+
+  if (targetType === 'existing') {
+    const tableId = formData.value.targetTableId;
+    const fieldNameToId = await validateAndAddFields(tableId);
+    if (!fieldNameToId) {
+      return null;
+    }
+    return tableId;
+  }
+
+  return null;
+};
+
 const showToast = (text, isLoading = true) => {
   toastText.value = text;
   toastLoading.value = isLoading;
@@ -385,7 +544,7 @@ const stepNumber = (delta) => {
   formData.value.rowCount = nextValue;
 };
 
-const handleSubmit = async () => {
+const handleTableModeSubmit = async () => {
   if (!props.api_key) {
     ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
     return;
@@ -407,7 +566,8 @@ const handleSubmit = async () => {
     const recordIdList = await getRecordIdListByScope(formData.value.scope, formData.value.rowCount);
     if (!recordIdList) return;
 
-    const fieldNameToId = await validateAndAddFields();
+    const activeTable = await bitable.base.getActiveTable();
+    const fieldNameToId = await validateAndAddFields(activeTable.id);
     if (!fieldNameToId) return;
 
     const rowList = await getCellValuesByFieldId(recordIdList, formData.value.urlFieldId);
@@ -436,9 +596,99 @@ const handleSubmit = async () => {
   }
 };
 
+const handleManualModeSubmit = async () => {
+  if (!props.api_key) {
+    ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
+    return;
+  }
+
+  if (!formData.value.manualUrls || !formData.value.manualUrls.trim()) {
+    ElNotification({ message: '请输入URL', type: 'warning', duration: 0 });
+    return;
+  }
+
+  if (formData.value.targetType === 'existing' && !formData.value.targetTableId) {
+    ElNotification({ message: '请选择现有表格', type: 'warning', duration: 0 });
+    return;
+  }
+
+  const urls = parseManualUrls(formData.value.manualUrls);
+  if (urls.length === 0) {
+    ElNotification({ message: '请至少输入一个有效的URL', type: 'warning', duration: 0 });
+    return;
+  }
+
+  loading.value = true;
+
+  try {
+    const targetTableId = await resolveTargetTableId(formData.value.targetType);
+    if (!targetTableId) {
+      return;
+    }
+
+    const rows = urls.map((url) => ({ urls: [url] }));
+    showToast(`准备处理 ${rows.length} 条数据...`, true);
+    await appendRecordsToTable(targetTableId, rows);
+    showToast(`处理完成：成功 ${rows.length} 条，失败 0 条`, false);
+    setTimeout(() => hideToast(), 3000);
+  } catch (error) {
+    ElNotification({ message: error.message || '获取数据失败', type: 'error', duration: 0 });
+  } finally {
+    loading.value = false;
+  }
+};
+
+const handleSubmit = async () => {
+  if (formData.value.mode === 'manual') {
+    await handleManualModeSubmit();
+    return;
+  }
+
+  await handleTableModeSubmit();
+};
+
 onMounted(() => {
-  getFieldListByType();
+  if (formData.value.mode === 'table') {
+    loadFieldOptions({ silent: true });
+  }
 });
+
+watch(
+  () => formData.value.mode,
+  (mode) => {
+    if (mode === 'table') {
+      formData.value.targetType = 'current';
+      loadFieldOptions({ silent: false });
+    }
+
+    if (mode === 'manual' && formData.value.targetType === 'current') {
+      formData.value.targetType = 'new';
+    }
+
+    if (formData.value.targetType === 'existing' && tableOptions.value.length === 0) {
+      loadTableOptions();
+      return;
+    }
+
+    if (mode !== 'manual' && formData.value.targetType !== 'existing') {
+      formData.value.targetTableId = '';
+    }
+  }
+);
+
+watch(
+  () => formData.value.targetType,
+  (targetType) => {
+    if (targetType === 'existing' && tableOptions.value.length === 0) {
+      loadTableOptions();
+      return;
+    }
+
+    if (targetType !== 'existing') {
+      formData.value.targetTableId = '';
+    }
+  }
+);
 </script>
 
 <template>
@@ -452,50 +702,106 @@ onMounted(() => {
       <span class="sub-page-title">链接转附件</span>
     </div>
     <div class="form-card">
+      <div class="mode-switch">
+        <button
+          type="button"
+          class="mode-tab"
+          :class="{ active: formData.mode === 'table' }"
+          @click="formData.mode = 'table'"
+        >
+          从表格选取
+        </button>
+        <button
+          type="button"
+          class="mode-tab"
+          :class="{ active: formData.mode === 'manual' }"
+          @click="formData.mode = 'manual'"
+        >
+          手动输入
+        </button>
+      </div>
       <el-form class="form" :model="formData" label-position="top">
-        <el-form-item label="">
-          <div class="c-label">
-            URL字段
-            <el-tooltip effect="dark" placement="top">
-              <template #content>支持文本或链接类型字段</template>
-              <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
-            </el-tooltip>
+        <el-form-item v-if="formData.mode === 'manual'" label="" style="margin-top: 12px">
+          <div class="field-stack">
+            <div class="c-label">目标表格</div>
+            <el-radio-group v-model="formData.targetType" class="radio-block">
+              <el-radio value="new">新建表格</el-radio>
+              <el-radio value="existing">使用现有表格</el-radio>
+            </el-radio-group>
           </div>
-          <el-select v-model="formData.urlFieldId" placeholder="选择包含URL的字段" style="width: 100%">
-            <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+        </el-form-item>
+
+        <el-form-item v-if="formData.mode === 'manual' && formData.targetType === 'existing'" label="">
+          <div class="c-label">选择现有表格</div>
+          <el-select v-model="formData.targetTableId" placeholder="请选择" style="width: 100%">
+            <el-option v-for="table in tableOptions" :key="table.id" :label="table.name" :value="table.id" />
           </el-select>
         </el-form-item>
 
-        <el-form-item label="" style="margin-top: 12px">
-          <div class="c-label">
-            数据范围
-            <el-tooltip effect="dark" placement="top">
-              <template #content>选择要执行的数据范围</template>
-              <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
-            </el-tooltip>
-          </div>
-          <el-radio-group v-model="formData.scope" class="custom-radio-group">
-            <el-radio value="all" class="custom-radio-item">执行所有行</el-radio>
-            <el-radio value="selected" class="custom-radio-item">执行选中行</el-radio>
-            <el-radio value="n" class="custom-radio-item">
-              <span class="radio-label-text">执行前N行</span>
-              <div class="custom-stepper-input">
-                <input
-                  type="number"
-                  :value="formData.rowCount"
-                  @input.stop="formData.rowCount = Math.max(1, Math.min(100, parseInt($event.target.value) || 5))"
-                  @click.stop
-                  min="1"
-                  max="100"
-                />
-                <div class="stepper-buttons">
-                  <button @click.stop="stepNumber(1)" :disabled="formData.rowCount >= 100" class="stepper-btn stepper-btn-up"></button>
-                  <button @click.stop="stepNumber(-1)" :disabled="formData.rowCount <= 1" class="stepper-btn stepper-btn-down"></button>
+        <template v-if="formData.mode === 'table'">
+          <el-form-item label="">
+            <div class="c-label">
+              URL字段
+              <el-tooltip effect="dark" placement="top">
+                <template #content>支持文本或链接类型字段</template>
+                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
+              </el-tooltip>
+            </div>
+            <el-select v-model="formData.urlFieldId" placeholder="选择包含URL的字段" style="width: 100%">
+              <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="" style="margin-top: 12px">
+            <div class="c-label">
+              数据范围
+              <el-tooltip effect="dark" placement="top">
+                <template #content>选择要执行的数据范围</template>
+                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
+              </el-tooltip>
+            </div>
+            <el-radio-group v-model="formData.scope" class="custom-radio-group">
+              <el-radio value="all" class="custom-radio-item">执行所有行</el-radio>
+              <el-radio value="selected" class="custom-radio-item">执行选中行</el-radio>
+              <el-radio value="n" class="custom-radio-item">
+                <span class="radio-label-text">执行前N行</span>
+                <div class="custom-stepper-input">
+                  <input
+                    type="number"
+                    :value="formData.rowCount"
+                    @input.stop="formData.rowCount = Math.max(1, Math.min(100, parseInt($event.target.value) || 5))"
+                    @click.stop
+                    min="1"
+                    max="100"
+                  />
+                  <div class="stepper-buttons">
+                    <button @click.stop="stepNumber(1)" :disabled="formData.rowCount >= 100" class="stepper-btn stepper-btn-up"></button>
+                    <button @click.stop="stepNumber(-1)" :disabled="formData.rowCount <= 1" class="stepper-btn stepper-btn-down"></button>
+                  </div>
                 </div>
-              </div>
-            </el-radio>
-          </el-radio-group>
-        </el-form-item>
+              </el-radio>
+            </el-radio-group>
+          </el-form-item>
+        </template>
+
+        <template v-else>
+          <el-form-item label="">
+            <div class="c-label">
+              URL
+              <el-tooltip effect="dark" placement="top">
+                <template #content>支持多个URL，<br />可换行或逗号分隔</template>
+                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
+              </el-tooltip>
+            </div>
+            <el-input
+              v-model="formData.manualUrls"
+              type="textarea"
+              :rows="4"
+              class="c-input"
+              placeholder="请输入正确的URL，支持批量添加，多个链接可换行或用逗号分隔"
+            />
+          </el-form-item>
+        </template>
 
       </el-form>
 
@@ -569,6 +875,39 @@ onMounted(() => {
   border-radius: 8px;
   box-sizing: border-box;
 }
+.mode-switch {
+  display: flex;
+  gap: 0;
+  margin-bottom: 20px;
+  background: #F7F8FA;
+  border-radius: 6px;
+  padding: 3px;
+  border: 1px solid #E5E6EB;
+}
+.mode-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #4E5969;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  line-height: 20px;
+}
+.mode-tab:hover {
+  color: #1D2129;
+}
+.mode-tab.active {
+  background: #FFFFFF;
+  color: #A8071A;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
 .form :deep(.el-form-item__label) {
   font-size: 14px;
   color: #1d2129;
@@ -600,6 +939,12 @@ onMounted(() => {
   width: 16px;
   height: 16px;
   margin-left: 4px;
+}
+.field-stack {
+  width: 100%;
+}
+.radio-block {
+  width: 100%;
 }
 .custom-radio-group {
   display: flex;

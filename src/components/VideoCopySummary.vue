@@ -11,10 +11,15 @@ const props = defineProps({
 });
 
 const formData = ref({
+  mode: "table",
+  targetType: "current",
   videoLinkFieldId: "",
   scope: "n",
   rowCount: 5,
+  manualUrls: "",
+  targetTableId: "",
 });
+const MANUAL_TABLE_BASE_NAME = "提取视频文案";
 
 const FIELD_CONFIG = [
   { key: "summary", name: "摘要", type: FieldType.Text, defaultSelected: true, getValue: (item) => getSummary(item) },
@@ -42,6 +47,7 @@ const isFieldTypeCompatible = (fieldType, config) => {
 };
 
 const fieldOptions = ref([]);
+const tableOptions = ref([]);
 const loading = ref(false);
 const toastVisible = ref(false);
 const toastText = ref("");
@@ -147,8 +153,37 @@ const getFieldListByType = async () => {
   } catch (error) {
     console.error("获取字段列表失败:", error);
     fieldOptions.value = [{ id: "nodata", name: "获取字段列表失败" }];
+  }
+};
+
+const loadFieldOptions = async ({ silent = false } = {}) => {
+  try {
+    await getFieldListByType();
+  } catch (error) {
+    if (!silent) {
+      ElNotification({
+        message: "当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。",
+        type: "error",
+        duration: 0,
+      });
+    }
+  }
+};
+
+const loadTableOptions = async () => {
+  try {
+    const tableList = await bitable.base.getTableList();
+    tableOptions.value = await Promise.all(
+      tableList.map(async (table) => ({
+        id: table.id,
+        name: await table.getName(),
+      }))
+    );
+  } catch (error) {
+    console.error("获取表格列表失败:", error);
+    tableOptions.value = [];
     ElNotification({
-      message: "当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。",
+      message: "获取表格列表失败，请稍后重试",
       type: "error",
       duration: 0,
     });
@@ -213,9 +248,11 @@ const getRecordIdListByScope = async (scope, rowCount) => {
   return recordIdList;
 };
 
-const validateAndAddFields = async (activeFieldConfigs) => {
+const validateAndAddFields = async (tableId, activeFieldConfigs) => {
   try {
-    const table = await bitable.base.getActiveTable();
+    const table = tableId
+      ? await bitable.base.getTableById(tableId)
+      : await bitable.base.getActiveTable();
     const fieldList = await table.getFieldList();
     const fieldMetaMap = new Map();
 
@@ -290,6 +327,63 @@ const validateAndAddFields = async (activeFieldConfigs) => {
   }
 };
 
+const createSequentialTable = async (baseTableName) => {
+  const existingTables = await bitable.base.getTableMetaList();
+  const tableNames = existingTables.map((table) => table.name);
+  const existsBaseTable = tableNames.includes(baseTableName);
+  const existsSequentialTable = tableNames.some(
+    (name) => name.startsWith(`${baseTableName}`) && /\d+$/.test(name.slice(baseTableName.length))
+  );
+  if (!existsBaseTable && !existsSequentialTable) {
+    return await bitable.base.addTable({ name: baseTableName });
+  }
+
+  const reg = new RegExp(`^${baseTableName}(\\d+)$`);
+  let maxIndex = 0;
+  tableNames.forEach((name) => {
+    const match = name.match(reg);
+    if (match) {
+      const index = parseInt(match[1], 10);
+      if (index > maxIndex) {
+        maxIndex = index;
+      }
+    }
+  });
+
+  return await bitable.base.addTable({ name: `${baseTableName}${maxIndex + 1}` });
+};
+
+const createManualTargetTable = async () => {
+  const tableMeta = await createSequentialTable(MANUAL_TABLE_BASE_NAME);
+  const tableId = tableMeta.tableId || tableMeta.id;
+  if (!tableId) {
+    throw new Error("创建新表格失败");
+  }
+  return tableId;
+};
+
+const setupNewTableFields = async (tableId, activeFieldConfigs) => {
+  const table = await bitable.base.getTableById(tableId);
+  const fieldMetaList = await table.getFieldMetaList();
+  const defaultFirstField = fieldMetaList[0];
+
+  if (activeFieldConfigs.length === 0) {
+    throw new Error("请至少选择一个需要更新的字段");
+  }
+
+  if (defaultFirstField && defaultFirstField.name === "文本") {
+    await table.setField(defaultFirstField.id, {
+      type: activeFieldConfigs[0].type,
+      name: activeFieldConfigs[0].name,
+    });
+  }
+
+  for (let index = 1; index < activeFieldConfigs.length; index++) {
+    const config = activeFieldConfigs[index];
+    await table.addField({ type: config.type, name: config.name });
+  }
+};
+
 const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs) => {
   try {
     const table = await bitable.base.getActiveTable();
@@ -312,6 +406,43 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
   } catch (error) {
     console.error("写入记录失败:", error);
     throw error;
+  }
+};
+
+const createCellValue = async (table, fieldId, item, config) => {
+  const field = await table.getFieldById(fieldId);
+  const fieldType = await field.getType();
+  const value = config.name === "平台" && fieldType === FieldType.SingleSelect
+    ? (config.getValue(item) || null)
+    : config.getValue(item);
+  return await field.createCell(value);
+};
+
+const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
+  const table = await bitable.base.getTableById(tableId);
+  const fieldList = await table.getFieldList();
+  const fieldMetaMap = new Map();
+
+  for (const field of fieldList) {
+    const name = await field.getName();
+    fieldMetaMap.set(name, field.id);
+  }
+
+  const records = [];
+  for (const item of list) {
+    const cells = [];
+    for (const config of activeFieldConfigs) {
+      const fieldId = fieldMetaMap.get(config.name);
+      if (!fieldId) continue;
+      cells.push(await createCellValue(table, fieldId, item, config));
+    }
+    if (cells.length > 0) {
+      records.push(cells);
+    }
+  }
+
+  if (records.length > 0) {
+    await table.addRecords(records);
   }
 };
 
@@ -351,6 +482,19 @@ const getRecordEntriesByFieldId = async (recordIdList, fieldId) => {
   );
 
   return entries.filter(Boolean);
+};
+
+const parseManualUrls = (text) => {
+  if (!text || typeof text !== "string") {
+    return [];
+  }
+
+  return [...new Set(
+    text
+      .split(/[\n,，]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  )];
 };
 
 const sleep = (ms) =>
@@ -407,7 +551,7 @@ const pollMediaTask = async (taskId, initialNextPollSeconds = 3) => {
     }
 
     if (taskData.status === "failed") {
-      throw new Error(taskData.error || taskData.summary_error || "视频文案摘要提取失败");
+      throw new Error(taskData.error || taskData.summary_error || "视频文案提取失败");
     }
 
     throw new Error(`任务状态异常: ${taskData.status || "unknown"}`);
@@ -416,7 +560,55 @@ const pollMediaTask = async (taskId, initialNextPollSeconds = 3) => {
   throw new Error("任务处理超时，请稍后重试");
 };
 
-const handleSubmit = async () => {
+const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
+  if (targetType === "new") {
+    const tableId = await createManualTargetTable();
+    await setupNewTableFields(tableId, activeFieldConfigs);
+    await bitable.ui.switchToTable(tableId);
+    return tableId;
+  }
+
+  if (targetType === "existing") {
+    const tableId = formData.value.targetTableId;
+    const fieldNameToId = await validateAndAddFields(tableId, activeFieldConfigs);
+    if (!fieldNameToId) {
+      return null;
+    }
+    return tableId;
+  }
+
+  return null;
+};
+
+const fetchSummaryByEntries = async (recordEntries) => {
+  let successCount = 0;
+  let failCount = 0;
+  const successList = [];
+
+  showToast(`准备处理 ${recordEntries.length} 条数据...`, true);
+
+  for (let i = 0; i < recordEntries.length; i++) {
+    const { url, recordId } = recordEntries[i];
+
+    try {
+      showToast(`正在提交第 ${i + 1}/${recordEntries.length} 条任务...`, true);
+      const task = await createMediaTask(url);
+
+      showToast(`第 ${i + 1}/${recordEntries.length} 条任务处理中...`, true);
+      const result = await pollMediaTask(task.task_id, task.next_poll_after_seconds);
+
+      successList.push({ ...result, __recordId: recordId });
+      successCount++;
+    } catch (error) {
+      ElNotification({ message: error.message || "请求失败", type: "error", duration: 0 });
+      failCount++;
+    }
+  }
+
+  return { successList, successCount, failCount };
+};
+
+const handleTableModeSubmit = async () => {
   if (!props.api_key) {
     ElNotification({ message: "请先设置API Key", type: "warning", duration: 0 });
     return;
@@ -442,17 +634,16 @@ const handleSubmit = async () => {
     return;
   }
 
+  if (formData.value.targetType === "existing" && !formData.value.targetTableId) {
+    ElNotification({ message: "请选择现有表格", type: "warning", duration: 0 });
+    return;
+  }
+
   loading.value = true;
 
   try {
     const recordIdList = await getRecordIdListByScope(formData.value.scope, formData.value.rowCount);
     if (!recordIdList) {
-      loading.value = false;
-      return;
-    }
-
-    const fieldNameToId = await validateAndAddFields(activeFieldConfigs);
-    if (!fieldNameToId) {
       loading.value = false;
       return;
     }
@@ -464,28 +655,37 @@ const handleSubmit = async () => {
       return;
     }
 
-    let successCount = 0;
-    let failCount = 0;
-
-    showToast(`准备处理 ${recordEntries.length} 条数据...`, true);
-
-    for (let i = 0; i < recordEntries.length; i++) {
-      const { url, recordId } = recordEntries[i];
-
-      try {
-        showToast(`正在提交第 ${i + 1}/${recordEntries.length} 条任务...`, true);
-        const task = await createMediaTask(url);
-
-        showToast(`第 ${i + 1}/${recordEntries.length} 条任务处理中...`, true);
-        const result = await pollMediaTask(task.task_id, task.next_poll_after_seconds);
-
-        await writeDataToRecord(recordId, result, fieldNameToId, activeFieldConfigs);
-        successCount++;
-      } catch (error) {
-        ElNotification({ message: error.message || "请求失败", type: "error", duration: 0 });
-        failCount++;
+    if (formData.value.targetType === "current") {
+      const activeTable = await bitable.base.getActiveTable();
+      const fieldNameToId = await validateAndAddFields(activeTable.id, activeFieldConfigs);
+      if (!fieldNameToId) {
+        loading.value = false;
+        return;
       }
+
+      const { successList, successCount, failCount } = await fetchSummaryByEntries(recordEntries);
+      for (const item of successList) {
+        await writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs);
+      }
+
+      showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+      setTimeout(() => {
+        hideToast();
+      }, 3000);
+      return;
     }
+
+    const { successList, successCount, failCount } = await fetchSummaryByEntries(recordEntries);
+    if (successList.length === 0) {
+      throw new Error("未获取到有效的视频文案结果");
+    }
+
+    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
+    if (!targetTableId) {
+      return;
+    }
+
+    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
 
     showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
     setTimeout(() => {
@@ -496,6 +696,70 @@ const handleSubmit = async () => {
   } finally {
     loading.value = false;
   }
+};
+
+const handleManualModeSubmit = async () => {
+  if (!props.api_key) {
+    ElNotification({ message: "请先设置API Key", type: "warning", duration: 0 });
+    return;
+  }
+
+  if (!formData.value.manualUrls || !formData.value.manualUrls.trim()) {
+    ElNotification({ message: "请输入视频链接", type: "warning", duration: 0 });
+    return;
+  }
+
+  if (formData.value.targetType === "existing" && !formData.value.targetTableId) {
+    ElNotification({ message: "请选择现有表格", type: "warning", duration: 0 });
+    return;
+  }
+
+  const urls = parseManualUrls(formData.value.manualUrls);
+  if (urls.length === 0) {
+    ElNotification({ message: "请至少输入一个有效的视频链接", type: "warning", duration: 0 });
+    return;
+  }
+
+  const activeFieldConfigs = getActiveFieldConfigs();
+  if (activeFieldConfigs.length === 0) {
+    ElNotification({ message: "请至少选择一个需要更新的字段", type: "warning", duration: 0 });
+    return;
+  }
+
+  loading.value = true;
+
+  try {
+    const recordEntries = urls.map((url) => ({ url }));
+    const { successList, successCount, failCount } = await fetchSummaryByEntries(recordEntries);
+    if (successList.length === 0) {
+      throw new Error("未获取到有效的视频文案结果");
+    }
+
+    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
+    if (!targetTableId) {
+      return;
+    }
+
+    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+
+    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    setTimeout(() => {
+      hideToast();
+    }, 3000);
+  } catch (error) {
+    ElNotification({ message: error.message || "获取数据失败", type: "error", duration: 0 });
+  } finally {
+    loading.value = false;
+  }
+};
+
+const handleSubmit = async () => {
+  if (formData.value.mode === "manual") {
+    await handleManualModeSubmit();
+    return;
+  }
+
+  await handleTableModeSubmit();
 };
 
 const stepNumber = (delta) => {
@@ -515,8 +779,11 @@ const hideToast = () => {
 };
 
 onMounted(() => {
+  if (formData.value.mode === "table") {
+    loadFieldOptions({ silent: true });
+  }
+
   Promise.all([
-    getFieldListByType(),
     loadSelectedFieldKeys(),
   ]).finally(() => {
     fieldSelectionReady.value = true;
@@ -534,6 +801,43 @@ watch(selectedFieldKeys, (keys) => {
 
   saveSelectedFieldKeys(keys);
 }, { deep: true });
+
+watch(
+  () => formData.value.mode,
+  (mode) => {
+    if (mode === "table") {
+      formData.value.targetType = "current";
+      loadFieldOptions({ silent: false });
+    }
+
+    if (mode === "manual" && formData.value.targetType === "current") {
+      formData.value.targetType = "new";
+    }
+
+    if (formData.value.targetType === "existing" && tableOptions.value.length === 0) {
+      loadTableOptions();
+      return;
+    }
+
+    if (mode !== "manual" && formData.value.targetType !== "existing") {
+      formData.value.targetTableId = "";
+    }
+  }
+);
+
+watch(
+  () => formData.value.targetType,
+  (targetType) => {
+    if (targetType === "existing" && tableOptions.value.length === 0) {
+      loadTableOptions();
+      return;
+    }
+
+    if (targetType !== "existing") {
+      formData.value.targetTableId = "";
+    }
+  }
+);
 </script>
 
 <template>
@@ -544,73 +848,132 @@ watch(selectedFieldKeys, (keys) => {
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
       </span>
-      <span class="sub-page-title">视频文案摘要</span>
+      <span class="sub-page-title">提取视频文案</span>
     </div>
     <div class="form-card">
+      <div class="mode-switch">
+        <button
+          type="button"
+          class="mode-tab"
+          :class="{ active: formData.mode === 'table' }"
+          @click="formData.mode = 'table'"
+        >
+          从表格选取
+        </button>
+        <button
+          type="button"
+          class="mode-tab"
+          :class="{ active: formData.mode === 'manual' }"
+          @click="formData.mode = 'manual'"
+        >
+          手动输入
+        </button>
+      </div>
       <el-form ref="form" class="form" :model="formData" label-position="top">
-        <el-form-item label="">
-          <div slot="label" class="c-label">
-            视频链接
-            <el-tooltip effect="dark" placement="top">
-              <template #content>支持抖音、小红书、快手、微博、微信平台的视频链接</template>
-              <img
-                src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
-                class="help-icon"
-              />
-            </el-tooltip>
+        <el-form-item v-if="formData.mode === 'manual'" label="" style="margin-top: 12px">
+          <div class="field-stack">
+            <div class="c-label">目标表格</div>
+            <el-radio-group v-model="formData.targetType" class="radio-block">
+              <el-radio value="new">新建表格</el-radio>
+              <el-radio value="existing">使用现有表格</el-radio>
+            </el-radio-group>
           </div>
-          <el-select
-            v-model="formData.videoLinkFieldId"
-            placeholder="选择包含视频链接的字段"
-            style="width: 100%"
-          >
-            <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+        </el-form-item>
+
+        <el-form-item v-if="formData.mode === 'manual' && formData.targetType === 'existing'" label="">
+          <div slot="label" class="c-label">选择现有表格</div>
+          <el-select v-model="formData.targetTableId" placeholder="请选择" style="width: 100%">
+            <el-option v-for="table in tableOptions" :key="table.id" :label="table.name" :value="table.id" />
           </el-select>
         </el-form-item>
 
-        <el-form-item label="" style="margin-top: 12px">
-          <div slot="label" class="c-label">
-            数据范围
-            <el-tooltip effect="dark" placement="top">
-              <template #content>选择要执行的数据范围</template>
-              <img
-                src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
-                class="help-icon"
-              />
-            </el-tooltip>
-          </div>
-          <el-radio-group v-model="formData.scope" class="custom-radio-group">
-            <el-radio value="all" class="custom-radio-item">执行所有行</el-radio>
-            <el-radio value="selected" class="custom-radio-item">执行选中行</el-radio>
-            <el-radio value="n" class="custom-radio-item">
-              <span class="radio-label-text">执行前N行</span>
-              <div class="custom-stepper-input">
-                <input
-                  type="number"
-                  :value="formData.rowCount"
-                  @input.stop="formData.rowCount = Math.max(1, Math.min(100, parseInt($event.target.value) || 5))"
-                  @click.stop
-                  min="1"
-                  max="100"
+        <template v-if="formData.mode === 'table'">
+          <el-form-item label="">
+            <div slot="label" class="c-label">
+              视频链接
+              <el-tooltip effect="dark" placement="top">
+                <template #content>支持抖音、小红书、快手、微博、微信平台的视频链接</template>
+                <img
+                  src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
+                  class="help-icon"
                 />
-                <div class="stepper-buttons">
-                  <button
-                    type="button"
-                    @click.stop="stepNumber(1)"
-                    :disabled="formData.rowCount >= 100"
-                    class="stepper-btn stepper-btn-up"
-                  ></button>
-                  <button
-                    type="button"
-                    @click.stop="stepNumber(-1)"
-                    :disabled="formData.rowCount <= 1"
-                    class="stepper-btn stepper-btn-down"
-                  ></button>
+              </el-tooltip>
+            </div>
+            <el-select
+              v-model="formData.videoLinkFieldId"
+              placeholder="选择包含视频链接的字段"
+              style="width: 100%"
+            >
+              <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="" style="margin-top: 12px">
+            <div slot="label" class="c-label">
+              数据范围
+              <el-tooltip effect="dark" placement="top">
+                <template #content>选择要执行的数据范围</template>
+                <img
+                  src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
+                  class="help-icon"
+                />
+              </el-tooltip>
+            </div>
+            <el-radio-group v-model="formData.scope" class="custom-radio-group">
+              <el-radio value="all" class="custom-radio-item">执行所有行</el-radio>
+              <el-radio value="selected" class="custom-radio-item">执行选中行</el-radio>
+              <el-radio value="n" class="custom-radio-item">
+                <span class="radio-label-text">执行前N行</span>
+                <div class="custom-stepper-input">
+                  <input
+                    type="number"
+                    :value="formData.rowCount"
+                    @input.stop="formData.rowCount = Math.max(1, Math.min(100, parseInt($event.target.value) || 5))"
+                    @click.stop
+                    min="1"
+                    max="100"
+                  />
+                  <div class="stepper-buttons">
+                    <button
+                      type="button"
+                      @click.stop="stepNumber(1)"
+                      :disabled="formData.rowCount >= 100"
+                      class="stepper-btn stepper-btn-up"
+                    ></button>
+                    <button
+                      type="button"
+                      @click.stop="stepNumber(-1)"
+                      :disabled="formData.rowCount <= 1"
+                      class="stepper-btn stepper-btn-down"
+                    ></button>
+                  </div>
                 </div>
-              </div>
-            </el-radio>
-          </el-radio-group>
-        </el-form-item>
+              </el-radio>
+            </el-radio-group>
+          </el-form-item>
+        </template>
+
+        <template v-else>
+          <el-form-item label="">
+            <div slot="label" class="c-label">
+              视频链接
+              <el-tooltip effect="dark" placement="top">
+                <template #content>支持抖音、小红书、快手、微博、微信平台的视频链接</template>
+                <img
+                  src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
+                  class="help-icon"
+                />
+              </el-tooltip>
+            </div>
+            <el-input
+              v-model="formData.manualUrls"
+              type="textarea"
+              :rows="4"
+              class="c-input"
+              placeholder="请输入正确的视频链接，支持批量添加，多个链接可换行或用逗号分隔"
+            />
+          </el-form-item>
+        </template>
 
         <el-form-item label="" style="margin-top: 12px">
           <div slot="label" class="c-label">选择需要的字段</div>
@@ -705,6 +1068,39 @@ watch(selectedFieldKeys, (keys) => {
   border-radius: 8px;
   box-sizing: border-box;
 }
+.mode-switch {
+  display: flex;
+  gap: 0;
+  margin-bottom: 20px;
+  background: #f7f8fa;
+  border-radius: 6px;
+  padding: 3px;
+  border: 1px solid #e5e6eb;
+}
+.mode-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #4e5969;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  line-height: 20px;
+}
+.mode-tab:hover {
+  color: #1d2129;
+}
+.mode-tab.active {
+  background: #ffffff;
+  color: #a8071a;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
 .form :deep(.el-form-item__label) {
   font-size: 14px;
   color: #1d2129;
@@ -744,6 +1140,12 @@ watch(selectedFieldKeys, (keys) => {
   width: 16px;
   height: 16px;
   margin-left: 4px;
+}
+.field-stack {
+  width: 100%;
+}
+.radio-block {
+  width: 100%;
 }
 .custom-radio-group {
   display: flex;

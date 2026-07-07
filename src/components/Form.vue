@@ -73,9 +73,21 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
     <div class="banner-section">
       <div class="banner-deco-dot"></div>
       <div class="banner-deco-ring"></div>
-      <div class="banner-title">加入沟通群</div>
+      <a
+        class="banner-help"
+        href="https://congxin.feishu.cn/docx/IKK4drqhdo5WkqxbJMCcHpeWnHe?from=from_copylink"
+        target="_blank"
+      >
+        <svg class="help-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+          <circle cx="12" cy="12" r="10"></circle>
+          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+          <line x1="12" y1="17" x2="12.01" y2="17"></line>
+        </svg>
+        <span class="help-text">帮助文档</span>
+      </a>
+      <div class="banner-title">加入交流群</div>
       <div class="banner-subtitle">
-        <span>批量获取博主的</span><span class="highlight">小红薯 / 抖音帖子数据</span>
+        <span>使用插件遇问题可进群答疑，</span><span class="highlight">新版本更新群内抢先通知</span>
       </div>
       <a class="banner-btn" href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=75dhf68e-32c8-4955-bc00-1657649b0a16" target="_blank">
         <span>立即进群</span>
@@ -125,7 +137,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <polyline points="9 10 12 7 15 10"></polyline>
             </svg>
           </div>
-          <span class="func-name">音视频数据获取</span>
+          <span class="func-name">作品详情获取</span>
         </div>
         <div class="arco-card" @click="currentPage = 'blogger'">
           <div class="func-icon">
@@ -146,7 +158,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <rect x="3" y="14" width="7" height="7" rx="1"></rect>
             </svg>
           </div>
-          <span class="func-name">主页批量获取</span>
+          <span class="func-name">博主作品获取</span>
         </div>
         <div class="arco-card" @click="currentPage = 'search'">
           <div class="func-icon">
@@ -167,7 +179,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <line x1="16" y1="8" x2="16" y2="22"></line>
             </svg>
           </div>
-          <span class="func-name">主页短剧获取</span>
+          <span class="func-name">博主短剧获取</span>
         </div>
         <div class="arco-card" @click="currentPage = 'comment'">
           <div class="func-icon">
@@ -196,7 +208,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <line x1="8" y1="17" x2="13" y2="17"></line>
             </svg>
           </div>
-          <span class="func-name">视频文案摘要</span>
+          <span class="func-name">提取视频文案</span>
         </div>
         <div class="arco-card" @click="currentPage = 'xhsDownload'">
           <div class="func-icon">
@@ -219,10 +231,10 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
     </div>
   </div>
 
-  <!-- 二级页面：主页批量获取 -->
+  <!-- 二级页面：博主作品获取 -->
   <ProfileFetch v-if="currentPage === 'profile'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：主页短剧获取 -->
+  <!-- 二级页面：博主短剧获取 -->
   <SeriesFetch v-if="currentPage === 'series'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：热榜获取 -->
@@ -239,13 +251,13 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   <!-- 二级页面：评论列表获取 -->
   <CommentFetch v-if="currentPage === 'comment'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：音视频数据获取 -->
+  <!-- 二级页面：作品详情获取 -->
   <VideoDataFetch v-if="currentPage === 'video'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：博主信息获取 -->
   <BloggerInfoFetch v-if="currentPage === 'blogger'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：视频文案摘要 -->
+  <!-- 二级页面：提取视频文案 -->
   <VideoCopySummary v-if="currentPage === 'videoCopySummary'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：小红书下载 -->
@@ -374,6 +386,46 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   stroke-linecap: round;
   stroke-linejoin: round;
   color: #FFFFFF;
+}
+.banner-help {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-decoration: none;
+}
+.banner-help:hover {
+  background: rgba(168, 7, 26, 0.06);
+}
+.banner-help:hover .help-icon {
+  stroke: #A8071A;
+}
+.banner-help:hover .help-text {
+  color: #A8071A;
+}
+.banner-help .help-icon {
+  width: 16px;
+  height: 16px;
+  stroke: #86909C;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke 0.2s ease;
+  flex-shrink: 0;
+}
+.banner-help .help-text {
+  font-size: 12px;
+  font-weight: 400;
+  color: #86909C;
+  line-height: 20px;
+  transition: color 0.2s ease;
 }
 
 /* API Key 区 */
