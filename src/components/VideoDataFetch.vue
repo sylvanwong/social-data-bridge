@@ -11,10 +11,15 @@ const props = defineProps({
 })
 
 const formData = ref({
+  mode: 'table',
+  targetType: 'current',
   videoLinkFieldId: '',
   scope: 'n', // 'all' | 'selected' | 'n'
-  rowCount: 5
+  rowCount: 5,
+  manualUrls: '',
+  targetTableId: ''
 });
+const MANUAL_TABLE_BASE_NAME = '作品详情获取';
 
 const FIELD_CONFIG = [
   { key: "social_id", name: "作品ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_id ?? "" },
@@ -109,6 +114,7 @@ const normalizeFieldValue = (value, config, fieldType) => {
 };
 
 const fieldOptions = ref([]);
+const tableOptions = ref([]);
 const fieldListLoading = ref(false);
 const loading = ref(false);
 const toastVisible = ref(false);
@@ -152,7 +158,7 @@ const saveSelectedFieldKeys = async (keys) => {
   }
 };
 
-const getFieldListByType = async () => {
+const getFieldListByType = async ({ silent = false } = {}) => {
   try {
     const table = await bitable.base.getActiveTable();
     const fieldList = await table.getFieldList();
@@ -170,8 +176,92 @@ const getFieldListByType = async () => {
   } catch (error) {
     console.error('获取字段列表失败:', error);
     fieldOptions.value = [{ id: 'nodata', name: '获取字段列表失败' }];
-    ElNotification({ message: '当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
+    if (!silent) {
+      ElNotification({ message: '当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
+    }
   }
+};
+
+const loadTableOptions = async () => {
+  try {
+    const tableList = await bitable.base.getTableList();
+    tableOptions.value = await Promise.all(
+      tableList.map(async (table) => ({
+        id: table.id,
+        name: await table.getName()
+      }))
+    );
+  } catch (error) {
+    console.error('获取表格列表失败:', error);
+    tableOptions.value = [];
+    ElNotification({ message: '获取表格列表失败，请稍后重试', type: 'error', duration: 0 });
+  }
+};
+
+const parseManualUrls = (text) => {
+  if (!text || typeof text !== 'string') {
+    return [];
+  }
+
+  return [...new Set(
+    text
+      .split(/[\n,，]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+  )];
+};
+
+const createSequentialTable = async (baseTableName) => {
+  const existingTables = await bitable.base.getTableMetaList();
+  const tableNames = existingTables.map(table => table.name);
+  const existsBaseTable = tableNames.includes(baseTableName);
+  const existsSequentialTable = tableNames.some(name => name.startsWith(`${baseTableName}`) && /\d+$/.test(name.slice(baseTableName.length)));
+  if (!existsBaseTable && !existsSequentialTable) {
+    return await bitable.base.addTable({ name: baseTableName });
+  }
+
+  const reg = new RegExp(`^${baseTableName}(\\d+)$`);
+  let maxIndex = 0;
+  tableNames.forEach(name => {
+    const match = name.match(reg);
+    if (match) {
+      const index = parseInt(match[1], 10);
+      if (index > maxIndex) {
+        maxIndex = index;
+      }
+    }
+  });
+
+  return await bitable.base.addTable({ name: `${baseTableName}${maxIndex + 1}` });
+};
+
+const createManualTargetTable = async () => {
+  const tableMeta = await createSequentialTable(MANUAL_TABLE_BASE_NAME);
+  const tableId = tableMeta.tableId || tableMeta.id;
+  if (!tableId) {
+    throw new Error('创建新表格失败');
+  }
+  return tableId;
+};
+
+const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
+  if (targetType === 'new') {
+    const tableId = await createManualTargetTable();
+    await setupNewTableFields(tableId, activeFieldConfigs);
+    await bitable.ui.switchToTable(tableId);
+    return tableId;
+  }
+
+  if (targetType === 'existing') {
+    const tableId = formData.value.targetTableId;
+    const fieldNameToId = await validateAndAddFields(tableId, activeFieldConfigs);
+    if (!fieldNameToId) {
+      return null;
+    }
+    return tableId;
+  }
+
+  return null;
 };
 
 const getAllVisibleRecordIdList = async (view) => {
@@ -245,10 +335,12 @@ const getRecordIdListByScope = async (scope, rowCount) => {
   return recordIdList;
 };
 
-const validateAndAddFields = async (activeFieldConfigs) => {
+const validateAndAddFields = async (tableId, activeFieldConfigs) => {
   try {
     console.log('开始验证和添加字段...');
-    const table = await bitable.base.getActiveTable();
+    const table = tableId
+      ? await bitable.base.getTableById(tableId)
+      : await bitable.base.getActiveTable();
     console.log('获取到table对象:', table);
     const fieldList = await table.getFieldList();
     console.log('获取到fieldList:', fieldList.length);
@@ -379,6 +471,43 @@ const validateAndAddFields = async (activeFieldConfigs) => {
   }
 };
 
+const setupNewTableFields = async (tableId, activeFieldConfigs) => {
+  const table = await bitable.base.getTableById(tableId);
+  const fieldMetaList = await table.getFieldMetaList();
+  const defaultFirstField = fieldMetaList[0];
+
+  if (activeFieldConfigs.length === 0) {
+    throw new Error('请至少选择一个需要更新的字段');
+  }
+
+  if (defaultFirstField && defaultFirstField.name === '文本') {
+    await table.setField(defaultFirstField.id, {
+      type: activeFieldConfigs[0].type,
+      name: activeFieldConfigs[0].name
+    });
+  }
+
+  for (let index = 1; index < activeFieldConfigs.length; index++) {
+    const config = activeFieldConfigs[index];
+    await table.addField({ type: config.type, name: config.name });
+  }
+
+  const latestFieldList = await table.getFieldList();
+  for (const field of latestFieldList) {
+    const name = await field.getName();
+    const config = activeFieldConfigs.find(item => item.name === name);
+    if (!config) {
+      continue;
+    }
+    if (config.formatter) {
+      await field.setFormatter(config.formatter);
+    }
+    if (config.dateFormat) {
+      await field.setDateFormat(config.dateFormat);
+    }
+  }
+};
+
 const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs) => {
   try {
     console.log(`开始写入记录 ${recordId}`);
@@ -424,6 +553,96 @@ const writeErrorMessageToFirstField = async (recordId, message, fieldNameToId, a
   } catch (error) {
     console.error("写入错误信息失败:", error);
   }
+};
+
+const createCellValue = async (table, fieldId, item, config) => {
+  const field = await table.getFieldById(fieldId);
+  const fieldType = await field.getType();
+  const value = normalizeFieldValue(config.getValue(item), config, fieldType);
+  return await field.createCell(value);
+};
+
+const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
+  const table = await bitable.base.getTableById(tableId);
+  const fieldList = await table.getFieldList();
+  const fieldMetaMap = new Map();
+
+  for (const field of fieldList) {
+    const name = await field.getName();
+    fieldMetaMap.set(name, field.id);
+  }
+
+  const records = [];
+  for (const item of list) {
+    const cells = [];
+    for (const config of activeFieldConfigs) {
+      const fieldId = fieldMetaMap.get(config.name);
+      if (!fieldId) {
+        continue;
+      }
+      cells.push(await createCellValue(table, fieldId, item, config));
+    }
+    if (cells.length > 0) {
+      records.push(cells);
+    }
+  }
+
+  if (records.length > 0) {
+    await table.addRecords(records);
+  }
+};
+
+const fetchVideoDataByRows = async (rowList, { writeFailureToCurrent = false, fieldNameToId = null, activeFieldConfigs = [] } = {}) => {
+  let successCount = 0;
+  let failCount = 0;
+  const successList = [];
+
+  showToast(`准备处理 ${rowList.length} 条数据...`, true);
+
+  for (let i = 0; i < rowList.length; i++) {
+    const { url, recordId, rawValue } = rowList[i];
+
+    try {
+      showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
+      console.log(`正在处理第 ${i + 1}/${rowList.length} 条:`, { url, rawValue });
+
+      const response = await request({
+        url: '/social/api/v1/feishu/social_info',
+        method: 'post',
+        headers: { 'authorization': `Bearer ${props.api_key}` },
+        data: {
+          url,
+          raw_value: rawValue,
+          source: 'feishu_bitable_video_fetch'
+        }
+      });
+
+      const res = response.data;
+      console.log(`接口返回数据:`, res);
+
+      if (res.sta === 0 && res.data) {
+        successList.push({ ...res.data, __recordId: recordId });
+        successCount++;
+        console.log(`第 ${i + 1} 条处理成功`);
+      } else {
+        const errorMessage = res?.msg || res?.message || '获取音视频数据失败';
+        console.error(`接口返回错误:`, errorMessage);
+        if (writeFailureToCurrent && recordId && fieldNameToId) {
+          await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
+        }
+        failCount++;
+      }
+    } catch (error) {
+      const errorMessage = error?.response?.data?.msg || error?.message || '请求失败';
+      console.error(`处理第 ${i + 1} 条失败:`, errorMessage);
+      if (writeFailureToCurrent && recordId && fieldNameToId) {
+        await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
+      }
+      failCount++;
+    }
+  }
+
+  return { successList, successCount, failCount };
 };
 
 const extractUrlHint = (value) => {
@@ -487,7 +706,7 @@ const getCellValuesByFieldId = async (recordIdList, fieldId) => {
   return filtered;
 };
 
-const handleSubmit = async () => {
+const handleTableModeSubmit = async () => {
   console.log('=== 提交调试信息 ===');
   console.log('当前选中的数据范围:', formData.value.scope);
   console.log('选中的字段ID:', formData.value.videoLinkFieldId);
@@ -515,6 +734,11 @@ const handleSubmit = async () => {
     return;
   }
 
+  if (formData.value.targetType === 'existing' && !formData.value.targetTableId) {
+    ElNotification({ message: '请选择现有表格', type: 'warning', duration: 0 });
+    return;
+  }
+
   loading.value = true;
 
   try {
@@ -530,67 +754,47 @@ const handleSubmit = async () => {
       return;
     }
 
-    // 验证字段类型，自动添加缺失字段
-    const fieldNameToId = await validateAndAddFields(activeFieldConfigs);
-
-    if (!fieldNameToId) {
-      loading.value = false;
-      return;
-    }
-
     const rowList = await getCellValuesByFieldId(recordIdList, formData.value.videoLinkFieldId);
 
     console.log('提取的视频链接:', rowList, '对应的recordIdList:', recordIdList);
-    // return
-    // 逐个处理每个链接，获取数据并写回表格
-    let successCount = 0;
-    let failCount = 0;
-
-    showToast(`准备处理 ${rowList.length} 条数据...`, true);
-
-    for (let i = 0; i < rowList.length; i++) {
-      const { url, recordId, rawValue } = rowList[i];
-
-      try {
-        showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
-        console.log(`正在处理第 ${i + 1}/${rowList.length} 条:`, { url, rawValue });
-
-        const response = await request({
-          url: '/social/api/v1/feishu/social_info',
-          method: 'post',
-          headers: { 'authorization': `Bearer ${props.api_key}` },
-          data: {
-            url,
-            raw_value: rawValue,
-            source: 'feishu_bitable_video_fetch'
-          }
-        });
-
-        const res = response.data;
-        console.log(`接口返回数据:`, res);
-
-        if (res.sta === 0 && res.data) {
-          // 将数据写入当前记录
-          await writeDataToRecord(recordId, res.data, fieldNameToId, activeFieldConfigs);
-          successCount++;
-          console.log(`第 ${i + 1} 条处理成功`);
-        } else {
-          const errorMessage = res?.msg || res?.message || '获取音视频数据失败';
-          console.error(`接口返回错误:`, errorMessage);
-          await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
-          failCount++;
-        }
-      } catch (error) {
-        const errorMessage = error?.response?.data?.msg || error?.message || '请求失败';
-        console.error(`处理第 ${i + 1} 条失败:`, errorMessage);
-        await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
-        failCount++;
+    if (formData.value.targetType === 'current') {
+      const activeTable = await bitable.base.getActiveTable();
+      const fieldNameToId = await validateAndAddFields(activeTable.id, activeFieldConfigs);
+      if (!fieldNameToId) {
+        loading.value = false;
+        return;
       }
+
+      const { successList, successCount, failCount } = await fetchVideoDataByRows(rowList, {
+        writeFailureToCurrent: true,
+        fieldNameToId,
+        activeFieldConfigs
+      });
+
+      for (const item of successList) {
+        await writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs);
+      }
+
+      showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+      setTimeout(() => {
+        hideToast();
+      }, 3000);
+      return;
     }
 
-    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    const { successList, successCount, failCount } = await fetchVideoDataByRows(rowList);
+    if (successList.length === 0) {
+      throw new Error('未获取到有效的音视频数据');
+    }
 
-    // 3秒后隐藏toast
+    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
+    if (!targetTableId) {
+      return;
+    }
+
+    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+
+    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
     setTimeout(() => {
       hideToast();
     }, 3000);
@@ -602,6 +806,71 @@ const handleSubmit = async () => {
   } finally {
     loading.value = false;
   }
+};
+
+const handleManualModeSubmit = async () => {
+  if (!props.api_key) {
+    ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
+    return;
+  }
+
+  if (!formData.value.manualUrls || !formData.value.manualUrls.trim()) {
+    ElNotification({ message: '请输入视频链接', type: 'warning', duration: 0 });
+    return;
+  }
+
+  if (formData.value.targetType === 'existing' && !formData.value.targetTableId) {
+    ElNotification({ message: '请选择现有表格', type: 'warning', duration: 0 });
+    return;
+  }
+
+  const urls = parseManualUrls(formData.value.manualUrls);
+  if (urls.length === 0) {
+    ElNotification({ message: '请至少输入一个有效的视频链接', type: 'warning', duration: 0 });
+    return;
+  }
+
+  const activeFieldConfigs = getActiveFieldConfigs();
+  if (activeFieldConfigs.length === 0) {
+    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
+    return;
+  }
+
+  loading.value = true;
+
+  try {
+    const rowList = urls.map(url => ({ url, rawValue: url }));
+    const { successList, successCount, failCount } = await fetchVideoDataByRows(rowList);
+    if (successList.length === 0) {
+      throw new Error('未获取到有效的音视频数据');
+    }
+
+    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
+    if (!targetTableId) {
+      return;
+    }
+
+    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+
+    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    setTimeout(() => {
+      hideToast();
+    }, 3000);
+  } catch (error) {
+    console.error('获取数据失败:', error);
+    ElNotification({ message: error?.response?.data?.msg || error?.message || '获取音视频数据失败', type: 'error', duration: 0 });
+  } finally {
+    loading.value = false;
+  }
+};
+
+const handleSubmit = async () => {
+  if (formData.value.mode === 'manual') {
+    await handleManualModeSubmit();
+    return;
+  }
+
+  await handleTableModeSubmit();
 };
 
 const stepNumber = (delta) => {
@@ -627,8 +896,11 @@ const hideToast = () => {
 };
 
 onMounted(() => {
+  if (formData.value.mode === 'table') {
+    getFieldListByType({ silent: true });
+  }
+
   Promise.all([
-    getFieldListByType(),
     loadSelectedFieldKeys()
   ]).finally(() => {
     fieldSelectionReady.value = true;
@@ -642,6 +914,43 @@ watch(selectedFieldKeys, (keys) => {
 
   saveSelectedFieldKeys(keys);
 }, { deep: true });
+
+watch(
+  () => formData.value.mode,
+  (mode) => {
+    if (mode === 'table') {
+      getFieldListByType({ silent: false });
+      formData.value.targetType = 'current';
+    }
+
+    if (mode === 'manual' && formData.value.targetType === 'current') {
+      formData.value.targetType = 'new';
+    }
+
+    if (formData.value.targetType === 'existing' && tableOptions.value.length === 0) {
+      loadTableOptions();
+      return;
+    }
+
+    if (mode !== 'manual' && formData.value.targetType !== 'existing') {
+      formData.value.targetTableId = '';
+    }
+  }
+);
+
+watch(
+  () => formData.value.targetType,
+  (targetType) => {
+    if (targetType === 'existing' && tableOptions.value.length === 0) {
+      loadTableOptions();
+      return;
+    }
+
+    if (targetType !== 'existing') {
+      formData.value.targetTableId = '';
+    }
+  }
+);
 </script>
 
 <template>
@@ -652,10 +961,46 @@ watch(selectedFieldKeys, (keys) => {
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
       </span>
-      <span class="sub-page-title">音视频数据获取</span>
+      <span class="sub-page-title">作品详情获取</span>
     </div>
     <div class="form-card">
+      <div class="mode-switch">
+        <button
+          type="button"
+          class="mode-tab"
+          :class="{ active: formData.mode === 'table' }"
+          @click="formData.mode = 'table'"
+        >
+          从表格选取
+        </button>
+        <button
+          type="button"
+          class="mode-tab"
+          :class="{ active: formData.mode === 'manual' }"
+          @click="formData.mode = 'manual'"
+        >
+          手动输入
+        </button>
+      </div>
       <el-form ref="form" class="form" :model="formData" label-position="top">
+        <el-form-item v-if="formData.mode === 'manual'" label="" style="margin-top: 12px">
+          <div class="field-stack">
+            <div class="c-label">目标表格</div>
+            <el-radio-group v-model="formData.targetType" class="radio-block">
+              <el-radio value="new">新建表格</el-radio>
+              <el-radio value="existing">使用现有表格</el-radio>
+            </el-radio-group>
+          </div>
+        </el-form-item>
+
+        <el-form-item v-if="formData.mode === 'manual' && formData.targetType === 'existing'" label="">
+          <div slot="label" class="c-label">选择现有表格</div>
+          <el-select v-model="formData.targetTableId" placeholder="请选择" style="width: 100%">
+            <el-option v-for="table in tableOptions" :key="table.id" :label="table.name" :value="table.id" />
+          </el-select>
+        </el-form-item>
+
+        <template v-if="formData.mode === 'table'">
         <el-form-item label="">
           <div slot="label" class="c-label">
             视频链接
@@ -715,6 +1060,27 @@ watch(selectedFieldKeys, (keys) => {
             </el-radio>
           </el-radio-group>
         </el-form-item>
+        </template>
+
+        <template v-else>
+          <el-form-item>
+            <div slot="label" class="c-label">
+              视频链接
+              <el-tooltip effect="dark" placement="top">
+                <template #content>仅支持视频链接，<br />不支持其他链接</template>
+                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
+                  class="help-icon" />
+              </el-tooltip>
+            </div>
+            <el-input
+              v-model="formData.manualUrls"
+              type="textarea"
+              :rows="4"
+              class="c-input"
+              placeholder="请输入正确的视频链接，支持批量添加，多个链接可换行或用逗号分隔"
+            />
+          </el-form-item>
+        </template>
 
         <el-form-item label="" style="margin-top: 12px">
           <div slot="label" class="c-label">选择需要的字段</div>
@@ -802,6 +1168,39 @@ watch(selectedFieldKeys, (keys) => {
   border-radius: 8px;
   box-sizing: border-box;
 }
+.mode-switch {
+  display: flex;
+  gap: 0;
+  margin-bottom: 20px;
+  background: #F7F8FA;
+  border-radius: 6px;
+  padding: 3px;
+  border: 1px solid #E5E6EB;
+}
+.mode-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #4E5969;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  line-height: 20px;
+}
+.mode-tab:hover {
+  color: #1D2129;
+}
+.mode-tab.active {
+  background: #FFFFFF;
+  color: #A8071A;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
 .form :deep(.el-form-item__label) {
   font-size: 14px;
   color: #1d2129;
@@ -832,6 +1231,12 @@ watch(selectedFieldKeys, (keys) => {
 .c-label {
   display: flex;
   align-items: center;
+}
+.field-stack {
+  width: 100%;
+}
+.radio-block {
+  width: 100%;
 }
 .help-icon {
   width: 16px;

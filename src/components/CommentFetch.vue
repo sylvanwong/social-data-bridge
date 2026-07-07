@@ -10,13 +10,18 @@ const props = defineProps({
 
 let note_timer = null;
 const formData = ref({
+  mode: 'table',
   radio: 1,
-  url: "",
+  manualUrls: "",
+  noteLinkFieldId: '',
+  scope: 'n',
+  rowCount: 5,
   pages: 1,
   reply_pages: -1,
   table_id: "",
 });
 const table_options = ref([]);
+const fieldOptions = ref([]);
 const loading = ref(false);
 const profileProgress = ref({ text: "", done: false });
 let page = 1;
@@ -80,6 +85,12 @@ const pages_options = [
   { value: 50, label: "获取前50页" },
 ];
 
+const scopeOptions = [
+  { value: 'all', label: '执行所有行' },
+  { value: 'selected', label: '执行选中行' },
+  { value: 'n', label: '执行前N行' },
+];
+
 const showErrorMsg = (message) => {
   ElMessage({ message, type: "error", plain: true });
 };
@@ -137,10 +148,7 @@ const closeNoteInterval = () => {
 };
 
 onMounted(async () => {
-  const note_url = await bitable.bridge.getData("note_url");
-  if (note_url && typeof note_url == "string") {
-    formData.value.url = note_url;
-  }
+  await loadFieldOptions({ silent: true });
   await loadSelectedFieldKeys();
   fieldSelectionReady.value = true;
 });
@@ -165,6 +173,145 @@ const loadTableOptions = async () => {
   }
 };
 
+const loadFieldOptions = async ({ silent = false } = {}) => {
+  try {
+    const table = await bitable.base.getActiveTable();
+    const fieldList = await table.getFieldList();
+    const urlFieldList = fieldList.filter(item =>
+      item.type === FieldType.Url || item.type === FieldType.Text
+    );
+
+    fieldOptions.value = await Promise.all(
+      urlFieldList.map(async (field) => ({
+        id: field.id,
+        name: await field.getName(),
+      }))
+    );
+  } catch (error) {
+    console.error('获取字段列表失败:', error);
+    fieldOptions.value = [{ id: 'nodata', name: '获取字段列表失败' }];
+    if (!silent) {
+      showErrorMsg('当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。');
+    }
+  }
+};
+
+const parseManualUrls = (text) => {
+  if (!text || typeof text !== 'string') {
+    return [];
+  }
+
+  return [...new Set(
+    text
+      .split(/[\n,，]+/)
+      .map(item => item.trim())
+      .filter(Boolean)
+  )];
+};
+
+const extractNoteLink = (value) => {
+  if (!value) return null;
+
+  if (typeof value === 'string') {
+    return value.trim() || null;
+  }
+
+  if (typeof value === 'object') {
+    const keys = ['link', 'url', 'text', 'content', 'value', 'displayText'];
+    for (const key of keys) {
+      const nested = extractNoteLink(value[key]);
+      if (nested) return nested;
+    }
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = extractNoteLink(item);
+      if (nested) return nested;
+    }
+  }
+
+  return null;
+};
+
+const getAllVisibleRecordIdList = async (view) => {
+  const pageSize = 200;
+  let pageToken = undefined;
+  let allRecordIdList = [];
+  let loopCount = 0;
+  const maxLoops = 100;
+
+  while (loopCount < maxLoops) {
+    loopCount++;
+    const result = await view.getVisibleRecordIdListByPage({
+      pageSize,
+      pageToken
+    });
+
+    let recordIds = [];
+    let hasMore = false;
+
+    if (Array.isArray(result)) {
+      recordIds = result;
+      hasMore = result.length === pageSize;
+    } else if (result && typeof result === 'object') {
+      recordIds = result.recordIds || result.records || result.data || result.list || [];
+      hasMore = result.hasMore || result.hasNext || result.has_next || false;
+      pageToken = result.pageToken || result.nextPageToken || result.next_token;
+    }
+
+    if (recordIds.length > 0) {
+      allRecordIdList = allRecordIdList.concat(recordIds);
+    }
+
+    if (!hasMore || recordIds.length === 0) {
+      break;
+    }
+  }
+
+  return allRecordIdList;
+};
+
+const getRecordIdListByScope = async (scope, rowCount) => {
+  const table = await bitable.base.getActiveTable();
+  const view = await table.getActiveView();
+
+  if (scope === 'all') {
+    return await getAllVisibleRecordIdList(view);
+  }
+
+  if (scope === 'selected') {
+    const recordIdList = await view.getSelectedRecordIdList();
+    if (recordIdList.length === 0) {
+      ElNotification({ message: '请先在表格中选择至少一行数据', type: 'warning', duration: 0 });
+      return null;
+    }
+    return recordIdList;
+  }
+
+  const allRecordIdList = await getAllVisibleRecordIdList(view);
+  return allRecordIdList.slice(0, rowCount);
+};
+
+const getNoteUrlsByFieldId = async (recordIdList, fieldId) => {
+  const table = await bitable.base.getActiveTable();
+  const field = await table.getFieldById(fieldId);
+
+  const rows = await Promise.all(
+    recordIdList.map(async (recordId) => {
+      try {
+        const cell = await field.getCell(recordId);
+        const value = await cell.getValue();
+        return extractNoteLink(value);
+      } catch (error) {
+        return null;
+      }
+    })
+  );
+
+  return [...new Set(rows.filter(item => typeof item === 'string' && item.trim()))];
+};
+
 watch(
   () => formData.value.radio,
   (radio) => {
@@ -172,6 +319,15 @@ watch(
       loadTableOptions();
     } else {
       formData.value.table_id = "";
+    }
+  }
+);
+
+watch(
+  () => formData.value.mode,
+  (mode) => {
+    if (mode === 'table') {
+      loadFieldOptions({ silent: false });
     }
   }
 );
@@ -407,13 +563,13 @@ const getList = async (task_id, type, targetTableId = "") => {
     });
 };
 
-const postNoteTask = async (targetTableId = "") => {
+const postNoteTask = async (targetTableId = "", urlText = "") => {
   await request({
     url: "/social/api/v1/feishu/comment/task",
     method: "post",
     headers: { 'authorization': `Bearer ${props.api_key}` },
     data: {
-      url: formData.value.url,
+      url: urlText,
       pages: Number(formData.value.pages),
       reply_pages: Number(formData.value.reply_pages),
     },
@@ -435,9 +591,14 @@ const postNoteTask = async (targetTableId = "") => {
     });
 };
 
-const getNoteData = async (targetTableId = "") => {
+const getNoteData = async (targetTableId = "", urlList = []) => {
+  if (urlList.length === 0) {
+    showErrorMsg("请至少输入一个有效的帖子链接");
+    return;
+  }
+
   loading.value = true;
-  await postNoteTask(targetTableId);
+  await postNoteTask(targetTableId, urlList.join('\n'));
 };
 
 const validateTableFields = async (tableId) => {
@@ -471,32 +632,53 @@ const validateTableFields = async (tableId) => {
   }
 };
 
-const commit = () => {
+const commit = async () => {
   if (loading.value) return;
   if (!props.api_key) {
     showErrorMsg("请输入API key");
     return;
   }
-  const { url, radio, table_id } = formData.value;
-  if (!url || !url.trim()) {
-    showErrorMsg("请输入帖子链接");
-    return;
-  }
+  const { radio, table_id, mode, manualUrls, noteLinkFieldId, scope, rowCount } = formData.value;
   if (radio === 2 && !table_id) {
     showErrorMsg("请选择现有表格");
     return;
   }
+
+  let urlList = [];
+  if (mode === 'manual') {
+    if (!manualUrls || !manualUrls.trim()) {
+      showErrorMsg("请输入帖子链接");
+      return;
+    }
+    urlList = parseManualUrls(manualUrls);
+  } else {
+    if (!noteLinkFieldId) {
+      showErrorMsg("请选择帖子链接字段");
+      return;
+    }
+    if (noteLinkFieldId === 'nodata') {
+      showErrorMsg("未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。");
+      return;
+    }
+    const recordIdList = await getRecordIdListByScope(scope, rowCount);
+    if (!recordIdList) {
+      return;
+    }
+    urlList = await getNoteUrlsByFieldId(recordIdList, noteLinkFieldId);
+  }
+
   if (radio === 2) {
-    validateTableFields(table_id).then(isValid => {
-      if (isValid) getNoteData(table_id);
+    validateTableFields(table_id).then(async isValid => {
+      if (isValid) {
+        await getNoteData(table_id, urlList);
+      }
     }).catch(error => {
       console.error("验证表格字段时出错:", error);
       showErrorMsg("验证表格字段失败，请稍后重试");
     });
     return;
   }
-  getNoteData();
-  bitable.bridge.setData("note_url", formData.value.url);
+  await getNoteData("", urlList);
 };
 
 watch(selectedFieldKeys, (keys) => {
@@ -527,12 +709,33 @@ watch(selectedFieldKeys, (keys) => {
       <span class="sub-page-title">评论列表获取</span>
     </div>
     <div class="form-card">
+      <div class="mode-switch">
+        <button
+          type="button"
+          class="mode-tab"
+          :class="{ active: formData.mode === 'table' }"
+          @click="formData.mode = 'table'"
+        >
+          从表格选取
+        </button>
+        <button
+          type="button"
+          class="mode-tab"
+          :class="{ active: formData.mode === 'manual' }"
+          @click="formData.mode = 'manual'"
+        >
+          手动输入
+        </button>
+      </div>
       <el-form ref="form" class="form" :model="formData" label-position="top">
         <el-form-item label="" style="margin-top: 12px">
-          <el-radio-group v-model="formData.radio">
-            <el-radio :value="1">新建表格</el-radio>
-            <el-radio :value="2">使用现有表格</el-radio>
-          </el-radio-group>
+          <div class="field-stack">
+            <div class="c-label">目标表格</div>
+            <el-radio-group v-model="formData.radio" class="radio-block">
+              <el-radio :value="1">新建表格</el-radio>
+              <el-radio :value="2">使用现有表格</el-radio>
+            </el-radio-group>
+          </div>
         </el-form-item>
         <el-form-item v-if="formData.radio === 2" label="">
           <div slot="label" class="c-label">选择现有表格</div>
@@ -540,23 +743,87 @@ watch(selectedFieldKeys, (keys) => {
             <el-option v-for="tl in table_options" :key="tl.id" :label="tl.name" :value="tl.id" />
           </el-select>
         </el-form-item>
-        <el-form-item>
-          <div slot="label" class="c-label">
-            帖子链接
-            <el-tooltip effect="dark" placement="top">
-              <template #content>支持多条帖子链接，<br />可换行或逗号分隔</template>
-              <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
-                class="help-icon" />
-            </el-tooltip>
-          </div>
-          <el-input
-            v-model="formData.url"
-            type="textarea"
-            :rows="4"
-            class="c-input"
-            placeholder="请输入正确的帖子链接，支持批量添加，多个链接可换行或用逗号分隔"
-          />
-        </el-form-item>
+
+        <template v-if="formData.mode === 'table'">
+          <el-form-item>
+            <div slot="label" class="c-label">
+              帖子链接
+              <el-tooltip effect="dark" placement="top">
+                <template #content>支持多条帖子链接，<br />可换行或逗号分隔</template>
+                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
+                  class="help-icon" />
+              </el-tooltip>
+            </div>
+            <el-select
+              v-model="formData.noteLinkFieldId"
+              placeholder="选择包含帖子链接的字段"
+              style="width: 100%"
+            >
+              <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item>
+            <div slot="label" class="c-label">
+              数据范围
+              <el-tooltip effect="dark" placement="top">
+                <template #content>选择要执行的数据范围</template>
+                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
+                  class="help-icon" />
+              </el-tooltip>
+            </div>
+            <el-radio-group v-model="formData.scope" class="custom-radio-group">
+              <el-radio v-for="option in scopeOptions" :key="option.value" :value="option.value" class="custom-radio-item">
+                <span class="radio-label-text">{{ option.label }}</span>
+                <div v-if="option.value === 'n'" class="custom-stepper-input">
+                  <input
+                    type="number"
+                    :value="formData.rowCount"
+                    @input.stop="formData.rowCount = Math.max(1, Math.min(100, parseInt($event.target.value) || 5))"
+                    @click.stop
+                    min="1"
+                    max="100"
+                  />
+                  <div class="stepper-buttons">
+                    <button
+                      type="button"
+                      @click.stop="formData.rowCount = Math.min(100, (formData.rowCount || 5) + 1)"
+                      :disabled="formData.rowCount >= 100"
+                      class="stepper-btn stepper-btn-up"
+                    ></button>
+                    <button
+                      type="button"
+                      @click.stop="formData.rowCount = Math.max(1, (formData.rowCount || 5) - 1)"
+                      :disabled="formData.rowCount <= 1"
+                      class="stepper-btn stepper-btn-down"
+                    ></button>
+                  </div>
+                </div>
+              </el-radio>
+            </el-radio-group>
+          </el-form-item>
+        </template>
+
+        <template v-else>
+          <el-form-item>
+            <div slot="label" class="c-label">
+              帖子链接
+              <el-tooltip effect="dark" placement="top">
+                <template #content>支持多条帖子链接，<br />可换行或逗号分隔</template>
+                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
+                  class="help-icon" />
+              </el-tooltip>
+            </div>
+            <el-input
+              v-model="formData.manualUrls"
+              type="textarea"
+              :rows="4"
+              class="c-input"
+              placeholder="请输入正确的帖子链接，支持批量添加，多个链接可换行或用逗号分隔"
+            />
+          </el-form-item>
+        </template>
+
         <el-form-item label="">
           <div slot="label" class="c-label">
             主评论数据提取范围
@@ -650,6 +917,39 @@ watch(selectedFieldKeys, (keys) => {
   border-radius: 8px;
   box-sizing: border-box;
 }
+.mode-switch {
+  display: flex;
+  gap: 0;
+  margin-bottom: 20px;
+  background: #F7F8FA;
+  border-radius: 6px;
+  padding: 3px;
+  border: 1px solid #E5E6EB;
+}
+.mode-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #4E5969;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  line-height: 20px;
+}
+.mode-tab:hover {
+  color: #1D2129;
+}
+.mode-tab.active {
+  background: #FFFFFF;
+  color: #A8071A;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
 .form :deep(.el-form-item__label) {
   font-size: 14px;
   color: #1d2129;
@@ -700,6 +1000,177 @@ watch(selectedFieldKeys, (keys) => {
   width: 16px;
   height: 16px;
   margin-left: 4px;
+}
+.field-stack {
+  width: 100%;
+}
+.radio-block {
+  width: 100%;
+}
+.custom-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.custom-radio-group :deep(.el-radio) {
+  margin-right: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  width: 100%;
+}
+
+.custom-radio-group :deep(.el-radio__input) {
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.custom-radio-group :deep(.el-radio__inner) {
+  width: 16px;
+  height: 16px;
+  border-color: #E5E6EB;
+  background: #FFFFFF;
+  transition: all 0.2s;
+}
+
+.custom-radio-group :deep(.el-radio:hover .el-radio__inner) {
+  border-color: #86909C;
+}
+
+.custom-radio-group :deep(.el-radio__input.is-checked .el-radio__inner) {
+  border-color: #A8071A;
+  background: #FFFFFF;
+  border-width: 4px;
+}
+
+.custom-radio-group :deep(.el-radio__inner::after) {
+  display: none;
+}
+
+.custom-radio-group :deep(.el-radio__label) {
+  font-size: 14px;
+  color: #1D2129;
+  line-height: 22px;
+  padding-left: 0;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.radio-label-text {
+  flex-shrink: 0;
+}
+
+.custom-stepper-input {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  width: 80px;
+  margin-left: auto;
+  background: #FFFFFF;
+  border: 1px solid #E5E6EB;
+  border-radius: 6px;
+  overflow: hidden;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.custom-stepper-input:hover {
+  border-color: #86909C;
+}
+
+.custom-stepper-input:focus-within {
+  border-color: #A8071A;
+  box-shadow: 0 0 0 3px rgba(168, 7, 26, 0.2);
+}
+
+.custom-stepper-input input {
+  flex: 1;
+  height: 100%;
+  width: 44px;
+  padding: 0 8px;
+  font-size: 14px;
+  color: #1D2129;
+  border: none;
+  outline: none;
+  background: transparent;
+  text-align: center;
+  font-family: inherit;
+  line-height: 30px;
+  -moz-appearance: textfield;
+}
+
+.custom-stepper-input input::-webkit-outer-spin-button,
+.custom-stepper-input input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.stepper-buttons {
+  display: flex;
+  flex-direction: column;
+  width: 28px;
+  height: 100%;
+  border-left: 1px solid #E5E6EB;
+  flex-shrink: 0;
+  background: #F2F3F5;
+}
+
+.stepper-btn {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: all 0.15s ease;
+  position: relative;
+}
+
+.stepper-btn-up {
+  border-bottom: 1px solid #E5E6EB;
+}
+
+.stepper-btn::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  transition: border-color 0.15s;
+}
+
+.stepper-btn-up::before {
+  border-bottom: 4px solid #86909C;
+}
+
+.stepper-btn-down::before {
+  border-top: 4px solid #86909C;
+}
+
+.stepper-btn:not(:disabled):hover {
+  background: #FFF0F2;
+}
+
+.stepper-btn-up:not(:disabled):hover::before {
+  border-bottom-color: #A8071A;
+}
+
+.stepper-btn-down:not(:disabled):hover::before {
+  border-top-color: #A8071A;
+}
+
+.stepper-btn:not(:disabled):active {
+  background: #FFB3BB;
+}
+
+.stepper-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
 }
 
 .field-checkbox-group {
