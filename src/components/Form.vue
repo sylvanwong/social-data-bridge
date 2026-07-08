@@ -29,6 +29,7 @@ const TYPE_OPTIONS = [
   { value: "kuaishou", label: "快手" },
   { value: "weibo", label: "微博" },
   { value: "wechat", label: "微信" },
+  { value: "bilibili", label: "哔哩哔哩" },
 ]
 const social_type_options = ref([...TYPE_OPTIONS]);
 
