@@ -16,10 +16,15 @@ const formData1 = ref({
   social_type: "",
   keyword: "",
   sort_type: 0,
+  bilibili_sort_type: 0,
   filter_note_type: 0,
   filter_note_time: 0,
   publish_time: 0,
+  publish_time_range: 0,
+  publish_time_start_date: '',
+  publish_time_end_date: '',
   filter_duration: 0,
+  duration_range: 0,
   pages: 1,
 });
 const table_options = ref([]);
@@ -50,6 +55,13 @@ const xhs_sort_type_options = [
   { value: 3, label: "最多评论" },
   { value: 4, label: "最多收藏" },
 ];
+const bilibili_sort_type_options = [
+  { value: 0, label: '综合排序' },
+  { value: 1, label: '最多播放' },
+  { value: 2, label: '最新发布' },
+  { value: 3, label: '最多弹幕' },
+  { value: 4, label: '最多收藏' },
+];
 const filter_note_type_options = [
   { value: 0, label: "综合笔记" },
   { value: 1, label: "视频笔记" },
@@ -67,11 +79,26 @@ const filter_duration_options = [
   { value: 2, label: "1-5分钟" },
   { value: 3, label: "5分钟以上" },
 ];
+const bilibili_publish_time_range_options = [
+  { value: 0, label: '全部日期' },
+  { value: 1, label: '最近一天' },
+  { value: 2, label: '最近一周' },
+  { value: 3, label: '最近半年' },
+  { value: 4, label: '自定义日期范围' },
+];
+const bilibili_duration_range_options = [
+  { value: 0, label: '全部时长' },
+  { value: 1, label: '10 分钟以下' },
+  { value: 2, label: '10-30 分钟' },
+  { value: 3, label: '30-60 分钟' },
+  { value: 4, label: '60 分钟以上' },
+];
 
 const isXhs = computed(() => formData1.value.social_type === 'xhs');
 const isDouyin = computed(() => formData1.value.social_type === 'douyin');
 const isKuaishou = computed(() => formData1.value.social_type === 'kuaishou');
-const showSortType = computed(() => isDouyin.value || isXhs.value);
+const isBilibili = computed(() => formData1.value.social_type === 'bilibili');
+const showSortType = computed(() => isDouyin.value || isXhs.value || isBilibili.value);
 
 const getTableName = () => formData1.value.keyword || '社媒数据助手';
 
@@ -167,6 +194,16 @@ const postSearchTask = async (targetTableId = "") => {
       publish_time: formData1.value.publish_time,
       filter_duration: formData1.value.filter_duration,
     }
+  } else if (formData1.value.social_type == 'bilibili') {
+    filter_config = {
+      sort_type: formData1.value.bilibili_sort_type,
+      publish_time_range: formData1.value.publish_time_range,
+      duration_range: formData1.value.duration_range,
+    };
+    if (formData1.value.publish_time_range === 4) {
+      filter_config.publish_time_start_date = formData1.value.publish_time_start_date;
+      filter_config.publish_time_end_date = formData1.value.publish_time_end_date;
+    }
   }
   await request({
     url: "/social/api/v1/feishu/keyword/task",
@@ -233,6 +270,23 @@ watch(
       formData1.value.publish_time = 0;
       formData1.value.filter_duration = 0;
     }
+    if (socialType !== 'bilibili') {
+      formData1.value.bilibili_sort_type = 0;
+      formData1.value.publish_time_range = 0;
+      formData1.value.publish_time_start_date = '';
+      formData1.value.publish_time_end_date = '';
+      formData1.value.duration_range = 0;
+    }
+  }
+);
+
+watch(
+  () => formData1.value.publish_time_range,
+  (publishTimeRange) => {
+    if (publishTimeRange !== 4) {
+      formData1.value.publish_time_start_date = '';
+      formData1.value.publish_time_end_date = '';
+    }
   }
 );
 
@@ -264,6 +318,17 @@ const commit = () => {
   if (!keyword || !keyword.trim()) {
     showErrorMsg("请输入关键词");
     return;
+  }
+  if (social_type === 'bilibili' && formData1.value.publish_time_range === 4) {
+    const { publish_time_start_date, publish_time_end_date } = formData1.value;
+    if (!publish_time_start_date || !publish_time_end_date) {
+      showErrorMsg("请选择完整的自定义发布时间范围");
+      return;
+    }
+    if (publish_time_start_date > publish_time_end_date) {
+      showErrorMsg("发布时间开始日期不能晚于结束日期");
+      return;
+    }
   }
   if (radio === 2 && !table_id) {
     showErrorMsg("请选择现有表格");
@@ -359,11 +424,14 @@ watch(selectedFieldKeys, (keys) => {
                 class="help-icon" />
             </el-tooltip>
           </div>
-          <el-select v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
+          <el-select v-if="isDouyin || isXhs" v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
             <el-option v-if="isDouyin" v-for="tl in douyin_sort_type_options" :key="tl.value" :label="tl.label"
               :value="tl.value" />
             <el-option v-if="isXhs" v-for="tl in xhs_sort_type_options" :key="tl.value" :label="tl.label"
               :value="tl.value" />
+          </el-select>
+          <el-select v-if="isBilibili" v-model="formData1.bilibili_sort_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in bilibili_sort_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="" v-if="isXhs">
@@ -416,6 +484,52 @@ watch(selectedFieldKeys, (keys) => {
           </div>
           <el-select v-model="formData1.filter_duration" placeholder="请选择" style="width: 100%">
             <el-option v-for="tl in filter_duration_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isBilibili">
+          <div slot="label" class="c-label">
+            发布时间
+            <el-tooltip effect="dark" placement="top">
+              <template #content>可按发布时间范围筛选，也可自定义起止日期</template>
+              <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
+                class="help-icon" />
+            </el-tooltip>
+          </div>
+          <el-select v-model="formData1.publish_time_range" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in bilibili_publish_time_range_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isBilibili && formData1.publish_time_range === 4">
+          <div slot="label" class="c-label">自定义发布时间范围</div>
+          <div class="date-range-row">
+            <el-date-picker
+              v-model="formData1.publish_time_start_date"
+              type="date"
+              value-format="YYYY-MM-DD"
+              placeholder="开始日期"
+              style="width: 100%"
+            />
+            <span class="date-range-separator">至</span>
+            <el-date-picker
+              v-model="formData1.publish_time_end_date"
+              type="date"
+              value-format="YYYY-MM-DD"
+              placeholder="结束日期"
+              style="width: 100%"
+            />
+          </div>
+        </el-form-item>
+        <el-form-item label="" v-if="isBilibili">
+          <div slot="label" class="c-label">
+            视频时长
+            <el-tooltip effect="dark" placement="top">
+              <template #content>按视频时长筛选</template>
+              <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
+                class="help-icon" />
+            </el-tooltip>
+          </div>
+          <el-select v-model="formData1.duration_range" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in bilibili_duration_range_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="">
@@ -556,6 +670,18 @@ watch(selectedFieldKeys, (keys) => {
   width: 16px;
   height: 16px;
   margin-left: 4px;
+}
+
+.date-range-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.date-range-separator {
+  color: #4E5969;
+  flex: 0 0 auto;
 }
 
 .field-checkbox-group {
