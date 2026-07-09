@@ -38,6 +38,7 @@ const FIELD_CONFIG = [
   { key: "note_id", name: "作品ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.note_id ?? "" },
   { key: "text", name: "评论内容", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.text ?? "" },
   { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
+  { key: "profile_url", name: "作者主页链接", type: FieldType.Url, defaultSelected: true, getValue: (item) => item?.profile_url ?? "" },
   { key: "uid", name: "作者ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.uid ?? "" },
   { key: "social_user_number", name: "小红书ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_user_number ?? "" },
   { key: "digg_count", name: "点赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },

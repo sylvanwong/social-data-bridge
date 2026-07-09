@@ -26,7 +26,7 @@ const FIELD_CONFIG = [
   { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
   { key: "profile_url", name: "作者主页链接", type: FieldType.Url, defaultSelected: true, getValue: (item) => item?.profile_url ?? "" },
   { key: "title", name: "标题", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.title ?? "" },
-  { key: "caption", name: "标签文本", type: FieldType.MultiSelect, defaultSelected: true, getValue: (item) => item?.caption ?? "" },
+  { key: "caption", name: "标签", legacyNames: ["标签文本"], type: FieldType.MultiSelect, defaultSelected: true, getValue: (item) => item?.caption ?? "" },
   // { name: "播放数", type: FieldType.Number, getValue: (item) => Number(item?.digg_count) || 0 },
   { key: "digg_count", name: "点赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
   { key: "comment_count", name: "评论数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.comment_count) || 0 },
@@ -55,7 +55,7 @@ const getAllowedFieldTypes = (config) => {
   if (config.name === '作者名称' || config.name === '平台') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
-  if (config.name === '标签文本') {
+  if (config.key === 'caption') {
     return [FieldType.Text, FieldType.MultiSelect];
   }
   return [config.type];
@@ -106,7 +106,7 @@ const normalizeFieldValue = (value, config, fieldType) => {
     return value ? value : null;
   }
 
-  if (config.name === '标签文本') {
+  if (config.key === 'caption') {
     return normalizeTagTextValue(value, fieldType);
   }
 
@@ -196,6 +196,22 @@ const loadTableOptions = async () => {
     tableOptions.value = [];
     ElNotification({ message: '获取表格列表失败，请稍后重试', type: 'error', duration: 0 });
   }
+};
+
+const getFieldCandidateNames = (config) => [config.name, ...(config.legacyNames || [])];
+
+const resolveFieldMetaByConfig = (fieldMetaMap, config) => {
+  for (const candidateName of getFieldCandidateNames(config)) {
+    const fieldMeta = fieldMetaMap.get(candidateName);
+    if (fieldMeta) {
+      return {
+        matchedName: candidateName,
+        fieldMeta
+      };
+    }
+  }
+
+  return null;
 };
 
 const parseManualUrls = (text) => {
@@ -360,13 +376,15 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
   for (const config of activeFieldConfigs) {
     const fieldMeta = fieldMetaMap.get(config.name);
 
-    if (!fieldMeta) {
+    const matchedField = resolveFieldMetaByConfig(fieldMetaMap, config);
+
+    if (!matchedField) {
       missingFields.push(config);
-    } else if (!isFieldTypeCompatible(fieldMeta.type, config)) {
+    } else if (!isFieldTypeCompatible(matchedField.fieldMeta.type, config)) {
       typeMismatchFields.push({
-        name: config.name,
+        name: matchedField.matchedName,
         expected: getExpectedFieldTypeName(config),
-        actual: fieldMeta.type
+        actual: matchedField.fieldMeta.type
       });
     }
   }
@@ -400,13 +418,13 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
   };
 
   for (const config of activeFieldConfigs) {
-    const fieldMeta = fieldMetaMap.get(config.name);
-    if (!fieldMeta) {
+    const matchedField = resolveFieldMetaByConfig(fieldMetaMap, config);
+    if (!matchedField) {
       continue;
     }
 
     try {
-      await ensureFieldDisplayConfig(fieldMeta.id, config);
+      await ensureFieldDisplayConfig(matchedField.fieldMeta.id, config);
     } catch (error) {
       console.error(`设置字段 ${config.name} 格式失败:`, error);
     }
@@ -425,7 +443,7 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
           : addFieldResult?.fieldId || addFieldResult?.id || addFieldResult?.field_id;
 
         const finalFieldId = newFieldId || (() => {
-          const existingMeta = fieldMetaMap.get(fieldConfig.name);
+          const existingMeta = resolveFieldMetaByConfig(fieldMetaMap, fieldConfig)?.fieldMeta;
           return existingMeta?.id;
         })();
 
@@ -454,8 +472,11 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
 
   // 构建字段名到ID的映射
   const fieldNameToId = {};
-  for (const [name, meta] of fieldMetaMap.entries()) {
-    fieldNameToId[name] = meta.id;
+  for (const config of activeFieldConfigs) {
+    const matchedField = resolveFieldMetaByConfig(fieldMetaMap, config);
+    if (matchedField?.fieldMeta?.id) {
+      fieldNameToId[config.name] = matchedField.fieldMeta.id;
+    }
   }
   console.log('字段名到ID的映射:', fieldNameToId);
 
