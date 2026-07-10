@@ -8,7 +8,8 @@ export const FIELD_MAPPING = [
   { key: 'title', name: '视频标题', type: FieldType.Text, defaultSelected: true },
   { key: 'tags', name: '标签', type: FieldType.MultiSelect, defaultSelected: true },
   { key: 'user_id', name: '用户ID', type: FieldType.Text, defaultSelected: true },
-  { key: 'nickname', name: '作者', type: FieldType.Text, defaultSelected: true },
+  { key: 'nickname', name: '作者名称', legacyNames: ['作者'], type: FieldType.Text, defaultSelected: true },
+  { key: "profile_url", name: "作者主页链接", type: FieldType.Url, defaultSelected: true},
   { key: 'avatar', name: '博主头像', type: FieldType.Text, defaultSelected: true },
   { key: 'note_type', name: '笔记类型', type: FieldType.Text, defaultSelected: true },
   { key: 'digg_count', name: '点赞数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
@@ -38,6 +39,9 @@ export const FIELD_TYPE_NAME = {
 const getAllowedFieldTypes = (config) => {
   if (config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') {
     return [FieldType.Text, FieldType.SingleSelect];
+  }
+  if (config.key === 'profile_url') {
+    return [FieldType.Text, FieldType.Url];
   }
   if (config.key === 'tags') {
     return [FieldType.Text, FieldType.MultiSelect];
@@ -160,6 +164,22 @@ const applyFieldDisplayConfig = async (field, config) => {
   }
 };
 
+const getFieldCandidateNames = (config) => [config.name, ...(config.legacyNames || [])];
+
+const resolveFieldMetaByConfig = (fieldMetaMap, config) => {
+  for (const candidateName of getFieldCandidateNames(config)) {
+    const fieldMeta = fieldMetaMap.get(candidateName);
+    if (fieldMeta) {
+      return {
+        matchedName: candidateName,
+        fieldMeta
+      };
+    }
+  }
+
+  return null;
+};
+
 export const showErrorMsg = (message) => {
   ElMessage({ message, type: "error", plain: true });
 };
@@ -224,19 +244,19 @@ export const validateTableFields = async (tableId, selectedFieldKeys = []) => {
   try {
     const activeTable = await bitable.base.getTableById(tableId);
     const fieldMetaList = await activeTable.getFieldMetaList();
-    const fieldIdByName = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
+    const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
     const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys);
 
     const fieldList = [];
     const missingFields = [];
     for (const config of activeFieldMapping) {
-      const fieldId = fieldIdByName.get(config.name);
-      if (!fieldId) {
+      const matchedField = resolveFieldMetaByConfig(fieldMetaByName, config);
+      if (!matchedField?.fieldMeta?.id) {
         missingFields.push(config);
         continue;
       }
       try {
-        const field = await activeTable.getFieldById(fieldId);
+        const field = await activeTable.getFieldById(matchedField.fieldMeta.id);
         fieldList.push({ field, config });
       } catch (error) {
         console.error(`获取字段失败：${config.name}`, error);
@@ -269,9 +289,10 @@ export const validateTableFields = async (tableId, selectedFieldKeys = []) => {
     }
 
     const refreshedFieldMetaList = await activeTable.getFieldMetaList();
-    const refreshedFieldIdByName = new Map(refreshedFieldMetaList.map(meta => [meta.name, meta.id]));
+    const refreshedFieldMetaByName = new Map(refreshedFieldMetaList.map(meta => [meta.name, meta]));
     for (const config of activeFieldMapping) {
-      const fieldId = refreshedFieldIdByName.get(config.name);
+      const matchedField = resolveFieldMetaByConfig(refreshedFieldMetaByName, config);
+      const fieldId = matchedField?.fieldMeta?.id;
       if (!fieldId) continue;
       try {
         const field = await activeTable.getFieldById(fieldId);
@@ -388,10 +409,11 @@ export const useSocialData = (getTableName, api_key) => {
         ? await bitable.base.getTableById(targetTableId)
         : await bitable.base.getActiveTable();
       const fieldMetaList = await activeTable.getFieldMetaList();
-      const fieldIdByName = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
+      const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
       const fieldList = [];
       for (const config of activeFieldMapping) {
-        const fieldId = fieldIdByName.get(config.name);
+        const matchedField = resolveFieldMetaByConfig(fieldMetaByName, config);
+        const fieldId = matchedField?.fieldMeta?.id;
         if (!fieldId) {
           fieldList.push({ field: null, config });
           continue;
