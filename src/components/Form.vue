@@ -12,6 +12,7 @@ import XhsDownload from './XhsDownload.vue'
 import UrlToAttachment from './UrlToAttachment.vue'
 import SeriesFetch from './SeriesFetch.vue'
 import HotListFetch from './HotListFetch.vue'
+import BaseIdDebug from './BaseIdDebug.vue'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
 const api_key = ref("");
@@ -228,6 +229,17 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           </div>
           <span class="func-name">链接转附件</span>
         </div>
+        <!-- <div class="arco-card" @click="currentPage = 'baseIdDebug'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+              <path d="M7 8h10"></path>
+              <path d="M7 12h6"></path>
+              <path d="M7 16h8"></path>
+            </svg>
+          </div>
+          <span class="func-name">BaseId 调试</span>
+        </div> -->
       </div>
     </div>
   </div>
@@ -266,6 +278,9 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
   <!-- 二级页面：链接转附件 -->
   <UrlToAttachment v-if="currentPage === 'urlToAttachment'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：BaseId 调试 -->
+  <!-- <BaseIdDebug v-if="currentPage === 'baseIdDebug'" @back="currentPage = 'home'" /> -->
 </template>
 
 <style scoped>
