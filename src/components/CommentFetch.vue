@@ -18,6 +18,7 @@ const formData = ref({
   rowCount: 5,
   pages: 1,
   reply_pages: -1,
+  sortType: 'default',
   table_id: "",
 });
 const table_options = ref([]);
@@ -84,6 +85,11 @@ const pages_options = [
   { value: 20, label: "获取前20页" },
   { value: 30, label: "获取前30页" },
   { value: 50, label: "获取前50页" },
+];
+const xhsCommentSortOptions = [
+  { value: 'default', label: '默认排序' },
+  { value: 'time_descending', label: '最新评论优先' },
+  { value: 'like_count_descending', label: '点赞最多优先' },
 ];
 
 const scopeOptions = [
@@ -564,7 +570,7 @@ const getList = async (task_id, type, targetTableId = "") => {
     });
 };
 
-const postNoteTask = async (targetTableId = "", urlText = "") => {
+const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {}) => {
   await request({
     url: "/social/api/v1/feishu/comment/task",
     method: "post",
@@ -573,6 +579,7 @@ const postNoteTask = async (targetTableId = "", urlText = "") => {
       url: urlText,
       pages: Number(formData.value.pages),
       reply_pages: Number(formData.value.reply_pages),
+      ...extraPayload,
     },
   })
     .then(function (response) {
@@ -599,7 +606,7 @@ const getNoteData = async (targetTableId = "", urlList = []) => {
   }
 
   loading.value = true;
-  await postNoteTask(targetTableId, urlList.join('\n'));
+  await postNoteTask(targetTableId, urlList.join('\n'), { sort_type: formData.value.sortType });
 };
 
 const validateTableFields = async (tableId) => {
@@ -842,6 +849,12 @@ watch(selectedFieldKeys, (keys) => {
           <div slot="label" class="c-label">子评论提取范围</div>
           <el-select v-model="formData.reply_pages" placeholder="请选择" style="width: 100%">
             <el-option v-for="tl in reply_pages_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="">
+          <div slot="label" class="c-label">评论排序（仅小红书）</div>
+          <el-select v-model="formData.sortType" placeholder="请选择" style="width: 100%">
+            <el-option v-for="option in xhsCommentSortOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
         </el-form-item>
 

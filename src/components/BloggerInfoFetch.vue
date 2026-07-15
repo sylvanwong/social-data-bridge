@@ -835,7 +835,7 @@ watch(
           <div slot="label" class="c-label">
             博主主页链接
             <el-tooltip effect="dark" placement="top">
-              <template #content>支持抖音、小红书、快手、微博、微信平台的博主主页链接</template>
+              <template #content>支持抖音、小红书、快手、微博、微信、哔哩哔哩平台的博主主页链接</template>
               <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                 class="help-icon" />
             </el-tooltip>
