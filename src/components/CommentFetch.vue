@@ -46,6 +46,7 @@ const FIELD_CONFIG = [
   { key: "reply_comment_total", name: "回复数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.reply_comment_total) || 0 },
   { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
   { key: "t_create", name: "评论时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.t_create ? item.t_create * 1000 : "") },
+  { key: "note_url", name: "视频链接", type: FieldType.Url, defaultSelected: false, getValue: (item) => item?.note_url ?? "" },
 ];
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
