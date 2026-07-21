@@ -32,7 +32,6 @@ const FIELD_SELECTION_STORAGE_KEY = 'comment_fetch_selected_fields_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
 
-const EXISTING_TABLE_REQUIRED_FIELD = "评论ID";
 const FIELD_CONFIG = [
   { key: "cid", name: "评论ID", type: FieldType.Text, defaultSelected: true, required: true, getValue: (item) => item?.cid ?? "" },
   { key: "reply_id", name: "上级评论ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.reply_id ?? "" },
@@ -66,6 +65,34 @@ const getAllowedFieldTypes = (config) => {
 
 const isFieldTypeCompatible = (fieldType, config) => {
   return getAllowedFieldTypes(config).includes(fieldType);
+};
+
+const buildFieldPayload = (config) => {
+  const fieldConfig = { name: config.name, type: config.type };
+  if (config.formatter) {
+    fieldConfig.formatter = config.formatter;
+  }
+  if (config.dateFormat) {
+    fieldConfig.dateFormat = config.dateFormat;
+  }
+  return fieldConfig;
+};
+
+const getFieldInstanceMapByConfigs = async (table, configs) => {
+  const fieldMetaList = await table.getFieldMetaList();
+  const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
+  const fieldMap = new Map();
+
+  for (const config of configs) {
+    const fieldMeta = fieldMetaByName.get(config.name);
+    if (!fieldMeta?.id) {
+      continue;
+    }
+    const field = await table.getFieldById(fieldMeta.id);
+    fieldMap.set(config.name, field);
+  }
+
+  return fieldMap;
 };
 
 const reply_pages_options = [
@@ -376,16 +403,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
   }
   try {
     const activeFieldConfigs = getActiveFieldConfigs();
-    const fields = activeFieldConfigs.map(({ name, type, formatter, dateFormat }) => {
-      const fieldConfig = { name, type };
-      if (formatter) {
-        fieldConfig.formatter = formatter;
-      }
-      if (dateFormat) {
-        fieldConfig.dateFormat = dateFormat;
-      }
-      return fieldConfig;
-    });
+    const fields = activeFieldConfigs.map(buildFieldPayload);
     const ensureFieldDisplayConfig = async (field, config) => {
       if (config.formatter) {
         await field.setFormatter(config.formatter);
@@ -415,28 +433,21 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
       : await bitable.base.getActiveTable();
 
     if (targetTableId) {
-      const existingFieldMap = new Map();
-      for (const config of FIELD_CONFIG) {
-        try {
-          const field = await activeTable.getField(config.name);
-          if (field) existingFieldMap.set(config.name, field);
-        } catch (error) {
-          console.warn(`现有表格缺少字段：${config.name}`);
+      let existingFieldMap = await getFieldInstanceMapByConfigs(activeTable, activeFieldConfigs);
+
+      for (const config of activeFieldConfigs) {
+        if (!existingFieldMap.has(config.name)) {
+          await activeTable.addField(buildFieldPayload(config));
         }
       }
-      if (!existingFieldMap.has(EXISTING_TABLE_REQUIRED_FIELD)) {
-        ElNotification({ title: '出错', message: `主字段"评论ID"不存在于现有表格中，无法写入数据。请确保表格中包含该字段。`, type: 'error', duration: 0 });
-        resetParams();
-        return;
-      }
-      const availableMappings = activeFieldConfigs.filter(config => existingFieldMap.has(config.name));
-      if (availableMappings.length === 0) {
-        showErrorMsg("所选表格没有可写入字段");
-        resetParams();
-        return;
-      }
-      for (const config of availableMappings) {
+
+      existingFieldMap = await getFieldInstanceMapByConfigs(activeTable, activeFieldConfigs);
+
+      for (const config of activeFieldConfigs) {
         const field = existingFieldMap.get(config.name);
+        if (!field) {
+          throw new Error(`字段 ${config.name} 创建后读取失败`);
+        }
         try {
           await ensureFieldDisplayConfig(field, config);
         } catch (error) {
@@ -446,7 +457,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
       const records = [];
       for (const item of list) {
         const record = [];
-        for (const config of availableMappings) {
+        for (const config of activeFieldConfigs) {
           const field = existingFieldMap.get(config.name);
           const fieldType = await field.getType();
           const value = (config.name === '作者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect
@@ -615,10 +626,6 @@ const validateTableFields = async (tableId) => {
     const activeTable = await bitable.base.getTableById(tableId);
     const fieldMetaList = await activeTable.getFieldMetaList();
     const fieldIdByName = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
-    if (!fieldIdByName.has(EXISTING_TABLE_REQUIRED_FIELD)) {
-      ElNotification({ title: '出错', message: `主字段"评论ID"不存在于现有表格中，无法写入数据。请确保表格中包含该字段。`, type: 'error', duration: 0 });
-      return false;
-    }
     for (const config of getActiveFieldConfigs()) {
       const fieldId = fieldIdByName.get(config.name);
       if (!fieldId) continue;
@@ -627,11 +634,6 @@ const validateTableFields = async (tableId) => {
         ElNotification({ title: '出错', message: `字段类型不匹配:字段"${config.name}" 的类型是 ${FIELD_TYPE_NAME[fieldMeta.type] || fieldMeta.type}，仅支持 ${getAllowedFieldTypes(config).map(type => FIELD_TYPE_NAME[type] || type).join(' / ')}`, type: 'error', duration: 0 });
         return false;
       }
-    }
-    const availableMappings = getActiveFieldConfigs().filter(config => fieldIdByName.has(config.name));
-    if (availableMappings.length === 0) {
-      showErrorMsg("所选表格没有可写入字段");
-      return false;
     }
     return true;
   } catch (error) {

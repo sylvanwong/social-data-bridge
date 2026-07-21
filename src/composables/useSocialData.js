@@ -427,13 +427,6 @@ export const useSocialData = (getTableName, api_key) => {
         }
       }
 
-      const requiredField = fieldList.find(item => item.config.name === "视频编号" && item.field);
-      if (!requiredField) {
-        ElNotification({ title: '出错', message: `主字段"视频编号"不存在于现有表格中，无法写入数据。请确保表格中包含该字段。`, type: 'error', duration: 0 });
-        resetParams();
-        return;
-      }
-
       for (const item of fieldList) {
         if (item.field) {
           const fieldType = await item.field.getType();

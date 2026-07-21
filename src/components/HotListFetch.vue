@@ -5,7 +5,6 @@ import { ElNotification } from "element-plus";
 import request from '@/utils/request'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
-const EXISTING_TABLE_REQUIRED_FIELD = "排名";
 const FIELD_MAPPING = [
   { key: 'rank', name: '排名', type: FieldType.Number, formatter: NumberFormatter.INTEGER, required: true },
   { key: 'keyword', name: '热搜标题', type: FieldType.Text },
@@ -284,10 +283,6 @@ const writeDataToTable = async (table, list, isExistingTable = false) => {
       await field.setFormatter(config.formatter);
     }
     fieldList.push({ field, config });
-  }
-
-  if (!fieldMetaMap.has(EXISTING_TABLE_REQUIRED_FIELD)) {
-    throw new Error(`主字段"${EXISTING_TABLE_REQUIRED_FIELD}"不存在于现有表格中，无法写入数据。`);
   }
 
   if (fieldList.length === 0) {
