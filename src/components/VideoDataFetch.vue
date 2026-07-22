@@ -21,6 +21,13 @@ const formData = ref({
 });
 const MANUAL_TABLE_BASE_NAME = '作品详情获取';
 
+const httpToHttps = (url) => {
+  if (typeof url === 'string') {
+    return url.replace(/^http:\/\//i, 'https://');
+  }
+  return url;
+};
+
 const FIELD_CONFIG = [
   { key: "social_id", name: "作品ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_id ?? "" },
   { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
@@ -35,6 +42,7 @@ const FIELD_CONFIG = [
   { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
   { key: "download_addr", name: "下载链接", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.download_addr ?? "" },
   { key: "origin_cover", name: "封面", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.origin_cover ?? "" },
+  { key: "origin_cover_attachment", name: "封面附件", type: FieldType.Attachment, defaultSelected: false, getUrls: (item) => (item?.origin_cover && typeof item.origin_cover === 'string') ? [httpToHttps(item.origin_cover)] : [], getFileName: () => 'cover' },
   { key: "duration", name: "时长", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.duration) || 0 },
   { key: "t_create", name: "发布时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
   { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
@@ -111,6 +119,51 @@ const normalizeFieldValue = (value, config, fieldType) => {
   }
 
   return value;
+};
+
+const getFinalFileName = (url, baseName, index, total) => {
+  const extMatch = url.match(/\.([a-zA-Z0-9]{2,4})(?:\?|$)/);
+  const ext = extMatch ? `.${extMatch[1]}` : '.jpg';
+  const name = total > 1 ? `${index + 1}_${baseName}` : baseName;
+  return `${name}${ext}`;
+};
+
+const downloadAttachmentAsFile = async (url, finalName) => {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`下载失败: HTTP ${response.status}`);
+  }
+
+  const blob = await response.blob();
+  return new File([blob], finalName, { type: blob.type || 'application/octet-stream' });
+};
+
+const getAttachmentUrls = (config, item) => {
+  let urls = config.getUrls?.(item) || [];
+  if (typeof urls === 'string') {
+    urls = [urls];
+  }
+  if (!Array.isArray(urls)) {
+    return [];
+  }
+  return urls
+    .filter(url => url && typeof url === 'string')
+    .map(url => httpToHttps(url));
+};
+
+const createAttachmentFiles = async (config, item) => {
+  const urls = getAttachmentUrls(config, item);
+  if (urls.length === 0) {
+    return [];
+  }
+
+  return await Promise.all(
+    urls.map((url, index) => {
+      const baseName = config.getFileName?.(item) || 'attachment';
+      const finalName = getFinalFileName(url, baseName, index, urls.length);
+      return downloadAttachmentAsFile(url, finalName);
+    })
+  );
 };
 
 const fieldOptions = ref([]);
@@ -543,6 +596,14 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
 
       try {
         const field = await table.getFieldById(fieldId);
+        if (config.type === FieldType.Attachment) {
+          const files = await createAttachmentFiles(config, item);
+          if (files.length > 0) {
+            await field.setValue(recordId, files.length === 1 ? files[0] : files);
+          }
+          continue;
+        }
+
         const fieldType = await field.getType();
         const value = normalizeFieldValue(config.getValue(item), config, fieldType);
         console.log(`写入字段 ${config.name} (${fieldId}):`, value);
@@ -578,6 +639,17 @@ const writeErrorMessageToFirstField = async (recordId, message, fieldNameToId, a
 
 const createCellValue = async (table, fieldId, item, config) => {
   const field = await table.getFieldById(fieldId);
+
+  if (config.type === FieldType.Attachment) {
+    try {
+      const files = await createAttachmentFiles(config, item);
+      return await field.createCell(files.length > 0 ? (files.length === 1 ? files[0] : files) : null);
+    } catch (error) {
+      console.log('附件下载失败，跳过附件写入:', error);
+      return await field.createCell(null);
+    }
+  }
+
   const fieldType = await field.getType();
   const value = normalizeFieldValue(config.getValue(item), config, fieldType);
   return await field.createCell(value);
