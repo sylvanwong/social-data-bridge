@@ -31,6 +31,8 @@ const TYPE_OPTIONS = [
   { value: "weibo", label: "微博" },
   { value: "wechat", label: "微信" },
   { value: "bilibili", label: "哔哩哔哩" },
+  { value: "zhihu", label: "知乎" },
+  { value: "instagram", label: "Instagram" },
 ]
 const social_type_options = ref([...TYPE_OPTIONS]);
 

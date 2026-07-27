@@ -184,19 +184,35 @@ export const showErrorMsg = (message) => {
   ElMessage({ message, type: "error", plain: true });
 };
 
+const escapeRegExp = (value) => {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+const normalizeTableName = (value) => {
+  const fallback = '社媒数据助手';
+  const normalized = String(value || '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/[\\/:*?\[\]]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return (normalized || fallback).slice(0, 80);
+};
+
 export const createSequentialTable = async (baseTableName) => {
   try {
+    const safeBaseTableName = normalizeTableName(baseTableName);
     const existingTables = await bitable.base.getTableMetaList();
     const tableNames = existingTables.map(table => table.name);
 
-    const existsBaseTable = tableNames.includes(baseTableName);
-    const existsSequentialTable = tableNames.some(name => name.startsWith(`${baseTableName}`) && /\d+$/.test(name.slice(baseTableName.length)));
+    const existsBaseTable = tableNames.includes(safeBaseTableName);
+    const existsSequentialTable = tableNames.some(name => name.startsWith(`${safeBaseTableName}`) && /\d+$/.test(name.slice(safeBaseTableName.length)));
     if (!existsBaseTable && !existsSequentialTable) {
-      const newTable = await bitable.base.addTable({ name: baseTableName });
+      const newTable = await bitable.base.addTable({ name: safeBaseTableName });
       return newTable;
     }
 
-    const reg = new RegExp(`^${baseTableName}(\\d+)$`);
+    const reg = new RegExp(`^${escapeRegExp(safeBaseTableName)}(\\d+)$`);
     let maxIndex = 0;
     tableNames.forEach(name => {
       const match = name.match(reg);
@@ -206,7 +222,7 @@ export const createSequentialTable = async (baseTableName) => {
       }
     });
 
-    const newTableName = `${baseTableName}${maxIndex + 1}`;
+    const newTableName = `${safeBaseTableName}${maxIndex + 1}`;
     const newTable = await bitable.base.addTable({ name: newTableName });
     return newTable;
   } catch (error) {

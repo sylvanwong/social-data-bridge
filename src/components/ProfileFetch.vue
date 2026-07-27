@@ -339,6 +339,7 @@ watch(
 );
 
 onMounted(async () => {
+  await loadFieldOptions({ silent: true });
   await loadSelectedFieldKeys();
   fieldSelectionReady.value = true;
 });
@@ -553,6 +554,7 @@ watch(selectedFieldKeys, (keys) => {
               v-for="field in FIELD_MAPPING"
               :key="field.key"
               :label="field.key"
+              :value="field.key"
               :disabled="field.required"
               class="field-checkbox-item"
             >

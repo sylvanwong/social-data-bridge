@@ -2,7 +2,7 @@
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
-import request from '@/utils/request';
+import request, { buildApiUrl } from '@/utils/request';
 
 const emit = defineEmits(['back']);
 
@@ -128,14 +128,89 @@ const getFinalFileName = (url, baseName, index, total) => {
   return `${name}${ext}`;
 };
 
-const downloadAttachmentAsFile = async (url, finalName) => {
-  const response = await fetch(url);
+const getFileBaseName = (fileName) => {
+  return fileName.replace(/\.[a-zA-Z0-9]{2,5}$/, '');
+};
+
+const getExtensionFromBlobType = (type) => {
+  const normalizedType = String(type || '').split(';')[0].trim().toLowerCase();
+  const typeMap = {
+    'image/jpeg': '.jpg',
+    'image/jpg': '.jpg',
+    'image/png': '.png',
+    'image/webp': '.webp',
+    'image/gif': '.gif',
+    'image/heic': '.heic',
+    'image/heif': '.heic',
+    'video/mp4': '.mp4',
+  };
+  return typeMap[normalizedType] || '';
+};
+
+const shouldUseJpgExtension = (url, config, item) => {
+  if (config.key !== 'origin_cover_attachment') {
+    return false;
+  }
+
+  const socialType = String(item?.social_type || '').trim().toLowerCase();
+  if (socialType !== 'instagram') {
+    return false;
+  }
+
+  return /[?&]stp=([^&]*dst-jpg[^&]*)/i.test(url);
+};
+
+const normalizeFinalFileName = (url, finalName, blob, config, item) => {
+  const ext = getExtensionFromBlobType(blob.type) || (shouldUseJpgExtension(url, config, item) ? '.jpg' : '');
+  if (!ext) {
+    return finalName;
+  }
+
+  return `${getFileBaseName(finalName)}${ext}`;
+};
+
+const buildProxyDownloadUrl = (url, fileName) => {
+  const params = new URLSearchParams({
+    url,
+    file_name: fileName,
+  });
+  return buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`);
+};
+
+const shouldUseProxyFirst = (item, config) => {
+  if (config.key !== 'origin_cover_attachment') {
+    return false;
+  }
+
+  return String(item?.social_type || '').trim().toLowerCase() === 'instagram';
+};
+
+const fetchAttachmentResponse = async (requestUrl, useProxy) => {
+  const options = useProxy ? { headers: { authorization: `Bearer ${props.api_key}` } } : undefined;
+  const response = await fetch(requestUrl, options);
   if (!response.ok) {
     throw new Error(`下载失败: HTTP ${response.status}`);
   }
+  return response;
+};
+
+const downloadAttachmentAsFile = async (url, finalName, config, item) => {
+  const proxyUrl = buildProxyDownloadUrl(url, finalName);
+  let response;
+
+  if (shouldUseProxyFirst(item, config)) {
+    response = await fetchAttachmentResponse(proxyUrl, true);
+  } else {
+    try {
+      response = await fetchAttachmentResponse(url, false);
+    } catch (error) {
+      response = await fetchAttachmentResponse(proxyUrl, true);
+    }
+  }
 
   const blob = await response.blob();
-  return new File([blob], finalName, { type: blob.type || 'application/octet-stream' });
+  const normalizedName = normalizeFinalFileName(url, finalName, blob, config, item);
+  return new File([blob], normalizedName, { type: blob.type || 'application/octet-stream' });
 };
 
 const getAttachmentUrls = (config, item) => {
@@ -161,7 +236,7 @@ const createAttachmentFiles = async (config, item) => {
     urls.map((url, index) => {
       const baseName = config.getFileName?.(item) || 'attachment';
       const finalName = getFinalFileName(url, baseName, index, urls.length);
-      return downloadAttachmentAsFile(url, finalName);
+      return downloadAttachmentAsFile(url, finalName, config, item);
     })
   );
 };
@@ -643,10 +718,13 @@ const createCellValue = async (table, fieldId, item, config) => {
   if (config.type === FieldType.Attachment) {
     try {
       const files = await createAttachmentFiles(config, item);
-      return await field.createCell(files.length > 0 ? (files.length === 1 ? files[0] : files) : null);
+      if (files.length === 0) {
+        return null;
+      }
+      return await field.createCell(files.length === 1 ? files[0] : files);
     } catch (error) {
       console.log('附件下载失败，跳过附件写入:', error);
-      return await field.createCell(null);
+      return null;
     }
   }
 
@@ -673,7 +751,14 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
       if (!fieldId) {
         continue;
       }
-      cells.push(await createCellValue(table, fieldId, item, config));
+      try {
+        const cell = await createCellValue(table, fieldId, item, config);
+        if (cell !== null && cell !== undefined) {
+          cells.push(cell);
+        }
+      } catch (error) {
+        console.error(`创建字段 ${config.name} 单元格失败，跳过该字段:`, error);
+      }
     }
     if (cells.length > 0) {
       records.push(cells);
@@ -895,6 +980,10 @@ const handleTableModeSubmit = async () => {
   } catch (error) {
     console.error('获取数据失败:', error);
     const errorMessage = error?.response?.data?.msg || error?.message || '获取音视频数据失败';
+    showToast(`处理失败：${errorMessage}`, false);
+    setTimeout(() => {
+      hideToast();
+    }, 3000);
     ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
@@ -951,7 +1040,12 @@ const handleManualModeSubmit = async () => {
     }, 3000);
   } catch (error) {
     console.error('获取数据失败:', error);
-    ElNotification({ message: error?.response?.data?.msg || error?.message || '获取音视频数据失败', type: 'error', duration: 0 });
+    const errorMessage = error?.response?.data?.msg || error?.message || '获取音视频数据失败';
+    showToast(`处理失败：${errorMessage}`, false);
+    setTimeout(() => {
+      hideToast();
+    }, 3000);
+    ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
   }
