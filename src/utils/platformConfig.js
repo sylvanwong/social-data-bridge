@@ -6,7 +6,9 @@ export const PLATFORM_LABELS = {
   kuaishou: '快手',
   weibo: '微博',
   wechat: '微信',
-  bilibili: '哔哩哔哩'
+  bilibili: '哔哩哔哩',
+  zhihu: '知乎',
+  instagram: 'Instagram',
 };
 
 export const mapPlatformOptions = (platforms = []) =>
