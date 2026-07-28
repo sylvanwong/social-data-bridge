@@ -93,7 +93,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
       <div class="banner-subtitle">
         <span>使用插件遇问题可进群答疑，</span><span class="highlight">新版本更新群内抢先通知</span>
       </div>
-      <a class="banner-btn" href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=75dhf68e-32c8-4955-bc00-1657649b0a16" target="_blank">
+      <a class="banner-btn" href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=688icbad-0387-420e-a6e6-1ba184ac6e9a" target="_blank">
         <span>立即进群</span>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
           <circle cx="12" cy="12" r="10"></circle>
