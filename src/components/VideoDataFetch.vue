@@ -10,6 +10,8 @@ const props = defineProps({
   api_key: String,
 })
 
+const TASK_PLUGIN_TYPE = 'video_data';
+const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
 const formData = ref({
   mode: 'table',
   targetType: 'current',
@@ -17,9 +19,36 @@ const formData = ref({
   scope: 'n', // 'all' | 'selected' | 'n'
   rowCount: 5,
   manualUrls: '',
-  targetTableId: ''
+  targetTableId: '',
+  executionMode: 'immediate'
 });
 const MANUAL_TABLE_BASE_NAME = '作品详情获取';
+const REPEAT_TYPE_OPTIONS = [
+  { value: 'none', label: '不重复' },
+  { value: 'hourly', label: '每小时重复' },
+  { value: 'daily', label: '每天重复' },
+  { value: 'weekly', label: '每周重复' },
+  { value: 'monthly', label: '每月重复' },
+  { value: 'yearly', label: '每年重复' },
+  { value: 'workday', label: '周一到周五重复' },
+  { value: 'custom', label: '自定义' },
+];
+
+const FREQ_UNIT_OPTIONS = [
+  { value: 'hour', label: '小时' },
+  { value: 'day', label: '天' },
+  { value: 'week', label: '周' },
+  { value: 'month', label: '月' },
+  { value: 'year', label: '年' },
+];
+
+const FREQ_NUM_OPTIONS = Array.from({ length: 30 }, (_, index) => {
+  const value = index + 1;
+  return {
+    value,
+    label: `每 ${value}`,
+  };
+});
 
 const httpToHttps = (url) => {
   if (typeof url === 'string') {
@@ -59,6 +88,30 @@ const FIELD_TYPE_NAME = {
   [FieldType.Attachment]: '附件',
 };
 
+const getDefaultDeadlineDate = () => {
+  const date = new Date();
+  date.setFullYear(date.getFullYear() + 2);
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const getTodayDate = () => {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const getCurrentTime = () => {
+  const date = new Date();
+  const hours = `${date.getHours()}`.padStart(2, '0');
+  const minutes = `${date.getMinutes()}`.padStart(2, '0');
+  return `${hours}:${minutes}`;
+};
+
 const getAllowedFieldTypes = (config) => {
   if (config.name === '作者名称' || config.name === '平台') {
     return [FieldType.Text, FieldType.SingleSelect];
@@ -77,6 +130,58 @@ const getExpectedFieldTypeName = (config) => {
   return getAllowedFieldTypes(config)
     .map(type => FIELD_TYPE_NAME[type] || type)
     .join(' / ');
+};
+
+const ensureOption = (optionsRef, option) => {
+  if (!option?.id) {
+    return;
+  }
+
+  if (!optionsRef.value.some(item => item.id === option.id)) {
+    optionsRef.value = [...optionsRef.value, option];
+  }
+};
+
+const getRepeatTypeLabel = (value) => {
+  const normalizedValue = value === 'once' ? 'none' : value;
+  return REPEAT_TYPE_OPTIONS.find(item => item.value === normalizedValue)?.label || value || '-';
+};
+
+const normalizeRepeatType = (value) => {
+  return value === 'once' ? 'none' : (value || 'none');
+};
+
+const getFreqUnitLabel = (value) => {
+  return FREQ_UNIT_OPTIONS.find(item => item.value === value)?.label || value || '';
+};
+
+const formatDateValue = (value) => {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const normalizeTimeValue = (value) => {
+  if (!value) return '';
+  if (typeof value === 'string') return value.slice(0, 5);
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  const hours = `${date.getHours()}`.padStart(2, '0');
+  const minutes = `${date.getMinutes()}`.padStart(2, '0');
+  return `${hours}:${minutes}`;
 };
 
 const normalizeTagTextValue = (value, fieldType) => {
@@ -255,8 +360,59 @@ const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
   .filter(field => field.defaultSelected)
   .map(field => field.key);
 
-const getActiveFieldConfigs = () => FIELD_CONFIG.filter(field =>
-  selectedFieldKeys.value.includes(field.key)
+const getDefaultTaskDialogForm = () => ({
+  personalBaseToken: '',
+  enabled: true,
+  triggerDate: getTodayDate(),
+  triggerTime: getCurrentTime(),
+  repeatType: 'none',
+  freqNum: 1,
+  freqUnit: 'day',
+  deadlineType: 'date',
+  deadlineDate: getDefaultDeadlineDate(),
+  mode: 'table',
+  targetType: 'current',
+  videoLinkFieldId: '',
+  scope: 'n',
+  rowCount: 5,
+  manualUrls: '',
+  targetTableId: '',
+  selectedFieldKeys: getDefaultSelectedFieldKeys(),
+  sourceTableId: '',
+  sourceTableName: '',
+  sourceViewId: '',
+  sourceViewName: '',
+  resolvedTargetTableId: '',
+  resolvedTargetTableName: '',
+  videoLinkFieldName: '',
+  baseId: '',
+});
+
+const taskDialogVisible = ref(false);
+const taskDialogMode = ref('create');
+const taskDialogLoading = ref(false);
+const editingTaskId = ref(null);
+const taskDialogForm = ref(getDefaultTaskDialogForm());
+const taskList = ref([]);
+const taskListLoading = ref(false);
+const taskManagerExpanded = ref(false);
+
+const syncMainFormToTaskForm = () => {
+  taskDialogForm.value = {
+    ...taskDialogForm.value,
+    mode: formData.value.mode,
+    targetType: formData.value.targetType,
+    videoLinkFieldId: formData.value.videoLinkFieldId,
+    scope: formData.value.scope,
+    rowCount: formData.value.rowCount,
+    manualUrls: formData.value.manualUrls,
+    targetTableId: formData.value.targetTableId,
+    selectedFieldKeys: [...selectedFieldKeys.value],
+  };
+};
+
+const getActiveFieldConfigs = (keys = selectedFieldKeys.value) => FIELD_CONFIG.filter(field =>
+  keys.includes(field.key)
 );
 
 const loadSelectedFieldKeys = async () => {
@@ -324,6 +480,31 @@ const loadTableOptions = async () => {
     tableOptions.value = [];
     ElNotification({ message: '获取表格列表失败，请稍后重试', type: 'error', duration: 0 });
   }
+};
+
+const getTableNameById = async (tableId) => {
+  if (!tableId) return '';
+
+  const matched = tableOptions.value.find(item => item.id === tableId);
+  if (matched) {
+    return matched.name;
+  }
+
+  const table = await bitable.base.getTableById(tableId);
+  return await table.getName();
+};
+
+const getFieldNameById = async (tableId, fieldId) => {
+  if (!tableId || !fieldId) return '';
+
+  const matched = fieldOptions.value.find(item => item.id === fieldId);
+  if (matched) {
+    return matched.name;
+  }
+
+  const table = await bitable.base.getTableById(tableId);
+  const field = await table.getFieldById(fieldId);
+  return await field.getName();
 };
 
 const getFieldCandidateNames = (config) => [config.name, ...(config.legacyNames || [])];
@@ -884,6 +1065,525 @@ const getCellValuesByFieldId = async (recordIdList, fieldId) => {
   return filtered;
 };
 
+const validateBaseForm = (config) => {
+  if (!props.api_key) {
+    ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
+    return false;
+  }
+
+  if (config.mode === 'table') {
+    if (!config.videoLinkFieldId) {
+      ElNotification({ message: '请选择视频链接字段', type: 'warning', duration: 0 });
+      return false;
+    }
+
+    if (config.videoLinkFieldId === 'nodata') {
+      ElNotification({ message: '未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
+      return false;
+    }
+  } else {
+    if (!config.manualUrls || !config.manualUrls.trim()) {
+      ElNotification({ message: '请输入视频链接', type: 'warning', duration: 0 });
+      return false;
+    }
+
+    const urls = parseManualUrls(config.manualUrls);
+    if (urls.length === 0) {
+      ElNotification({ message: '请至少输入一个有效的视频链接', type: 'warning', duration: 0 });
+      return false;
+    }
+  }
+
+  if (config.targetType === 'existing' && !config.targetTableId) {
+    ElNotification({ message: '请选择现有表格', type: 'warning', duration: 0 });
+    return false;
+  }
+
+  if (getActiveFieldConfigs(config.selectedFieldKeys || selectedFieldKeys.value).length === 0) {
+    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
+    return false;
+  }
+
+  return true;
+};
+
+const ensureScheduleTableContext = async (config) => {
+  if (config.mode !== 'table') {
+    return true;
+  }
+
+  try {
+    await bitable.base.getActiveTable();
+    return true;
+  } catch (error) {
+    console.error('读取定时任务表格上下文失败:', error);
+    ElNotification({
+      message: '请先打开目标数据表，再保存定时任务。',
+      type: 'error',
+      duration: 0,
+    });
+    return false;
+  }
+};
+
+const getCurrentSourceContext = async (videoLinkFieldId) => {
+  const selection = await bitable.base.getSelection();
+  const activeTable = await bitable.base.getActiveTable();
+  const activeView = await activeTable.getActiveView();
+  const sourceTableName = await activeTable.getName();
+  const sourceViewName = typeof activeView.getName === 'function'
+    ? await activeView.getName()
+    : '';
+  const videoLinkFieldName = await getFieldNameById(activeTable.id, videoLinkFieldId);
+
+  return {
+    baseId: selection.baseId || '',
+    sourceTableId: activeTable.id || selection.tableId || '',
+    sourceTableName,
+    sourceViewId: activeView.id || selection.viewId || '',
+    sourceViewName,
+    videoLinkFieldName,
+  };
+};
+
+const buildTaskPayload = async () => {
+  const config = taskDialogForm.value;
+
+  if (!validateBaseForm(config)) {
+    return null;
+  }
+
+  if (!(await ensureScheduleTableContext(config))) {
+    return null;
+  }
+
+  if (!config.personalBaseToken.trim()) {
+    ElNotification({ message: '请输入授权码', type: 'warning', duration: 0 });
+    return null;
+  }
+
+  if (!config.triggerTime) {
+    ElNotification({ message: '请选择触发时间', type: 'warning', duration: 0 });
+    return null;
+  }
+
+  if (config.repeatType !== 'hourly' && !config.triggerDate) {
+    ElNotification({ message: '请选择触发日期', type: 'warning', duration: 0 });
+    return null;
+  }
+
+  if (config.repeatType === 'custom' && config.deadlineType === 'date' && !config.deadlineDate) {
+    ElNotification({ message: '请选择截止日期', type: 'warning', duration: 0 });
+    return null;
+  }
+
+  if (config.mode === 'table' && config.scope === 'selected') {
+    ElNotification({ message: '定时任务不支持“执行选中行”，请改为“执行所有行”或“执行前N行”', type: 'warning', duration: 0 });
+    return null;
+  }
+
+  const activeFieldConfigs = getActiveFieldConfigs(config.selectedFieldKeys);
+  let sourceContext = {
+    baseId: '',
+    sourceTableId: '',
+    sourceTableName: '',
+    sourceViewId: '',
+    sourceViewName: '',
+    videoLinkFieldName: '',
+  };
+  let resolvedTargetTableId = '';
+  let resolvedTargetTableName = '';
+
+  if (config.mode === 'table') {
+    sourceContext = await getCurrentSourceContext(config.videoLinkFieldId);
+    resolvedTargetTableId = config.targetType === 'current'
+      ? sourceContext.sourceTableId
+      : config.targetTableId;
+    resolvedTargetTableName = config.targetType === 'current'
+      ? sourceContext.sourceTableName
+      : await getTableNameById(config.targetTableId);
+  } else if (config.targetType === 'existing') {
+    const selection = await bitable.base.getSelection();
+    sourceContext.baseId = selection.baseId || '';
+    resolvedTargetTableId = config.targetTableId;
+    resolvedTargetTableName = await getTableNameById(config.targetTableId);
+  } else {
+    const selection = await bitable.base.getSelection();
+    sourceContext.baseId = selection.baseId || '';
+    resolvedTargetTableId = '';
+    resolvedTargetTableName = MANUAL_TABLE_BASE_NAME;
+  }
+
+  const snapshot = {
+    plugin_type: TASK_PLUGIN_TYPE,
+    base_id: sourceContext.baseId,
+    mode: config.mode,
+    target_type: config.targetType,
+    target_table_id: config.targetTableId || '',
+    target_table_name: config.targetType === 'existing' ? resolvedTargetTableName : '',
+    resolved_target_table_id: resolvedTargetTableId,
+    resolved_target_table_name: resolvedTargetTableName,
+    source_table_id: sourceContext.sourceTableId,
+    source_table_name: sourceContext.sourceTableName,
+    source_view_id: sourceContext.sourceViewId,
+    source_view_name: sourceContext.sourceViewName,
+    video_link_field_id: config.videoLinkFieldId || '',
+    video_link_field_name: sourceContext.videoLinkFieldName,
+    scope: config.scope,
+    row_count: Number(config.rowCount) || 5,
+    manual_urls: config.manualUrls || '',
+    selected_field_keys: [...config.selectedFieldKeys],
+    output_fields: activeFieldConfigs.map(item => ({
+      key: item.key,
+      name: item.name,
+      type: item.type,
+    })),
+  };
+
+  const schedule = {
+    trigger_date: config.repeatType === 'hourly' ? '' : formatDateValue(config.triggerDate),
+    trigger_time: normalizeTimeValue(config.triggerTime),
+    repeat_type: config.repeatType,
+    freq_num: config.repeatType === 'custom' ? Number(config.freqNum) || 1 : 1,
+    freq_unit: config.repeatType === 'custom' ? config.freqUnit : '',
+    deadline_type: config.repeatType === 'custom' ? config.deadlineType : '',
+    deadline_date: config.repeatType === 'custom' && config.deadlineType === 'date'
+      ? formatDateValue(config.deadlineDate)
+      : '',
+    enabled: !!config.enabled,
+  };
+
+  return {
+    plugin_type: TASK_PLUGIN_TYPE,
+    name: resolvedTargetTableName || MANUAL_TABLE_BASE_NAME,
+    personal_base_token: config.personalBaseToken.trim(),
+    base_id: sourceContext.baseId,
+    schedule,
+    snapshot,
+  };
+};
+
+const buildTaskSummary = (task) => {
+  const snapshot = task.snapshot || {};
+  const modeLabel = snapshot.mode === 'manual' ? '手动输入' : '从表格选取';
+  const scopeLabel = snapshot.mode === 'manual'
+    ? `${parseManualUrls(snapshot.manual_urls || '').length || 0} 个链接`
+    : snapshot.scope === 'all'
+      ? '执行所有行'
+      : snapshot.scope === 'selected'
+        ? '执行选中行'
+        : `执行前 ${snapshot.row_count || 0} 行`;
+  const fieldCount = Array.isArray(snapshot.selected_field_keys) ? snapshot.selected_field_keys.length : 0;
+  return `${modeLabel} · ${scopeLabel} · 输出字段 ${fieldCount} 个`;
+};
+
+const getTaskDisplayName = (task) => {
+  return task.name
+    || task.snapshot?.resolved_target_table_name
+    || task.snapshot?.target_table_name
+    || task.snapshot?.source_table_name
+    || '未命名任务';
+};
+
+const getTaskDisplayTitle = (task, maxLength = 18) => {
+  const name = getTaskDisplayName(task);
+  if (!name || name.length <= maxLength) {
+    return name;
+  }
+  return `${name.slice(0, maxLength)}...`;
+};
+
+const toggleTaskManager = () => {
+  taskManagerExpanded.value = !taskManagerExpanded.value;
+};
+
+const updateTaskInList = (taskId, patch = {}) => {
+  taskList.value = taskList.value.map(item => {
+    if (item.id !== taskId) {
+      return item;
+    }
+
+    const nextTask = {
+      ...item,
+      ...patch,
+    };
+
+    if (patch.schedule) {
+      nextTask.schedule = {
+        ...(item.schedule || {}),
+        ...patch.schedule,
+      };
+    }
+
+    return nextTask;
+  });
+};
+
+const buildTaskTimeText = (task) => {
+  const schedule = task.schedule || {};
+  if (schedule.repeat_type === 'custom') {
+    const deadlineText = schedule.deadline_type === 'date' && schedule.deadline_date
+      ? `，截止 ${schedule.deadline_date}`
+      : '，永不结束';
+    return `${schedule.trigger_date || '-'} ${schedule.trigger_time || '-'} · 每 ${schedule.freq_num || 1}${getFreqUnitLabel(schedule.freq_unit)}${deadlineText}`;
+  }
+
+  if (schedule.repeat_type === 'hourly') {
+    return `${schedule.trigger_time || '-'} · ${getRepeatTypeLabel(schedule.repeat_type)}`;
+  }
+
+  return `${schedule.trigger_date || '-'} ${schedule.trigger_time || '-'} · ${getRepeatTypeLabel(schedule.repeat_type)}`;
+};
+
+const parseTaskList = (data) => {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.list)) return data.list;
+  if (Array.isArray(data?.items)) return data.items;
+  return [];
+};
+
+const loadTaskList = async () => {
+  if (!props.api_key) {
+    taskList.value = [];
+    return;
+  }
+
+  taskListLoading.value = true;
+
+  try {
+    const selection = await bitable.base.getSelection();
+    const response = await request({
+      url: TASK_API_PATH,
+      method: 'get',
+      headers: { 'authorization': `Bearer ${props.api_key}` },
+      params: {
+        plugin_type: TASK_PLUGIN_TYPE,
+        base_id: selection.baseId || '',
+      },
+    });
+
+    const res = response.data;
+    if (res.sta !== 0) {
+      throw new Error(res.msg || '获取定时任务失败');
+    }
+
+    taskList.value = parseTaskList(res.data);
+  } catch (error) {
+    console.error('获取定时任务失败:', error);
+    ElNotification({ message: error.message || '获取定时任务失败', type: 'error', duration: 0 });
+    taskList.value = [];
+  } finally {
+    taskListLoading.value = false;
+  }
+};
+
+const copyCurrentFormToTaskDialog = async () => {
+  taskDialogForm.value = {
+    ...getDefaultTaskDialogForm(),
+    mode: formData.value.mode,
+    targetType: formData.value.targetType,
+    videoLinkFieldId: formData.value.videoLinkFieldId,
+    scope: formData.value.scope,
+    rowCount: formData.value.rowCount,
+    manualUrls: formData.value.manualUrls,
+    targetTableId: formData.value.targetTableId,
+    selectedFieldKeys: [...selectedFieldKeys.value],
+  };
+
+  if (formData.value.mode === 'table' && formData.value.videoLinkFieldId) {
+    try {
+      const activeTable = await bitable.base.getActiveTable();
+      taskDialogForm.value.sourceTableId = activeTable.id;
+      taskDialogForm.value.sourceTableName = await activeTable.getName();
+      ensureOption(fieldOptions, {
+        id: formData.value.videoLinkFieldId,
+        name: await getFieldNameById(activeTable.id, formData.value.videoLinkFieldId),
+      });
+    } catch (error) {
+      console.error('同步当前表格配置失败:', error);
+    }
+  }
+
+  if (formData.value.targetType === 'existing' && formData.value.targetTableId) {
+    ensureOption(tableOptions, {
+      id: formData.value.targetTableId,
+      name: await getTableNameById(formData.value.targetTableId),
+    });
+  }
+};
+
+const prepareInlineScheduleForm = async () => {
+  if (formData.value.mode === 'table') {
+    await getFieldListByType({ silent: true });
+  }
+
+  if (tableOptions.value.length === 0) {
+    await loadTableOptions();
+  }
+
+  if (!taskDialogForm.value.name && !taskDialogForm.value.personalBaseToken) {
+    await copyCurrentFormToTaskDialog();
+  } else {
+    syncMainFormToTaskForm();
+  }
+};
+
+const openEditTaskDialog = async (task) => {
+  if (tableOptions.value.length === 0) {
+    await loadTableOptions();
+  }
+
+  if (fieldOptions.value.length === 0 && (task.snapshot?.mode || 'table') === 'table') {
+    await getFieldListByType({ silent: true });
+  }
+
+  const snapshot = task.snapshot || {};
+  const schedule = task.schedule || {};
+
+  taskDialogMode.value = 'edit';
+  editingTaskId.value = task.id;
+  taskDialogForm.value = {
+    ...getDefaultTaskDialogForm(),
+    personalBaseToken: task.personal_base_token || '',
+    enabled: task.enabled ?? schedule.enabled ?? true,
+    triggerDate: schedule.trigger_date || '',
+    triggerTime: schedule.trigger_time || '09:00',
+    repeatType: normalizeRepeatType(schedule.repeat_type),
+    freqNum: schedule.freq_num || 1,
+    freqUnit: schedule.freq_unit || 'day',
+    deadlineType: schedule.deadline_type || 'never',
+    deadlineDate: schedule.deadline_date || '',
+    mode: snapshot.mode || 'table',
+    targetType: snapshot.target_type || 'current',
+    videoLinkFieldId: snapshot.video_link_field_id || '',
+    scope: snapshot.scope || 'n',
+    rowCount: snapshot.row_count || 5,
+    manualUrls: snapshot.manual_urls || '',
+    targetTableId: snapshot.target_table_id || '',
+    selectedFieldKeys: Array.isArray(snapshot.selected_field_keys) && snapshot.selected_field_keys.length > 0
+      ? snapshot.selected_field_keys
+      : getDefaultSelectedFieldKeys(),
+    sourceTableId: snapshot.source_table_id || '',
+    sourceTableName: snapshot.source_table_name || '',
+    sourceViewId: snapshot.source_view_id || '',
+    sourceViewName: snapshot.source_view_name || '',
+    resolvedTargetTableId: snapshot.resolved_target_table_id || '',
+    resolvedTargetTableName: snapshot.resolved_target_table_name || '',
+    videoLinkFieldName: snapshot.video_link_field_name || '',
+    baseId: task.base_id || snapshot.base_id || '',
+  };
+
+  ensureOption(fieldOptions, {
+    id: snapshot.video_link_field_id || '',
+    name: snapshot.video_link_field_name || '原字段',
+  });
+  ensureOption(tableOptions, {
+    id: snapshot.target_table_id || '',
+    name: snapshot.target_table_name || snapshot.resolved_target_table_name || '原目标表',
+  });
+
+  taskDialogVisible.value = true;
+};
+
+const saveTask = async () => {
+  taskDialogLoading.value = true;
+
+  try {
+    const payload = await buildTaskPayload();
+    if (!payload) {
+      return;
+    }
+
+    const response = await request({
+      url: editingTaskId.value ? `${TASK_API_PATH}/${editingTaskId.value}` : TASK_API_PATH,
+      method: editingTaskId.value ? 'put' : 'post',
+      headers: { 'authorization': `Bearer ${props.api_key}` },
+      data: payload,
+    });
+
+    const res = response.data;
+    if (res.sta !== 0) {
+      throw new Error(res.msg || '保存定时任务失败');
+    }
+
+    ElNotification({
+      message: editingTaskId.value ? '定时任务已更新' : '定时任务已创建',
+      type: 'success',
+    });
+
+    taskDialogVisible.value = false;
+    taskDialogForm.value = getDefaultTaskDialogForm();
+    await loadTaskList();
+  } catch (error) {
+    console.error('保存定时任务失败:', error);
+    ElNotification({ message: error.message || '保存定时任务失败', type: 'error', duration: 0 });
+  } finally {
+    taskDialogLoading.value = false;
+  }
+};
+
+const deleteTask = async (task) => {
+  if (!confirm(`确定删除任务「${getTaskDisplayName(task)}」吗？`)) {
+    return;
+  }
+
+  try {
+    const response = await request({
+      url: `${TASK_API_PATH}/${task.id}`,
+      method: 'delete',
+      headers: { 'authorization': `Bearer ${props.api_key}` },
+      data: {},
+    });
+
+    const res = response.data;
+    if (res.sta !== 0) {
+      throw new Error(res.msg || '删除定时任务失败');
+    }
+
+    ElNotification({ message: '定时任务已删除', type: 'success' });
+    await loadTaskList();
+  } catch (error) {
+    console.error('删除定时任务失败:', error);
+    ElNotification({ message: error.message || '删除定时任务失败', type: 'error', duration: 0 });
+  }
+};
+
+const toggleTaskStatus = async (task) => {
+  try {
+    const nextEnabled = !(task.enabled ?? task.schedule?.enabled);
+    const response = await request({
+      url: `${TASK_API_PATH}/${task.id}/toggle`,
+      method: 'post',
+      headers: { 'authorization': `Bearer ${props.api_key}` },
+      data: {
+        enabled: nextEnabled,
+      },
+    });
+
+    const res = response.data;
+    if (res.sta !== 0) {
+      throw new Error(res.msg || '更新任务状态失败');
+    }
+
+    const returnedTask = res.data?.task || res.data?.item || res.data;
+    if (returnedTask && typeof returnedTask === 'object') {
+      updateTaskInList(task.id, returnedTask);
+    } else {
+      updateTaskInList(task.id, {
+        enabled: nextEnabled,
+        schedule: {
+          enabled: nextEnabled,
+        },
+      });
+    }
+
+    ElNotification({ message: '任务状态已更新', type: 'success' });
+  } catch (error) {
+    console.error('更新任务状态失败:', error);
+    ElNotification({ message: error.message || '更新任务状态失败', type: 'error', duration: 0 });
+  }
+};
+
 const handleTableModeSubmit = async () => {
   console.log('=== 提交调试信息 ===');
   console.log('当前选中的数据范围:', formData.value.scope);
@@ -891,35 +1591,17 @@ const handleTableModeSubmit = async () => {
   console.log('行数:', formData.value.rowCount);
   console.log('api_key:', props.api_key);
 
-  if (!props.api_key) {
-    ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
-    return;
-  }
-
-  if (!formData.value.videoLinkFieldId) {
-    ElNotification({ message: '请选择视频链接字段', type: 'warning', duration: 0 });
-    return;
-  }
-
-  if (formData.value.videoLinkFieldId === 'nodata') {
-    ElNotification({ message: '未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
-    return;
-  }
-
-  const activeFieldConfigs = getActiveFieldConfigs();
-  if (activeFieldConfigs.length === 0) {
-    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
-    return;
-  }
-
-  if (formData.value.targetType === 'existing' && !formData.value.targetTableId) {
-    ElNotification({ message: '请选择现有表格', type: 'warning', duration: 0 });
+  if (!validateBaseForm({
+    ...formData.value,
+    selectedFieldKeys: selectedFieldKeys.value,
+  })) {
     return;
   }
 
   loading.value = true;
 
   try {
+    const activeFieldConfigs = getActiveFieldConfigs();
     const recordIdList = await getRecordIdListByScope(
       formData.value.scope,
       formData.value.rowCount
@@ -991,36 +1673,18 @@ const handleTableModeSubmit = async () => {
 };
 
 const handleManualModeSubmit = async () => {
-  if (!props.api_key) {
-    ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
-    return;
-  }
-
-  if (!formData.value.manualUrls || !formData.value.manualUrls.trim()) {
-    ElNotification({ message: '请输入视频链接', type: 'warning', duration: 0 });
-    return;
-  }
-
-  if (formData.value.targetType === 'existing' && !formData.value.targetTableId) {
-    ElNotification({ message: '请选择现有表格', type: 'warning', duration: 0 });
-    return;
-  }
-
-  const urls = parseManualUrls(formData.value.manualUrls);
-  if (urls.length === 0) {
-    ElNotification({ message: '请至少输入一个有效的视频链接', type: 'warning', duration: 0 });
-    return;
-  }
-
-  const activeFieldConfigs = getActiveFieldConfigs();
-  if (activeFieldConfigs.length === 0) {
-    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
+  if (!validateBaseForm({
+    ...formData.value,
+    selectedFieldKeys: selectedFieldKeys.value,
+  })) {
     return;
   }
 
   loading.value = true;
 
   try {
+    const urls = parseManualUrls(formData.value.manualUrls);
+    const activeFieldConfigs = getActiveFieldConfigs();
     const rowList = urls.map(url => ({ url, rawValue: url }));
     const { successList, successCount, failCount } = await fetchVideoDataByRows(rowList);
     if (successList.length === 0) {
@@ -1072,6 +1736,12 @@ const clampNumber = () => {
   formData.value.rowCount = val;
 };
 
+const stepTaskNumber = (delta) => {
+  let val = taskDialogForm.value.rowCount || 5;
+  val = Math.max(1, Math.min(100, val + delta));
+  taskDialogForm.value.rowCount = val;
+};
+
 const showToast = (text, isLoading = true) => {
   toastText.value = text;
   toastLoading.value = isLoading;
@@ -1088,7 +1758,8 @@ onMounted(() => {
   }
 
   Promise.all([
-    loadSelectedFieldKeys()
+    loadSelectedFieldKeys(),
+    loadTaskList(),
   ]).finally(() => {
     fieldSelectionReady.value = true;
   });
@@ -1122,6 +1793,10 @@ watch(
     if (mode !== 'manual' && formData.value.targetType !== 'existing') {
       formData.value.targetTableId = '';
     }
+
+    if (formData.value.executionMode === 'schedule') {
+      prepareInlineScheduleForm();
+    }
   }
 );
 
@@ -1135,6 +1810,58 @@ watch(
 
     if (targetType !== 'existing') {
       formData.value.targetTableId = '';
+    }
+
+    if (formData.value.executionMode === 'schedule') {
+      syncMainFormToTaskForm();
+    }
+  }
+);
+
+watch(
+  () => [
+    formData.value.videoLinkFieldId,
+    formData.value.scope,
+    formData.value.rowCount,
+    formData.value.manualUrls,
+    formData.value.executionMode,
+  ],
+  () => {
+    if (formData.value.executionMode === 'schedule') {
+      syncMainFormToTaskForm();
+    }
+  }
+);
+
+watch(
+  () => formData.value.executionMode,
+  async (mode) => {
+    if (mode === 'schedule') {
+      await prepareInlineScheduleForm();
+      await loadTaskList();
+    }
+  }
+);
+
+watch(
+  () => taskDialogVisible.value,
+  (visible) => {
+    if (!visible) {
+      taskDialogForm.value = getDefaultTaskDialogForm();
+      taskDialogMode.value = 'create';
+      editingTaskId.value = null;
+    }
+  }
+);
+
+watch(
+  () => taskDialogForm.value.repeatType,
+  (repeatType) => {
+    if (repeatType !== 'custom') {
+      taskDialogForm.value.deadlineType = 'date';
+      if (!taskDialogForm.value.deadlineDate) {
+        taskDialogForm.value.deadlineDate = getDefaultDeadlineDate();
+      }
     }
   }
 );
@@ -1282,9 +2009,183 @@ watch(
             </el-checkbox>
           </el-checkbox-group>
         </el-form-item>
+
+        <el-form-item label="" style="margin-top: 12px">
+          <div class="c-label">执行方式</div>
+          <el-radio-group v-model="formData.executionMode" class="radio-block">
+            <el-radio value="immediate">立即执行</el-radio>
+            <el-radio value="schedule">定时任务</el-radio>
+          </el-radio-group>
+        </el-form-item>
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleSubmit">提交</el-button>
+      <div v-if="formData.executionMode === 'immediate'" class="action-group">
+        <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleSubmit">立即执行</el-button>
+      </div>
+
+      <div v-else class="schedule-inline-panel">
+        <div class="task-dialog-title">定时配置</div>
+
+        <el-form label-position="top">
+          <el-form-item>
+            <div class="c-label">
+              授权码
+              <a
+                class="label-help-link"
+                href="https://congxin.feishu.cn/wiki/IXOJwHG3ZiJLr1knFl7cYbFnntb?from=from_copylink"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                点击获取授权码
+              </a>
+            </div>
+            <el-input
+              v-model="taskDialogForm.personalBaseToken"
+              type="password"
+              show-password
+              placeholder="输入授权码"
+            />
+          </el-form-item>
+
+          <el-form-item>
+            <div class="time-setting-block">
+              <div class="c-label">设置触发时间</div>
+              <div class="time-setting-grid">
+                <el-date-picker
+                  v-model="taskDialogForm.triggerDate"
+                  type="date"
+                  value-format="YYYY-MM-DD"
+                  placeholder="选择日期"
+                  style="width: 100%"
+                  :disabled="taskDialogForm.repeatType === 'hourly'"
+                />
+
+                <el-time-picker
+                  v-model="taskDialogForm.triggerTime"
+                  value-format="HH:mm"
+                  format="HH:mm"
+                  placeholder="选择时间"
+                  style="width: 100%"
+                />
+              </div>
+            </div>
+          </el-form-item>
+
+          <div class="schedule-field-row">
+            <el-form-item>
+              <div class="c-label">重复类型</div>
+              <el-select v-model="taskDialogForm.repeatType" style="width: 100%">
+                <el-option v-for="item in REPEAT_TYPE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+              </el-select>
+            </el-form-item>
+          </div>
+
+          <template v-if="taskDialogForm.repeatType === 'custom'">
+            <div class="schedule-custom-grid">
+              <el-form-item>
+                <div class="time-setting-block">
+                  <div class="c-label">重复频率</div>
+                  <div class="time-setting-grid">
+                    <el-select v-model="taskDialogForm.freqNum" style="width: 100%">
+                      <el-option v-for="item in FREQ_NUM_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+                    </el-select>
+                    <el-select v-model="taskDialogForm.freqUnit" style="width: 100%">
+                      <el-option v-for="item in FREQ_UNIT_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+                    </el-select>
+                  </div>
+                </div>
+              </el-form-item>
+
+              <el-form-item>
+                <div class="time-setting-block">
+                  <div class="c-label">截止方式</div>
+                  <div class="deadline-setting-grid">
+                    <label class="deadline-radio-option" :class="{ active: taskDialogForm.deadlineType === 'never' }">
+                      <input v-model="taskDialogForm.deadlineType" type="radio" value="never" />
+                      <span>永不结束</span>
+                    </label>
+                    <label class="deadline-radio-option deadline-radio-option--date" :class="{ active: taskDialogForm.deadlineType === 'date' }">
+                      <input v-model="taskDialogForm.deadlineType" type="radio" value="date" />
+                      <el-date-picker
+                        v-model="taskDialogForm.deadlineDate"
+                        type="date"
+                        value-format="YYYY-MM-DD"
+                        placeholder="选择截止日期"
+                        style="width: 100%"
+                        :disabled="taskDialogForm.deadlineType !== 'date'"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </el-form-item>
+            </div>
+          </template>
+
+          <el-form-item class="status-switch-item">
+            <div class="c-label">任务状态</div>
+            <el-switch v-model="taskDialogForm.enabled" active-text="开启" inactive-text="" />
+          </el-form-item>
+        </el-form>
+
+        <div class="action-group">
+          <el-button color="#a8071a" class="commit-btn" :loading="taskDialogLoading" @click="saveTask">保存定时任务</el-button>
+        </div>
+      </div>
+    </div>
+
+    <div class="task-manager">
+      <div
+        class="task-manager-header"
+        :class="{ expanded: taskManagerExpanded }"
+        @click="toggleTaskManager"
+      >
+        <div class="task-manager-header-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+            <polyline points="10 9 9 9 8 9"></polyline>
+          </svg>
+          <span>定时任务管理</span>
+          <span class="task-count">{{ taskList.length }} 个任务</span>
+        </div>
+        <div class="expand-arrow">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </div>
+      </div>
+
+      <div class="task-list" :class="{ active: taskManagerExpanded }">
+        <div v-if="taskListLoading" class="empty-state">正在加载任务...</div>
+        <div v-else-if="taskList.length === 0" class="empty-state">暂无定时任务，点击上方“保存定时任务”创建</div>
+        <div v-else>
+          <div v-for="task in taskList" :key="task.id" class="task-card">
+            <div class="task-card-header">
+              <div>
+                <div class="task-card-title">{{ getTaskDisplayTitle(task) }}</div>
+                <div class="task-card-desc">{{ buildTaskSummary(task) }}</div>
+              </div>
+            </div>
+
+            <div class="task-card-meta">{{ buildTaskTimeText(task) }}</div>
+
+            <div class="task-card-actions">
+              <el-button plain size="small" @click.stop="openEditTaskDialog(task)">编辑</el-button>
+              <el-button plain size="small" type="danger" @click.stop="deleteTask(task)">删除</el-button>
+              <div class="task-card-switch-wrap" @click.stop>
+                <div
+                  class="task-card-switch"
+                  :class="{ active: task.enabled }"
+                  @click.stop="toggleTaskStatus(task)"
+                ></div>
+                <span class="task-card-switch-label">{{ task.enabled ? '开启' : '关闭' }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Toast 提示 -->
@@ -1304,6 +2205,239 @@ watch(
         <span>{{ toastText }}</span>
       </div>
     </div>
+
+    <el-dialog
+      v-model="taskDialogVisible"
+      :title="taskDialogMode === 'edit' ? '编辑定时任务' : '新建定时任务'"
+      width="370px"
+      class="schedule-edit-dialog"
+      destroy-on-close
+    >
+      <div class="task-dialog-scroll">
+        <div class="task-dialog-section task-dialog-card">
+          <div class="mode-switch dialog-mode-switch">
+            <button
+              type="button"
+              class="mode-tab"
+              :class="{ active: taskDialogForm.mode === 'table' }"
+              @click="taskDialogForm.mode = 'table'; taskDialogForm.targetType = 'current'"
+            >
+              从表格选取
+            </button>
+            <button
+              type="button"
+              class="mode-tab"
+              :class="{ active: taskDialogForm.mode === 'manual' }"
+              @click="taskDialogForm.mode = 'manual'; if (taskDialogForm.targetType === 'current') taskDialogForm.targetType = 'new'"
+            >
+              手动输入
+            </button>
+          </div>
+
+          <el-form label-position="top">
+            <template v-if="taskDialogForm.mode === 'table'">
+              <el-form-item>
+                <div class="c-label">视频链接字段</div>
+                <el-select v-model="taskDialogForm.videoLinkFieldId" placeholder="请选择字段" style="width: 100%">
+                  <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+                </el-select>
+                <div class="sub-hint">定时执行时会使用当前页面所属表和视图。编辑前请先打开对应数据表。</div>
+              </el-form-item>
+
+              <el-form-item>
+                <div class="c-label">数据范围</div>
+                <el-radio-group v-model="taskDialogForm.scope" class="custom-radio-group">
+                  <el-radio value="all" class="custom-radio-item">执行所有行</el-radio>
+                  <el-radio value="n" class="custom-radio-item">
+                    <span class="radio-label-text">执行前N行</span>
+                    <div class="custom-stepper-input">
+                      <input
+                        type="number"
+                        :value="taskDialogForm.rowCount"
+                        @input.stop="taskDialogForm.rowCount = Math.max(1, Math.min(100, parseInt($event.target.value) || 5))"
+                        @click.stop
+                        min="1"
+                        max="100"
+                      />
+                      <div class="stepper-buttons">
+                        <button
+                          type="button"
+                          @click.stop="stepTaskNumber(1)"
+                          :disabled="taskDialogForm.rowCount >= 100"
+                          class="stepper-btn stepper-btn-up"
+                        ></button>
+                        <button
+                          type="button"
+                          @click.stop="stepTaskNumber(-1)"
+                          :disabled="taskDialogForm.rowCount <= 1"
+                          class="stepper-btn stepper-btn-down"
+                        ></button>
+                      </div>
+                    </div>
+                  </el-radio>
+                </el-radio-group>
+                <div class="sub-hint warning-text">定时任务不支持“执行选中行”。</div>
+              </el-form-item>
+            </template>
+
+            <template v-else>
+              <el-form-item>
+                <div class="c-label">目标表格</div>
+                <el-radio-group v-model="taskDialogForm.targetType" class="radio-block">
+                  <el-radio value="new">新建表格</el-radio>
+                  <el-radio value="existing">使用现有表格</el-radio>
+                </el-radio-group>
+              </el-form-item>
+
+              <el-form-item v-if="taskDialogForm.targetType === 'existing'">
+                <div class="c-label">选择现有表格</div>
+                <el-select v-model="taskDialogForm.targetTableId" placeholder="请选择" style="width: 100%">
+                  <el-option v-for="table in tableOptions" :key="table.id" :label="table.name" :value="table.id" />
+                </el-select>
+              </el-form-item>
+
+              <el-form-item>
+                <div class="c-label">视频链接</div>
+                <el-input
+                  v-model="taskDialogForm.manualUrls"
+                  type="textarea"
+                  :rows="4"
+                  placeholder="请输入正确的视频链接，多个链接可换行或用逗号分隔"
+                />
+              </el-form-item>
+            </template>
+
+            <el-form-item>
+              <div class="c-label">选择需要的字段</div>
+              <el-checkbox-group v-model="taskDialogForm.selectedFieldKeys" class="field-checkbox-group">
+                <el-checkbox
+                  v-for="field in FIELD_CONFIG"
+                  :key="field.key"
+                  :label="field.key"
+                  class="field-checkbox-item"
+                >
+                  {{ field.name }}
+                </el-checkbox>
+              </el-checkbox-group>
+            </el-form-item>
+          </el-form>
+        </div>
+
+        <div class="task-dialog-section task-dialog-card">
+          <div class="task-dialog-title">定时配置</div>
+
+          <el-form label-position="top">
+            <el-form-item>
+              <div class="c-label">
+                授权码
+                <a
+                  class="label-help-link"
+                  href="https://congxin.feishu.cn/wiki/IXOJwHG3ZiJLr1knFl7cYbFnntb?from=from_copylink"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  点击获取授权码
+                </a>
+              </div>
+              <el-input
+                v-model="taskDialogForm.personalBaseToken"
+                type="password"
+                show-password
+                placeholder="请输入授权码"
+              />
+            </el-form-item>
+
+            <el-form-item>
+              <div class="time-setting-block">
+                <div class="c-label">设置触发时间</div>
+                <div class="time-setting-grid">
+                  <el-date-picker
+                    v-model="taskDialogForm.triggerDate"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                    placeholder="选择日期"
+                    style="width: 100%"
+                    :disabled="taskDialogForm.repeatType === 'hourly'"
+                  />
+
+                  <el-time-picker
+                    v-model="taskDialogForm.triggerTime"
+                    value-format="HH:mm"
+                    format="HH:mm"
+                    placeholder="选择时间"
+                    style="width: 100%"
+                  />
+                </div>
+              </div>
+            </el-form-item>
+
+            <div class="schedule-field-row">
+              <el-form-item>
+                <div class="c-label">重复类型</div>
+                <el-select v-model="taskDialogForm.repeatType" style="width: 100%">
+                  <el-option v-for="item in REPEAT_TYPE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+                </el-select>
+              </el-form-item>
+            </div>
+
+            <template v-if="taskDialogForm.repeatType === 'custom'">
+              <div class="schedule-custom-grid">
+                <el-form-item>
+                  <div class="time-setting-block">
+                    <div class="c-label">重复频率</div>
+                    <div class="time-setting-grid">
+                      <el-select v-model="taskDialogForm.freqNum" style="width: 100%">
+                        <el-option v-for="item in FREQ_NUM_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+                      </el-select>
+                      <el-select v-model="taskDialogForm.freqUnit" style="width: 100%">
+                        <el-option v-for="item in FREQ_UNIT_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+                      </el-select>
+                    </div>
+                  </div>
+                </el-form-item>
+
+                <el-form-item>
+                  <div class="time-setting-block">
+                    <div class="c-label">截止方式</div>
+                    <div class="deadline-setting-grid">
+                      <label class="deadline-radio-option" :class="{ active: taskDialogForm.deadlineType === 'never' }">
+                        <input v-model="taskDialogForm.deadlineType" type="radio" value="never" />
+                        <span>永不结束</span>
+                      </label>
+                      <label class="deadline-radio-option deadline-radio-option--date" :class="{ active: taskDialogForm.deadlineType === 'date' }">
+                        <input v-model="taskDialogForm.deadlineType" type="radio" value="date" />
+                        <el-date-picker
+                          v-model="taskDialogForm.deadlineDate"
+                          type="date"
+                          value-format="YYYY-MM-DD"
+                          placeholder="选择截止日期"
+                          style="width: 100%"
+                          :disabled="taskDialogForm.deadlineType !== 'date'"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </el-form-item>
+              </div>
+            </template>
+
+            <el-form-item class="status-switch-item">
+              <div class="c-label">任务状态</div>
+              <el-switch v-model="taskDialogForm.enabled" active-text="开启" inactive-text="" />
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="taskDialogVisible = false">取消</el-button>
+          <el-button color="#a8071a" :loading="taskDialogLoading" @click="saveTask">
+            {{ taskDialogMode === 'edit' ? '保存修改' : '创建任务' }}
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1396,6 +2530,34 @@ watch(
 .form :deep(.el-form-item__content) {
   font-size: 14px;
 }
+.action-group {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.schedule-inline-panel {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid #E5E6EB;
+  border-radius: 8px;
+  background: #FFFFFF;
+}
+
+.time-setting-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.time-setting-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
 .commit-btn {
   background: #A8071A;
   width: 100%;
@@ -1418,10 +2580,38 @@ watch(
 .c-label {
   display: flex;
   align-items: center;
+  color: #1D2129;
 }
+
+.label-help-link {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #A8071A;
+  line-height: 20px;
+  text-decoration: none;
+}
+
+.label-help-link:hover {
+  color: #C41D2C;
+  text-decoration: underline;
+}
+
 .field-stack {
   width: 100%;
 }
+.status-switch-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.status-switch-item :deep(.el-form-item__content) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: nowrap;
+}
+
 .radio-block {
   width: 100%;
 }
@@ -1643,6 +2833,331 @@ watch(
 
 .stepper-btn:disabled:hover {
   background: transparent;
+}
+
+.task-manager {
+  margin-top: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.task-manager-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  border-bottom: 1px solid transparent;
+}
+
+.task-manager-header:hover {
+  background: #F7F8FA;
+}
+
+.task-manager-header.expanded {
+  border-bottom-color: #E5E6EB;
+}
+
+.task-manager-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-manager-header-left svg {
+  width: 18px;
+  height: 18px;
+  color: #86909C;
+  transition: color 0.2s ease;
+}
+
+.task-manager-header:hover .task-manager-header-left svg {
+  color: #4E5969;
+}
+
+.task-manager-header-left span {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1D2129;
+  line-height: 22px;
+}
+
+.task-count {
+  font-size: 12px;
+  color: #86909C;
+  background: #F7F8FA;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #E5E6EB;
+  line-height: 18px;
+}
+
+.expand-arrow {
+  width: 16px;
+  height: 16px;
+  color: #86909C;
+  transition: transform 0.2s ease, color 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.expand-arrow svg {
+  width: 100%;
+  height: 100%;
+}
+
+.task-manager-header:hover .expand-arrow {
+  color: #4E5969;
+}
+
+.task-manager-header.expanded .expand-arrow {
+  transform: rotate(180deg);
+}
+
+.task-list {
+  display: none;
+  padding: 12px 16px 16px;
+}
+
+.task-list.active {
+  display: block;
+  animation: slideDown 0.2s ease;
+}
+
+.task-card {
+  background: #FFFFFF;
+  border: 1px solid #E5E6EB;
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  transition: border-color 0.2s ease;
+}
+
+.task-card:last-child {
+  margin-bottom: 0;
+}
+
+.task-card:hover {
+  border-color: #D93648;
+}
+
+.task-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.task-card-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: #1D2129;
+  line-height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-card-desc,
+.task-card-meta,
+.empty-state,
+.sub-hint {
+  font-size: 13px;
+  line-height: 20px;
+  color: #86909C;
+}
+
+.task-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #E5E6EB;
+  flex-wrap: wrap;
+}
+
+.task-card-switch-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.task-card-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: #E5E6EB;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.task-card-switch.active {
+  background: #A8071A;
+}
+
+.task-card-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: #FFFFFF;
+  border-radius: 50%;
+  transition: transform 0.2s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.task-card-switch.active::after {
+  transform: translateX(16px);
+}
+
+.task-card-switch-label {
+  font-size: 12px;
+  color: #86909C;
+  line-height: 18px;
+}
+
+.empty-state {
+  padding: 32px 0;
+  text-align: center;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.task-dialog-section + .task-dialog-section {
+  margin-top: 12px;
+}
+
+.task-dialog-card {
+  padding: 14px;
+  border: 1px solid #E5E6EB;
+  border-radius: 8px;
+  background: #FFFFFF;
+}
+
+.task-dialog-scroll {
+  max-height: min(70vh, 620px);
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.task-dialog-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1D2129;
+  line-height: 24px;
+  margin-bottom: 12px;
+}
+
+.grid-two {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.schedule-field-row,
+.schedule-custom-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.schedule-field-row :deep(.el-form-item),
+.schedule-custom-grid :deep(.el-form-item) {
+  margin-bottom: 18px;
+}
+
+.schedule-custom-grid .time-setting-grid,
+.schedule-custom-grid .deadline-setting-grid {
+  margin-top: 0;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.warning-text {
+  color: #A8071A;
+}
+
+.deadline-setting-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px;
+  width: 100%;
+}
+
+.deadline-radio-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.2s ease;
+  color: #1D2129;
+}
+
+.deadline-radio-option.active {
+  color: #A8071A;
+}
+
+.deadline-radio-option input[type="radio"] {
+  margin: 0;
+  accent-color: #A8071A;
+  flex-shrink: 0;
+}
+
+.deadline-radio-option--date {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 6px;
+  min-width: 0;
+}
+
+:deep(.schedule-edit-dialog .el-dialog) {
+  width: min(370px, calc(100vw - 24px)) !important;
+  max-width: calc(100vw - 24px);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+:deep(.schedule-edit-dialog .el-dialog__header) {
+  padding: 14px 16px;
+  margin-right: 0;
+  border-bottom: 1px solid #E5E6EB;
+}
+
+:deep(.schedule-edit-dialog .el-dialog__title) {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1D2129;
+}
+
+:deep(.schedule-edit-dialog .el-dialog__body) {
+  padding: 12px;
+  background: #fffcfc;
+}
+
+:deep(.schedule-edit-dialog .el-dialog__footer) {
+  padding: 0 12px 12px;
+  background: #fffcfc;
 }
 
 /* Toast 样式 */

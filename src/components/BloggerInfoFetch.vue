@@ -1739,11 +1739,6 @@ watch(
                 <el-option v-for="item in REPEAT_TYPE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
               </el-select>
             </el-form-item>
-
-            <el-form-item class="status-switch-item">
-              <div class="c-label">任务状态</div>
-              <el-switch v-model="taskDialogForm.enabled" active-text="开启" inactive-text="" />
-            </el-form-item>
           </div>
 
           <template v-if="taskDialogForm.repeatType === 'custom'">
@@ -1786,6 +1781,11 @@ watch(
               </el-form-item>
             </div>
           </template>
+
+          <el-form-item class="status-switch-item">
+            <div class="c-label">任务状态</div>
+            <el-switch v-model="taskDialogForm.enabled" active-text="开启" inactive-text="" />
+          </el-form-item>
         </el-form>
 
         <div class="action-group">
@@ -2038,11 +2038,6 @@ watch(
                   <el-option v-for="item in REPEAT_TYPE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
                 </el-select>
               </el-form-item>
-
-              <el-form-item class="status-switch-item">
-                <div class="c-label">任务状态</div>
-                <el-switch v-model="taskDialogForm.enabled" active-text="开启" inactive-text="" />
-              </el-form-item>
             </div>
 
             <template v-if="taskDialogForm.repeatType === 'custom'">
@@ -2085,6 +2080,11 @@ watch(
                 </el-form-item>
               </div>
             </template>
+
+            <el-form-item class="status-switch-item">
+              <div class="c-label">任务状态</div>
+              <el-switch v-model="taskDialogForm.enabled" active-text="开启" inactive-text="" />
+            </el-form-item>
           </el-form>
         </div>
       </div>
