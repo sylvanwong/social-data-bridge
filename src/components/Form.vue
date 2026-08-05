@@ -27,12 +27,15 @@ const API_KEY_CLEARED_MARKER = "__cleared__";
 const TYPE_OPTIONS = [
   { value: "xhs", label: "小红书" },
   { value: "douyin", label: "抖音" },
+  { value: "tiktok", label: "TikTok" },
   { value: "kuaishou", label: "快手" },
   { value: "weibo", label: "微博" },
   { value: "wechat", label: "微信" },
   { value: "bilibili", label: "哔哩哔哩" },
   { value: "zhihu", label: "知乎" },
   { value: "instagram", label: "Instagram" },
+  { value: "youtube", label: "YouTube" },
+  { value: "x", label: "X" },
 ]
 const social_type_options = ref([...TYPE_OPTIONS]);
 

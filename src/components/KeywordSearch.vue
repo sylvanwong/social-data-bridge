@@ -16,15 +16,17 @@ const formData1 = ref({
   social_type: "",
   keyword: "",
   sort_type: 0,
-  bilibili_sort_type: 0,
-  filter_note_type: 0,
-  filter_note_time: 0,
+  filter_note_type: 'all',
+  filter_note_time: 'all',
   publish_time: 0,
-  publish_time_range: 0,
+  douyin_content_type: 0,
+  content_type: 'all',
+  video_type: 'all',
+  publish_time_range: 'all',
   publish_time_start_date: '',
   publish_time_end_date: '',
-  filter_duration: 0,
-  duration_range: 0,
+  filter_duration: '0',
+  duration_range: 'all',
   pages: 1,
 });
 const table_options = ref([]);
@@ -46,59 +48,142 @@ const xhs_pages_options = pages_options.filter(item => item.value !== 0);
 const douyin_sort_type_options = [
   { value: 0, label: "综合" },
   { value: 1, label: "最多点赞" },
-  { value: 2, label: "最多发布" },
+  { value: 2, label: "最新发布" },
 ];
 const xhs_sort_type_options = [
-  { value: 0, label: "综合" },
-  { value: 1, label: "最多点赞" },
-  { value: 2, label: "最新" },
-  { value: 3, label: "最多评论" },
-  { value: 4, label: "最多收藏" },
+  { value: 'general', label: "综合" },
+  { value: 'time_descending', label: "最新" },
+  { value: 'like_count_descending', label: "最多点赞" },
+  { value: 'comment_count_descending', label: "最多评论" },
+  { value: 'collect_count_descending', label: "最多收藏" },
 ];
 const bilibili_sort_type_options = [
-  { value: 0, label: '综合排序' },
-  { value: 1, label: '最多播放' },
-  { value: 2, label: '最新发布' },
-  { value: 3, label: '最多弹幕' },
-  { value: 4, label: '最多收藏' },
+  { value: 'general', label: '综合排序' },
+  { value: 'view_count_descending', label: '最多播放' },
+  { value: 'time_descending', label: '最新发布' },
+  { value: 'danmaku_count_descending', label: '最多弹幕' },
+  { value: 'collect_count_descending', label: '最多收藏' },
 ];
 const filter_note_type_options = [
-  { value: 0, label: "综合笔记" },
-  { value: 1, label: "视频笔记" },
-  { value: 2, label: "图文笔记" },
+  { value: 'all', label: "不限" },
+  { value: 'image', label: "图文笔记" },
+  { value: 'video', label: "视频笔记" },
 ];
-const time_options = [
+const xhs_time_options = [
+  { value: 'all', label: "不限" },
+  { value: 'day', label: "一天之内" },
+  { value: 'week', label: "一周之内" },
+  { value: 'half_year', label: "半年之内" },
+];
+const douyin_publish_time_options = [
   { value: 0, label: "不限" },
   { value: 1, label: "一天之内" },
-  { value: 2, label: "一周之内" },
-  { value: 3, label: "半年之内" },
+  { value: 7, label: "一周之内" },
+  { value: 180, label: "半年之内" },
 ];
-const filter_duration_options = [
-  { value: 0, label: "不限" },
-  { value: 1, label: "1分钟以下" },
-  { value: 2, label: "1-5分钟" },
-  { value: 3, label: "5分钟以上" },
+const douyin_duration_options = [
+  { value: '0', label: "不限" },
+  { value: '0-1', label: "1分钟以下" },
+  { value: '1-5', label: "1-5分钟" },
+  { value: '5-10000', label: "5分钟以上" },
 ];
 const bilibili_publish_time_range_options = [
-  { value: 0, label: '全部日期' },
-  { value: 1, label: '最近一天' },
-  { value: 2, label: '最近一周' },
-  { value: 3, label: '最近半年' },
-  { value: 4, label: '自定义日期范围' },
+  { value: 'all', label: '全部日期' },
+  { value: 'day', label: '最近一天' },
+  { value: 'week', label: '最近一周' },
+  { value: 'half_year', label: '最近半年' },
+  { value: 'custom', label: '自定义日期范围' },
 ];
 const bilibili_duration_range_options = [
-  { value: 0, label: '全部时长' },
-  { value: 1, label: '10 分钟以下' },
-  { value: 2, label: '10-30 分钟' },
-  { value: 3, label: '30-60 分钟' },
-  { value: 4, label: '60 分钟以上' },
+  { value: 'all', label: '全部时长' },
+  { value: 'under_10_minutes', label: '10 分钟以下' },
+  { value: 'between_10_and_30_minutes', label: '10-30 分钟' },
+  { value: 'between_30_and_60_minutes', label: '30-60 分钟' },
+  { value: 'over_60_minutes', label: '60 分钟以上' },
+];
+const wechat_sort_type_options = [
+  { value: 'all', label: '默认排序' },
+  { value: 'time_descending', label: '最新发布' },
+  { value: 'collect_count_descending', label: '最多收藏' },
+];
+const wechat_duration_options = [
+  { value: 'all', label: '不限' },
+  { value: 'under_5_min', label: '5分钟以下' },
+  { value: 'between_5_and_20_min', label: '5-20分钟' },
+  { value: 'over_20_min', label: '20分钟以上' },
+];
+const zhihu_content_type_options = [
+  { value: 'all', label: '全部' },
+  { value: 'answer', label: '回答' },
+  { value: 'article', label: '文章' },
+  { value: 'video', label: '视频' },
+];
+const zhihu_sort_type_options = [
+  { value: 'general', label: '综合' },
+  { value: 'time_descending', label: '最新发布' },
+  { value: 'upvote_count_descending', label: '最多赞同' },
+];
+const zhihu_time_options = [
+  { value: 'all', label: '不限' },
+  { value: 'day', label: '一天内' },
+  { value: 'week', label: '一周内' },
+  { value: 'month', label: '一个月内' },
+  { value: 'three_months', label: '三个月内' },
+  { value: 'half_year', label: '半年内' },
+  { value: 'year', label: '一年内' },
+];
+const youtube_sort_type_options = [
+  { value: 'general', label: '综合' },
+  { value: 'time_descending', label: '最新发布' },
+  { value: 'view_count_descending', label: '最多观看' },
+  { value: 'rating', label: '评分最高' },
+];
+const youtube_video_type_options = [
+  { value: 'all', label: '全部' },
+  { value: 'video', label: '视频' },
+  { value: 'movie', label: '电影' },
+];
+const youtube_time_options = [
+  { value: 'all', label: '不限' },
+  { value: 'last_hour', label: '最近一小时' },
+  { value: 'today', label: '今天' },
+  { value: 'this_week', label: '本周' },
+  { value: 'this_month', label: '本月' },
+  { value: 'this_year', label: '今年' },
+];
+const youtube_duration_options = [
+  { value: 'all', label: '不限' },
+  { value: 'under_4_min', label: '4分钟以下' },
+  { value: 'between_4_and_20_min', label: '4-20分钟' },
+  { value: 'over_20_min', label: '20分钟以上' },
+];
+const x_sort_type_options = [
+  { value: 'hot', label: '默认排序' },
+  { value: 'time_descending', label: '最新' },
+];
+const tiktok_content_type_options = [
+  { value: 'all', label: '全部' },
+  { value: 'video', label: '视频' },
+  { value: 'image', label: '图片' },
 ];
 
 const isXhs = computed(() => formData1.value.social_type === 'xhs');
 const isDouyin = computed(() => formData1.value.social_type === 'douyin');
 const isKuaishou = computed(() => formData1.value.social_type === 'kuaishou');
 const isBilibili = computed(() => formData1.value.social_type === 'bilibili');
-const showSortType = computed(() => isDouyin.value || isXhs.value || isBilibili.value);
+const isWechat = computed(() => formData1.value.social_type === 'wechat');
+const isZhihu = computed(() => formData1.value.social_type === 'zhihu');
+const isYoutube = computed(() => formData1.value.social_type === 'youtube');
+const isX = computed(() => formData1.value.social_type === 'x');
+const isTiktok = computed(() => formData1.value.social_type === 'tiktok');
+const showSortType = computed(() => isDouyin.value || isXhs.value || isBilibili.value || isWechat.value || isZhihu.value || isYoutube.value || isX.value);
+const isBilibiliCustomDate = computed(() => isBilibili.value && formData1.value.publish_time_range === 'custom');
+const getDefaultSortType = (socialType) => {
+  if (socialType === 'douyin') return 0;
+  if (socialType === 'wechat') return 'all';
+  if (socialType === 'x') return 'hot';
+  return 'general';
+};
 
 const getTableName = () => formData1.value.keyword || '社媒数据助手';
 
@@ -182,28 +267,52 @@ const getSearchTaskInterval = (task_id, targetTableId = "") => {
 
 const postSearchTask = async (targetTableId = "") => {
   let filter_config = {};
-  if (formData1.value.social_type == 'xhs') {
+  const socialType = formData1.value.social_type;
+  if (socialType === 'xhs') {
     filter_config = {
       sort_type: formData1.value.sort_type,
       filter_note_type: formData1.value.filter_note_type,
       filter_note_time: formData1.value.filter_note_time,
-    }
-  } else if (formData1.value.social_type == 'douyin') {
+    };
+  } else if (socialType === 'douyin') {
     filter_config = {
       sort_type: formData1.value.sort_type,
       publish_time: formData1.value.publish_time,
       filter_duration: formData1.value.filter_duration,
-    }
-  } else if (formData1.value.social_type == 'bilibili') {
+      content_type: formData1.value.douyin_content_type,
+    };
+  } else if (socialType === 'wechat') {
     filter_config = {
-      sort_type: formData1.value.bilibili_sort_type,
-      publish_time_range: formData1.value.publish_time_range,
+      sort_type: formData1.value.sort_type,
       duration_range: formData1.value.duration_range,
     };
-    if (formData1.value.publish_time_range === 4) {
+  } else if (socialType === 'bilibili') {
+    filter_config = {
+      sort_type: formData1.value.sort_type,
+      publish_time_range: isBilibiliCustomDate.value ? 'all' : formData1.value.publish_time_range,
+      duration_range: formData1.value.duration_range,
+    };
+    if (isBilibiliCustomDate.value) {
       filter_config.publish_time_start_date = formData1.value.publish_time_start_date;
       filter_config.publish_time_end_date = formData1.value.publish_time_end_date;
     }
+  } else if (socialType === 'zhihu') {
+    filter_config = {
+      content_type: formData1.value.content_type,
+      sort_type: formData1.value.sort_type,
+      publish_time_range: formData1.value.publish_time_range,
+    };
+  } else if (socialType === 'youtube') {
+    filter_config = {
+      sort_type: formData1.value.sort_type,
+      video_type: formData1.value.video_type,
+      publish_time_range: formData1.value.publish_time_range,
+      duration_range: formData1.value.duration_range,
+    };
+  } else if (socialType === 'x') {
+    filter_config = { sort_type: formData1.value.sort_type };
+  } else if (socialType === 'tiktok') {
+    filter_config = { content_type: formData1.value.content_type };
   }
   await request({
     url: "/social/api/v1/feishu/keyword/task",
@@ -263,27 +372,25 @@ watch(
 watch(
   () => formData1.value.social_type,
   (socialType) => {
-    if (socialType === 'kuaishou') {
-      formData1.value.sort_type = 0;
-      formData1.value.filter_note_type = 0;
-      formData1.value.filter_note_time = 0;
-      formData1.value.publish_time = 0;
-      formData1.value.filter_duration = 0;
-    }
-    if (socialType !== 'bilibili') {
-      formData1.value.bilibili_sort_type = 0;
-      formData1.value.publish_time_range = 0;
-      formData1.value.publish_time_start_date = '';
-      formData1.value.publish_time_end_date = '';
-      formData1.value.duration_range = 0;
-    }
+    formData1.value.sort_type = getDefaultSortType(socialType);
+    formData1.value.filter_note_type = 'all';
+    formData1.value.filter_note_time = 'all';
+    formData1.value.publish_time = 0;
+    formData1.value.douyin_content_type = 0;
+    formData1.value.content_type = 'all';
+    formData1.value.video_type = 'all';
+    formData1.value.publish_time_range = 'all';
+    formData1.value.publish_time_start_date = '';
+    formData1.value.publish_time_end_date = '';
+    formData1.value.filter_duration = '0';
+    formData1.value.duration_range = 'all';
   }
 );
 
 watch(
   () => formData1.value.publish_time_range,
   (publishTimeRange) => {
-    if (publishTimeRange !== 4) {
+    if (publishTimeRange !== 'custom') {
       formData1.value.publish_time_start_date = '';
       formData1.value.publish_time_end_date = '';
     }
@@ -319,7 +426,7 @@ const commit = () => {
     showErrorMsg("请输入关键词");
     return;
   }
-  if (social_type === 'bilibili' && formData1.value.publish_time_range === 4) {
+  if (social_type === 'bilibili' && formData1.value.publish_time_range === 'custom') {
     const { publish_time_start_date, publish_time_end_date } = formData1.value;
     if (!publish_time_start_date || !publish_time_end_date) {
       showErrorMsg("请选择完整的自定义发布时间范围");
@@ -424,14 +531,26 @@ watch(selectedFieldKeys, (keys) => {
                 class="help-icon" />
             </el-tooltip>
           </div>
-          <el-select v-if="isDouyin || isXhs" v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
-            <el-option v-if="isDouyin" v-for="tl in douyin_sort_type_options" :key="tl.value" :label="tl.label"
-              :value="tl.value" />
-            <el-option v-if="isXhs" v-for="tl in xhs_sort_type_options" :key="tl.value" :label="tl.label"
-              :value="tl.value" />
+          <el-select v-if="isDouyin" v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in douyin_sort_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
-          <el-select v-if="isBilibili" v-model="formData1.bilibili_sort_type" placeholder="请选择" style="width: 100%">
+          <el-select v-else-if="isXhs" v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in xhs_sort_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+          <el-select v-else-if="isBilibili" v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
             <el-option v-for="tl in bilibili_sort_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+          <el-select v-else-if="isWechat" v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in wechat_sort_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+          <el-select v-else-if="isZhihu" v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in zhihu_sort_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+          <el-select v-else-if="isYoutube" v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in youtube_sort_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+          <el-select v-else-if="isX" v-model="formData1.sort_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in x_sort_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="" v-if="isXhs">
@@ -457,7 +576,7 @@ watch(selectedFieldKeys, (keys) => {
             </el-tooltip>
           </div>
           <el-select v-model="formData1.filter_note_time" placeholder="请选择" style="width: 100%">
-            <el-option v-for="tl in time_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+            <el-option v-for="tl in xhs_time_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="" v-if="isDouyin">
@@ -470,7 +589,7 @@ watch(selectedFieldKeys, (keys) => {
             </el-tooltip>
           </div>
           <el-select v-model="formData1.publish_time" placeholder="请选择" style="width: 100%">
-            <el-option v-for="tl in time_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+            <el-option v-for="tl in douyin_publish_time_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="" v-if="isDouyin">
@@ -483,7 +602,15 @@ watch(selectedFieldKeys, (keys) => {
             </el-tooltip>
           </div>
           <el-select v-model="formData1.filter_duration" placeholder="请选择" style="width: 100%">
-            <el-option v-for="tl in filter_duration_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+            <el-option v-for="tl in douyin_duration_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isDouyin">
+          <div slot="label" class="c-label">内容类型</div>
+          <el-select v-model="formData1.douyin_content_type" placeholder="请选择" style="width: 100%">
+            <el-option :value="0" label="不限" />
+            <el-option :value="1" label="视频" />
+            <el-option :value="2" label="图文" />
           </el-select>
         </el-form-item>
         <el-form-item label="" v-if="isBilibili">
@@ -499,7 +626,7 @@ watch(selectedFieldKeys, (keys) => {
             <el-option v-for="tl in bilibili_publish_time_range_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
         </el-form-item>
-        <el-form-item label="" v-if="isBilibili && formData1.publish_time_range === 4">
+        <el-form-item label="" v-if="isBilibiliCustomDate">
           <div slot="label" class="c-label">自定义发布时间范围</div>
           <div class="date-range-row">
             <el-date-picker
@@ -530,6 +657,48 @@ watch(selectedFieldKeys, (keys) => {
           </div>
           <el-select v-model="formData1.duration_range" placeholder="请选择" style="width: 100%">
             <el-option v-for="tl in bilibili_duration_range_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isWechat">
+          <div slot="label" class="c-label">视频时长</div>
+          <el-select v-model="formData1.duration_range" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in wechat_duration_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isZhihu">
+          <div slot="label" class="c-label">内容类型</div>
+          <el-select v-model="formData1.content_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in zhihu_content_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isZhihu">
+          <div slot="label" class="c-label">发布时间</div>
+          <el-select v-model="formData1.publish_time_range" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in zhihu_time_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isYoutube">
+          <div slot="label" class="c-label">视频类型</div>
+          <el-select v-model="formData1.video_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in youtube_video_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isYoutube">
+          <div slot="label" class="c-label">发布时间</div>
+          <el-select v-model="formData1.publish_time_range" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in youtube_time_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isYoutube">
+          <div slot="label" class="c-label">视频时长</div>
+          <el-select v-model="formData1.duration_range" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in youtube_duration_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="" v-if="isTiktok">
+          <div slot="label" class="c-label">内容类型</div>
+          <el-select v-model="formData1.content_type" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in tiktok_content_type_options" :key="tl.value" :label="tl.label" :value="tl.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="">
