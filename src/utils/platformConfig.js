@@ -3,12 +3,15 @@ import request from '@/utils/request'
 export const PLATFORM_LABELS = {
   xhs: '小红书',
   douyin: '抖音',
+  tiktok: 'TikTok',
   kuaishou: '快手',
   weibo: '微博',
   wechat: '微信',
   bilibili: '哔哩哔哩',
   zhihu: '知乎',
   instagram: 'Instagram',
+  youtube: 'YouTube',
+  x: 'X'
 };
 
 export const mapPlatformOptions = (platforms = []) =>
