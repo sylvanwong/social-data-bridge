@@ -58,26 +58,33 @@ const httpToHttps = (url) => {
 };
 
 const FIELD_CONFIG = [
-  { key: "social_id", name: "作品ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_id ?? "" },
   { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
+  { key: "uid", name: "作者账号", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.uid ?? "" },
+  { key: "user_id", name: "作者ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.user_id ?? "" },
   { key: "profile_url", name: "作者主页链接", type: FieldType.Url, defaultSelected: true, getValue: (item) => item?.profile_url ?? "" },
+  { key: "avatar", name: "作者头像", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.avatar ?? "" },
+  { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
+  { key: "ip_location", name: "IP属地", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.ip_location ?? "" },
+  { key: "social_id", name: "作品ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_id ?? "" },
+  { key: "note_type", name: "作品类型", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.note_type ?? "" },
   { key: "title", name: "标题", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.title ?? "" },
+  { key: "content", name: "正文", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.content ?? "" },
   { key: "caption", name: "标签", legacyNames: ["标签文本"], type: FieldType.MultiSelect, defaultSelected: true, getValue: (item) => item?.caption ?? "" },
+  { key: "duration", name: "视频时长", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.duration) || 0 },
   { key: "view_count", name: "播放量", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.view_count) || 0 },
   { key: "digg_count", name: "点赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
   { key: "comment_count", name: "评论数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.comment_count) || 0 },
   { key: "collect_count", name: "收藏数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.collect_count) || 0 },
   { key: "share_count", name: "分享数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.share_count) || 0 },
-  { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
+  { key: "note_url", name: "作品链接", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.note_url ?? "" },
+  { key: "origin_cover", name: "封面链接", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.origin_cover ?? "" },
+  { key: "origin_cover_attachment", name: "封面附件", type: FieldType.Attachment, defaultSelected: true, getUrls: (item) => (item?.origin_cover && typeof item.origin_cover === 'string') ? [httpToHttps(item.origin_cover)] : [], getFileName: () => 'cover' },
   { key: "download_addr", name: "下载链接", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.download_addr ?? "" },
-  { key: "origin_cover", name: "封面", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.origin_cover ?? "" },
-  { key: "origin_cover_attachment", name: "封面附件", type: FieldType.Attachment, defaultSelected: false, getUrls: (item) => (item?.origin_cover && typeof item.origin_cover === 'string') ? [httpToHttps(item.origin_cover)] : [], getFileName: () => 'cover' },
-  { key: "duration", name: "时长", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.duration) || 0 },
   { key: "t_create", name: "发布时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.t_create ? new Date(item.t_create).getTime() : "") },
-  { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
-  { key: "note_url", name: "视频链接", type: FieldType.Text, defaultSelected: false, getValue: (item) => item?.note_url ?? "" },
+  { key: "update_time", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.update_time ? new Date(item.update_time).getTime() : "") },
+  { key: "ctime", name: "提取时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime ? new Date(item.ctime).getTime() : "") },
 ];
-const FIELD_SELECTION_STORAGE_KEY = 'video_data_selected_fields_v1';
+const FIELD_SELECTION_STORAGE_KEY = 'video_data_selected_fields_v2';
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
   [FieldType.Number]: '数字',
