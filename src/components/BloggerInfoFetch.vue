@@ -13,7 +13,7 @@ const props = defineProps({
 const TASK_PLUGIN_TYPE = 'blogger_info';
 const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
 const MANUAL_TABLE_BASE_NAME = '博主信息';
-const FIELD_SELECTION_STORAGE_KEY = 'blogger_info_selected_fields_v1';
+const FIELD_SELECTION_STORAGE_KEY = 'blogger_info_selected_fields_v2';
 
 const REPEAT_TYPE_OPTIONS = [
   { value: 'none', label: '不重复' },
@@ -42,16 +42,28 @@ const FREQ_NUM_OPTIONS = Array.from({ length: 30 }, (_, index) => {
   };
 });
 
+const formatVerificationStatus = (value) => {
+  if (value === true) return '已认证';
+  if (value === false) return '未认证';
+  return value ?? '';
+};
+
 const FIELD_CONFIG = [
-  { key: "uid", name: "用户ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.uid ?? "" },
-  { key: "nickname", name: "昵称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
-  { key: "signature", name: "个人简介", type: FieldType.Text, defaultSelected: false, getValue: (item) => item?.signature ?? "" },
+  { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
+  { key: "uid", name: "作者账号", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.uid ?? "" },
+  { key: "user_id", name: "作者ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.user_id ?? "" },
+  { key: "profile_url", name: "作者主页链接", type: FieldType.Url, defaultSelected: true, getValue: (item) => item?.profile_url ?? "" },
+  { key: "avatar", name: "作者头像", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.avatar ?? "" },
+  { key: "signature", name: "个人简介", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.signature ?? "" },
   { key: "follower_count", name: "粉丝数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.follower_count) || 0 },
-  { key: "following_count", name: "关注数", type: FieldType.Number, defaultSelected: false, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.following_count) || 0 },
+  { key: "following_count", name: "关注数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.following_count) || 0 },
   { key: "total_favorited", name: "获赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.total_favorited) || 0 },
   { key: "aweme_count", name: "作品数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.aweme_count) || 0 },
+  { key: "verified", name: "认证状态", type: FieldType.Text, defaultSelected: true, getValue: (item) => formatVerificationStatus(item?.verified)},
+  { key: "verification_category", name: "认证类型", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.verification_category ?? "" },
   { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
-  { key: "ctime", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
+  { key: "ip_location", name: "IP属地", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.ip_location ?? "" },
+  { key: "ctime", name: "提取时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
 ];
 
 const FIELD_TYPE_NAME = {
@@ -167,7 +179,7 @@ const getActiveFieldConfigs = (keys = selectedFieldKeys.value) => FIELD_CONFIG.f
 );
 
 const getAllowedFieldTypes = (config) => {
-  if (config.name === '平台' || config.name === '昵称') {
+  if (config.name === '平台' || config.name === '作者名称') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
   return [config.type];
@@ -598,7 +610,7 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
       try {
         const field = await table.getFieldById(fieldId);
         const fieldType = await field.getType();
-        const value = (config.name === '平台' || config.name === '昵称') && fieldType === FieldType.SingleSelect
+        const value = (config.name === '平台' || config.name === '作者名称') && fieldType === FieldType.SingleSelect
           ? (config.getValue(item) || null)
           : config.getValue(item);
         await field.setValue(recordId, value);
@@ -615,7 +627,7 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
 const createCellValue = async (table, fieldId, item, config) => {
   const field = await table.getFieldById(fieldId);
   const fieldType = await field.getType();
-  const value = (config.name === '平台' || config.name === '昵称') && fieldType === FieldType.SingleSelect
+  const value = (config.name === '平台' || config.name === '作者名称') && fieldType === FieldType.SingleSelect
     ? (config.getValue(item) || null)
     : config.getValue(item);
   return await field.createCell(value);
