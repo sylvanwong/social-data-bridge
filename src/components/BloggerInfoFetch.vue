@@ -663,10 +663,9 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
   }
 };
 
-const fetchBloggerInfoByRows = async (rowList) => {
+const fetchBloggerInfoByRows = async (rowList, { onSuccess = null } = {}) => {
   let successCount = 0;
   let failCount = 0;
-  const successList = [];
 
   showToast(`准备处理 ${rowList.length} 条数据...`, true);
 
@@ -686,7 +685,10 @@ const fetchBloggerInfoByRows = async (rowList) => {
       const res = response.data;
 
       if (res.sta === 0 && res.data) {
-        successList.push({ ...res.data, __recordId: recordId });
+        const item = { ...res.data, __recordId: recordId };
+        if (onSuccess) {
+          await onSuccess(item, i);
+        }
         successCount++;
       } else {
         ElNotification({ message: res.msg || '获取博主信息失败', type: 'error', duration: 0 });
@@ -698,7 +700,7 @@ const fetchBloggerInfoByRows = async (rowList) => {
     }
   }
 
-  return { successList, successCount, failCount };
+  return { successCount, failCount };
 };
 
 const extractProfileLink = (value) => {
@@ -1331,10 +1333,9 @@ const handleTableModeSubmit = async () => {
         return;
       }
 
-      const { successList, successCount, failCount } = await fetchBloggerInfoByRows(rowList);
-      for (const item of successList) {
-        await writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs);
-      }
+      const { successCount, failCount } = await fetchBloggerInfoByRows(rowList, {
+        onSuccess: (item) => writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs),
+      });
 
       showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
       setTimeout(() => {
@@ -1343,17 +1344,14 @@ const handleTableModeSubmit = async () => {
       return;
     }
 
-    const { successList, successCount, failCount } = await fetchBloggerInfoByRows(rowList);
-    if (successList.length === 0) {
-      throw new Error('未获取到有效的博主信息');
-    }
-
     const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
     if (!targetTableId) {
       return;
     }
 
-    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+    const { successCount, failCount } = await fetchBloggerInfoByRows(rowList, {
+      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
+    });
 
     showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
     setTimeout(() => {
@@ -1380,17 +1378,14 @@ const handleManualModeSubmit = async () => {
 
   try {
     const rowList = urls.map(url => ({ url }));
-    const { successList, successCount, failCount } = await fetchBloggerInfoByRows(rowList);
-    if (successList.length === 0) {
-      throw new Error('未获取到有效的博主信息');
-    }
-
     const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
     if (!targetTableId) {
       return;
     }
 
-    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+    const { successCount, failCount } = await fetchBloggerInfoByRows(rowList, {
+      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
+    });
 
     showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
     setTimeout(() => {
