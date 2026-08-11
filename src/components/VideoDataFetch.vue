@@ -958,10 +958,14 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
   }
 };
 
-const fetchVideoDataByRows = async (rowList, { writeFailureToCurrent = false, fieldNameToId = null, activeFieldConfigs = [] } = {}) => {
+const fetchVideoDataByRows = async (rowList, {
+  writeFailureToCurrent = false,
+  fieldNameToId = null,
+  activeFieldConfigs = [],
+  onSuccess = null,
+} = {}) => {
   let successCount = 0;
   let failCount = 0;
-  const successList = [];
 
   showToast(`准备处理 ${rowList.length} 条数据...`, true);
 
@@ -987,9 +991,12 @@ const fetchVideoDataByRows = async (rowList, { writeFailureToCurrent = false, fi
       console.log(`接口返回数据:`, res);
 
       if (res.sta === 0 && res.data) {
-        successList.push({ ...res.data, __recordId: recordId });
+        const item = { ...res.data, __recordId: recordId };
+        if (onSuccess) {
+          await onSuccess(item, i);
+        }
         successCount++;
-        console.log(`第 ${i + 1} 条处理成功`);
+        console.log(`第 ${i + 1} 条处理并写入成功`);
       } else {
         const errorMessage = res?.msg || res?.message || '获取音视频数据失败';
         console.error(`接口返回错误:`, errorMessage);
@@ -1008,7 +1015,7 @@ const fetchVideoDataByRows = async (rowList, { writeFailureToCurrent = false, fi
     }
   }
 
-  return { successList, successCount, failCount };
+  return { successCount, failCount };
 };
 
 const extractUrlHint = (value) => {
@@ -1632,15 +1639,12 @@ const handleTableModeSubmit = async () => {
         return;
       }
 
-      const { successList, successCount, failCount } = await fetchVideoDataByRows(rowList, {
+      const { successCount, failCount } = await fetchVideoDataByRows(rowList, {
         writeFailureToCurrent: true,
         fieldNameToId,
-        activeFieldConfigs
+        activeFieldConfigs,
+        onSuccess: (item) => writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs),
       });
-
-      for (const item of successList) {
-        await writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs);
-      }
 
       showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
       setTimeout(() => {
@@ -1649,17 +1653,14 @@ const handleTableModeSubmit = async () => {
       return;
     }
 
-    const { successList, successCount, failCount } = await fetchVideoDataByRows(rowList);
-    if (successList.length === 0) {
-      throw new Error('未获取到有效的音视频数据');
-    }
-
     const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
     if (!targetTableId) {
       return;
     }
 
-    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+    const { successCount, failCount } = await fetchVideoDataByRows(rowList, {
+      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
+    });
 
     showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
     setTimeout(() => {
@@ -1693,17 +1694,14 @@ const handleManualModeSubmit = async () => {
     const urls = parseManualUrls(formData.value.manualUrls);
     const activeFieldConfigs = getActiveFieldConfigs();
     const rowList = urls.map(url => ({ url, rawValue: url }));
-    const { successList, successCount, failCount } = await fetchVideoDataByRows(rowList);
-    if (successList.length === 0) {
-      throw new Error('未获取到有效的音视频数据');
-    }
-
     const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
     if (!targetTableId) {
       return;
     }
 
-    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+    const { successCount, failCount } = await fetchVideoDataByRows(rowList, {
+      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
+    });
 
     showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
     setTimeout(() => {
