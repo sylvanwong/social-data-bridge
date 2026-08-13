@@ -26,6 +26,53 @@ export const FIELD_MAPPING = [
   { key: 'ctime', name: '提取时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
 ];
 
+export const KEYWORD_SEARCH_FIELD_MAPPING = [
+  { key: 'nickname', name: '作者名称', legacyNames: ['作者'], type: FieldType.Text, defaultSelected: true },
+  { key: 'user_id', name: '作者ID', legacyNames: ['用户ID'], type: FieldType.Text, defaultSelected: true },
+  { key: 'profile_url', name: '作者主页链接', type: FieldType.Url, defaultSelected: true },
+  { key: 'avatar', name: '作者头像', legacyNames: ['博主头像'], type: FieldType.Text, defaultSelected: true },
+  { key: 'social_type', name: '平台', type: FieldType.Text, defaultSelected: true },
+  { key: 'aweme_id', name: '作品ID', legacyNames: ['视频编号'], type: FieldType.Text, defaultSelected: true, required: true },
+  { key: 'note_type', name: '作品类型', legacyNames: ['笔记类型'], type: FieldType.Text, defaultSelected: true },
+  { key: 'title', name: '标题', legacyNames: ['视频标题'], type: FieldType.Text, defaultSelected: true },
+  { key: 'content', name: '正文', valueKeys: ['content', 'desc', 'description'], type: FieldType.Text, defaultSelected: true },
+  { key: 'tags', name: '标签', type: FieldType.MultiSelect, defaultSelected: true },
+  { key: 'duration', name: '视频时长', legacyNames: ['时长'], type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'digg_count', name: '点赞数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'comment_count', name: '评论数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'collect_count', name: '收藏数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'share_count', name: '分享数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'share_url', name: '作品链接', legacyNames: ['视频链接'], type: FieldType.Text, defaultSelected: true },
+  { key: 'cover_url', name: '封面链接', legacyNames: ['封面'], type: FieldType.Text, defaultSelected: true },
+  { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
+  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
+  { key: 'last_update_time', name: '更新时间', legacyNames: ['最后更新时间'], type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
+  { key: 'ctime', name: '提取时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
+];
+
+export const PROFILE_FIELD_MAPPING = [
+  { key: 'nickname', name: '作者名称', legacyNames: ['作者'], type: FieldType.Text, defaultSelected: true },
+  { key: 'user_id', name: '作者ID', legacyNames: ['用户ID'], type: FieldType.Text, defaultSelected: true },
+  { key: 'profile_url', name: '作者主页链接', type: FieldType.Url, defaultSelected: true },
+  { key: 'avatar', name: '作者头像', legacyNames: ['博主头像'], type: FieldType.Text, defaultSelected: true },
+  { key: 'social_type', name: '平台', type: FieldType.Text, defaultSelected: true },
+  { key: 'aweme_id', name: '作品ID', legacyNames: ['视频编号'], type: FieldType.Text, defaultSelected: true, required: true },
+  { key: 'note_type', name: '作品类型', legacyNames: ['笔记类型'], type: FieldType.Text, defaultSelected: true },
+  { key: 'title', name: '标题', legacyNames: ['视频标题'], type: FieldType.Text, defaultSelected: true },
+  { key: 'tags', name: '标签', type: FieldType.MultiSelect, defaultSelected: true },
+  { key: 'duration', name: '视频时长', legacyNames: ['时长'], type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'digg_count', name: '点赞数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'comment_count', name: '评论数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'collect_count', name: '收藏数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'share_count', name: '分享数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'share_url', name: '作品链接', legacyNames: ['视频链接'], type: FieldType.Text, defaultSelected: true },
+  { key: 'cover_url', name: '封面链接', legacyNames: ['封面'], type: FieldType.Text, defaultSelected: true },
+  { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
+  { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
+  { key: 'last_update_time', name: '更新时间', legacyNames: ['最后更新时间'], type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
+  { key: 'ctime', name: '提取时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
+];
+
 export const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
   [FieldType.Number]: '数字',
@@ -231,18 +278,18 @@ export const createSequentialTable = async (baseTableName) => {
   }
 };
 
-export const setupTableFields = async (tableId, selectedFieldKeys = []) => {
+export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING) => {
   const newTable = await bitable.base.getTable(tableId);
   await bitable.ui.switchToTable(tableId);
   const first_field = await newTable.getField('文本');
-  const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys);
-  const fieldPromises = activeFieldMapping.map((config, index) => {
+  const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
+  for (const [index, config] of activeFieldMapping.entries()) {
     if (index === 0 && first_field) {
-      return newTable.setField(first_field.id, { type: config.type, name: config.name });
+      await newTable.setField(first_field.id, { type: config.type, name: config.name });
+    } else {
+      await newTable.addField({ type: config.type, name: config.name });
     }
-    return newTable.addField({ type: config.type, name: config.name });
-  });
-  await Promise.all(fieldPromises);
+  }
 
   for (const config of activeFieldMapping) {
     try {
@@ -256,12 +303,12 @@ export const setupTableFields = async (tableId, selectedFieldKeys = []) => {
   }
 };
 
-export const validateTableFields = async (tableId, selectedFieldKeys = []) => {
+export const validateTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING) => {
   try {
     const activeTable = await bitable.base.getTableById(tableId);
     const fieldMetaList = await activeTable.getFieldMetaList();
     const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
-    const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys);
+    const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
 
     const fieldList = [];
     const missingFields = [];
@@ -332,16 +379,16 @@ export const validateTableFields = async (tableId, selectedFieldKeys = []) => {
   }
 };
 
-export const getDefaultSelectedFieldKeys = () => FIELD_MAPPING
+export const getDefaultSelectedFieldKeys = (fieldMapping = FIELD_MAPPING) => fieldMapping
   .filter(field => field.defaultSelected || field.required)
   .map(field => field.key);
 
-export const getActiveFieldMapping = (selectedFieldKeys = []) => {
+export const getActiveFieldMapping = (selectedFieldKeys = [], fieldMapping = FIELD_MAPPING) => {
   const selectedKeySet = new Set(selectedFieldKeys);
-  return FIELD_MAPPING.filter(field => field.required || selectedKeySet.has(field.key));
+  return fieldMapping.filter(field => field.required || selectedKeySet.has(field.key));
 };
 
-export const useSocialData = (getTableName, api_key) => {
+export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPING) => {
   const loading = ref(false);
   const profileProgress = ref({ text: "", done: false });
   const timer = ref(null);
@@ -412,13 +459,13 @@ export const useSocialData = (getTableName, api_key) => {
       resetParams();
       return;
     }
-    const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys);
+    const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
 
     try {
       if (!type && !targetTableId) {
         const tableName = getTableName(list);
         const { tableId } = await createSequentialTable(tableName);
-        await setupTableFields(tableId, selectedFieldKeys);
+        await setupTableFields(tableId, selectedFieldKeys, fieldMapping);
       }
 
       const activeTable = targetTableId
@@ -479,7 +526,9 @@ export const useSocialData = (getTableName, api_key) => {
         let record = [];
         for (const { field, config, fieldType } of availableFieldList) {
           const matchedField = availableFieldList.find(fieldItem => fieldItem.field?.id === field.id && fieldItem.config.key === config.key);
-          const value = await normalizeCellValue(activeTable, field, item[config.key], config, fieldType, matchedField?.extra);
+          const valueKeys = config.valueKeys || [config.key];
+          const sourceValue = valueKeys.reduce((value, key) => value ?? item?.[key], undefined);
+          const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, matchedField?.extra);
           record.push(await field.createCell(value));
         }
         records.push(record);
@@ -498,7 +547,7 @@ export const useSocialData = (getTableName, api_key) => {
       try {
         const tableName = getTableName(list);
         const { tableId: newTableId } = await createSequentialTable(tableName);
-        await setupTableFields(newTableId, selectedFieldKeys);
+        await setupTableFields(newTableId, selectedFieldKeys, fieldMapping);
         await createAndWriteData(list, type, task_id, newTableId, selectedFieldKeys);
         ElNotification({ title: '温馨提示', message: '当前多维表格已达到单表存储上限！已为您自动生成新表格展示全部数据', type: 'success', duration: 3000 });
         return;
@@ -523,6 +572,6 @@ export const useSocialData = (getTableName, api_key) => {
     closeInterval,
     getList,
     createAndWriteData,
-    validateTableFields,
+    validateTableFields: (tableId, selectedFieldKeys = []) => validateTableFields(tableId, selectedFieldKeys, fieldMapping),
   };
 };

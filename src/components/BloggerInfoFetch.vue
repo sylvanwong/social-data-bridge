@@ -602,6 +602,7 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
 const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs) => {
   try {
     const table = await bitable.base.getActiveTable();
+    const fields = {};
 
     for (const config of activeFieldConfigs) {
       const fieldId = fieldNameToId[config.name];
@@ -613,10 +614,15 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
         const value = (config.name === '平台' || config.name === '作者名称') && fieldType === FieldType.SingleSelect
           ? (config.getValue(item) || null)
           : config.getValue(item);
-        await field.setValue(recordId, value);
+        const cell = await field.createCell(value);
+        fields[fieldId] = await cell.getValue();
       } catch (e) {
-        console.error(`写入字段 ${config.name} 失败:`, e);
+        console.error(`准备字段 ${config.name} 失败:`, e);
       }
+    }
+
+    if (Object.keys(fields).length > 0) {
+      await table.setRecord(recordId, { fields });
     }
   } catch (error) {
     console.error('写入记录失败:', error);
