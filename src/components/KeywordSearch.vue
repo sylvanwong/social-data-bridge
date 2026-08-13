@@ -3,7 +3,7 @@ import { bitable } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
 import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import request from '@/utils/request'
-import { useSocialData, showErrorMsg, FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
+import { useSocialData, showErrorMsg, KEYWORD_SEARCH_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 
 const props = defineProps({
   api_key: String,
@@ -196,12 +196,12 @@ const {
   getList,
   createAndWriteData,
   validateTableFields,
-} = useSocialData(getTableName, props.api_key);
+} = useSocialData(getTableName, props.api_key, KEYWORD_SEARCH_FIELD_MAPPING);
 
 const timer = ref(null);
 
 const loadSelectedFieldKeys = async () => {
-  const defaultKeys = getDefaultSelectedFieldKeys();
+  const defaultKeys = getDefaultSelectedFieldKeys(KEYWORD_SEARCH_FIELD_MAPPING);
 
   try {
     const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
@@ -211,8 +211,8 @@ const loadSelectedFieldKeys = async () => {
       return;
     }
 
-    const validKeys = savedValue.filter(key => FIELD_MAPPING.some(field => field.key === key));
-    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const validKeys = savedValue.filter(key => KEYWORD_SEARCH_FIELD_MAPPING.some(field => field.key === key));
+    const requiredKeys = KEYWORD_SEARCH_FIELD_MAPPING.filter(field => field.required).map(field => field.key);
     const mergedKeys = Array.from(new Set([...validKeys, ...requiredKeys]));
     selectedFieldKeys.value = mergedKeys.length > 0 ? mergedKeys : defaultKeys;
   } catch (error) {
@@ -223,7 +223,7 @@ const loadSelectedFieldKeys = async () => {
 
 const saveSelectedFieldKeys = async (keys) => {
   try {
-    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const requiredKeys = KEYWORD_SEARCH_FIELD_MAPPING.filter(field => field.required).map(field => field.key);
     const nextKeys = Array.from(new Set([...keys, ...requiredKeys]));
     await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...nextKeys]);
   } catch (error) {
@@ -443,7 +443,7 @@ const commit = () => {
   }
 
   if (radio === 2) {
-    validateTableFields(table_id, selectedFieldKeys.value).then(isValid => {
+    validateTableFields(table_id, selectedFieldKeys.value, KEYWORD_SEARCH_FIELD_MAPPING).then(isValid => {
       if (isValid) getSearchData(table_id);
     }).catch(error => {
       console.error("验证表格字段时出错:", error);
@@ -462,7 +462,7 @@ watch(selectedFieldKeys, (keys) => {
     return;
   }
 
-  const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+  const requiredKeys = KEYWORD_SEARCH_FIELD_MAPPING.filter(field => field.required).map(field => field.key);
   const mergedKeys = Array.from(new Set([...keys, ...requiredKeys]));
 
   if (mergedKeys.length !== keys.length) {
@@ -720,7 +720,7 @@ watch(selectedFieldKeys, (keys) => {
           <div slot="label" class="c-label">选择需要的字段</div>
           <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
             <el-checkbox
-              v-for="field in FIELD_MAPPING"
+              v-for="field in KEYWORD_SEARCH_FIELD_MAPPING"
               :key="field.key"
               :label="field.key"
               :disabled="field.required"

@@ -36,16 +36,18 @@ const FIELD_CONFIG = [
   { key: "cid", name: "评论ID", type: FieldType.Text, defaultSelected: true, required: true, getValue: (item) => item?.cid ?? "" },
   { key: "reply_id", name: "上级评论ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.reply_id ?? "" },
   { key: "note_id", name: "作品ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.note_id ?? "" },
+  { key: "note_url", name: "作品链接", legacyNames: ["视频链接"], type: FieldType.Url, defaultSelected: true, getValue: (item) => item?.note_url ?? "" },
+  { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
   { key: "text", name: "评论内容", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.text ?? "" },
-  { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
-  { key: "profile_url", name: "作者主页链接", type: FieldType.Url, defaultSelected: true, getValue: (item) => item?.profile_url ?? "" },
-  { key: "uid", name: "作者ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.uid ?? "" },
-  { key: "social_user_number", name: "小红书ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_user_number ?? "" },
+  { key: "nickname", name: "评论者名称", legacyNames: ["作者名称"], type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
+  { key: "social_user_number", name: "评论者账号", legacyNames: ["小红书ID"], type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_user_number ?? "" },
+  { key: "uid", name: "评论者ID", legacyNames: ["作者ID"], type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.uid ?? "" },
+  { key: "profile_url", name: "评论者主页链接", legacyNames: ["作者主页链接"], type: FieldType.Url, defaultSelected: true, getValue: (item) => item?.profile_url ?? "" },
+  { key: "avatar", name: "评论者头像", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.avatar ?? "" },
+  { key: "ip_label", name: "IP属地", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.ip_label ?? "" },
   { key: "digg_count", name: "点赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
   { key: "reply_comment_total", name: "回复数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.reply_comment_total) || 0 },
-  { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
   { key: "t_create", name: "评论时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.t_create ? item.t_create * 1000 : "") },
-  { key: "note_url", name: "视频链接", type: FieldType.Url, defaultSelected: false, getValue: (item) => item?.note_url ?? "" },
 ];
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
@@ -57,7 +59,7 @@ const FIELD_TYPE_NAME = {
 };
 
 const getAllowedFieldTypes = (config) => {
-  if (config.name === '作者名称' || config.name === '平台') {
+  if (config.name === '评论者名称' || config.name === '平台') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
   return [config.type];
@@ -84,7 +86,9 @@ const getFieldInstanceMapByConfigs = async (table, configs) => {
   const fieldMap = new Map();
 
   for (const config of configs) {
-    const fieldMeta = fieldMetaByName.get(config.name);
+    const fieldMeta = [config.name, ...(config.legacyNames || [])]
+      .map(name => fieldMetaByName.get(name))
+      .find(Boolean);
     if (!fieldMeta?.id) {
       continue;
     }
@@ -460,7 +464,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
         for (const config of activeFieldConfigs) {
           const field = existingFieldMap.get(config.name);
           const fieldType = await field.getType();
-          const value = (config.name === '作者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect
+          const value = (config.name === '评论者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect
             ? (config.getValue(item) || null)
             : config.getValue(item);
           record.push(await field.createCell(value));
@@ -489,7 +493,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "") => {
       for (let i = 0; i < fields.length; i++) {
         const mapping = activeFieldConfigs[i];
         const fieldType = await fieldList[i].getType();
-        const value = (mapping.name === '作者名称' || mapping.name === '平台') && fieldType === FieldType.SingleSelect
+        const value = (mapping.name === '评论者名称' || mapping.name === '平台') && fieldType === FieldType.SingleSelect
           ? (mapping.getValue(item) || null)
           : mapping.getValue(item);
         record.push(await fieldList[i].createCell(value));
@@ -627,7 +631,9 @@ const validateTableFields = async (tableId) => {
     const fieldMetaList = await activeTable.getFieldMetaList();
     const fieldIdByName = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
     for (const config of getActiveFieldConfigs()) {
-      const fieldId = fieldIdByName.get(config.name);
+      const fieldId = [config.name, ...(config.legacyNames || [])]
+        .map(name => fieldIdByName.get(name))
+        .find(Boolean);
       if (!fieldId) continue;
       const fieldMeta = fieldMetaList.find(meta => meta.id === fieldId);
       if (config.type && !isFieldTypeCompatible(fieldMeta.type, config)) {

@@ -3,7 +3,7 @@ import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
 import { ref, onMounted, onUnmounted, watch } from "vue";
 import request from '@/utils/request'
-import { useSocialData, showErrorMsg, FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
+import { useSocialData, showErrorMsg, PROFILE_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 
 const props = defineProps({
   api_key: String,
@@ -96,7 +96,7 @@ const getDefaultTaskDialogForm = () => ({
   manualUrls: '',
   pages: 1,
   targetTableId: '',
-  selectedFieldKeys: getDefaultSelectedFieldKeys(),
+  selectedFieldKeys: getDefaultSelectedFieldKeys(PROFILE_FIELD_MAPPING),
   sourceTableId: '',
   sourceTableName: '',
   sourceViewId: '',
@@ -186,7 +186,7 @@ const {
   getList,
   createAndWriteData,
   validateTableFields,
-} = useSocialData(getTableName, props.api_key);
+} = useSocialData(getTableName, props.api_key, PROFILE_FIELD_MAPPING);
 
 const timer = ref(null);
 
@@ -215,12 +215,12 @@ const syncMainFormToTaskForm = () => {
   };
 };
 
-const getActiveFieldConfigs = (keys = selectedFieldKeys.value) => FIELD_MAPPING.filter(field =>
+const getActiveFieldConfigs = (keys = selectedFieldKeys.value) => PROFILE_FIELD_MAPPING.filter(field =>
   keys.includes(field.key)
 );
 
 const loadSelectedFieldKeys = async () => {
-  const defaultKeys = getDefaultSelectedFieldKeys();
+  const defaultKeys = getDefaultSelectedFieldKeys(PROFILE_FIELD_MAPPING);
 
   try {
     const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
@@ -230,8 +230,8 @@ const loadSelectedFieldKeys = async () => {
       return;
     }
 
-    const validKeys = savedValue.filter(key => FIELD_MAPPING.some(field => field.key === key));
-    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const validKeys = savedValue.filter(key => PROFILE_FIELD_MAPPING.some(field => field.key === key));
+    const requiredKeys = PROFILE_FIELD_MAPPING.filter(field => field.required).map(field => field.key);
     const mergedKeys = Array.from(new Set([...validKeys, ...requiredKeys]));
     selectedFieldKeys.value = mergedKeys.length > 0 ? mergedKeys : defaultKeys;
   } catch (error) {
@@ -242,7 +242,7 @@ const loadSelectedFieldKeys = async () => {
 
 const saveSelectedFieldKeys = async (keys) => {
   try {
-    const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+    const requiredKeys = PROFILE_FIELD_MAPPING.filter(field => field.required).map(field => field.key);
     const nextKeys = Array.from(new Set([...keys, ...requiredKeys]));
     await bitable.bridge.setData(FIELD_SELECTION_STORAGE_KEY, [...nextKeys]);
   } catch (error) {
@@ -925,7 +925,7 @@ const openEditTaskDialog = async (task) => {
     targetTableId: snapshot.target_table_id || '',
     selectedFieldKeys: Array.isArray(snapshot.selected_field_keys) && snapshot.selected_field_keys.length > 0
       ? snapshot.selected_field_keys
-      : getDefaultSelectedFieldKeys(),
+      : getDefaultSelectedFieldKeys(PROFILE_FIELD_MAPPING),
     sourceTableId: snapshot.source_table_id || '',
     sourceTableName: snapshot.source_table_name || '',
     sourceViewId: snapshot.source_view_id || '',
@@ -1080,7 +1080,7 @@ watch(selectedFieldKeys, (keys) => {
     return;
   }
 
-  const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+  const requiredKeys = PROFILE_FIELD_MAPPING.filter(field => field.required).map(field => field.key);
   const mergedKeys = Array.from(new Set([...keys, ...requiredKeys]));
 
   if (mergedKeys.length !== keys.length) {
@@ -1298,7 +1298,7 @@ watch(
           <div slot="label" class="c-label">选择需要的字段</div>
           <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
             <el-checkbox
-              v-for="field in FIELD_MAPPING"
+              v-for="field in PROFILE_FIELD_MAPPING"
               :key="field.key"
               :label="field.key"
               :value="field.key"
@@ -1604,7 +1604,7 @@ watch(
               <div class="c-label">选择需要的字段</div>
               <el-checkbox-group v-model="taskDialogForm.selectedFieldKeys" class="field-checkbox-group">
                 <el-checkbox
-                  v-for="field in FIELD_MAPPING"
+                  v-for="field in PROFILE_FIELD_MAPPING"
                   :key="field.key"
                   :label="field.key"
                   :value="field.key"

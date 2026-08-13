@@ -344,13 +344,24 @@ const createAttachmentFiles = async (config, item) => {
     return [];
   }
 
-  return await Promise.all(
+  const results = await Promise.allSettled(
     urls.map((url, index) => {
       const baseName = config.getFileName?.(item) || 'attachment';
       const finalName = getFinalFileName(url, baseName, index, urls.length);
       return downloadAttachmentAsFile(url, finalName, config, item);
     })
   );
+
+  return results
+    .filter(result => {
+      if (result.status === 'rejected') {
+        console.warn('附件上传失败，继续写入其他字段:', result.reason);
+        return false;
+      }
+      return true;
+    })
+    .map(result => result.value)
+    .filter(Boolean);
 };
 
 const fieldOptions = ref([]);
@@ -849,6 +860,7 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
   try {
     console.log(`开始写入记录 ${recordId}`);
     const table = await bitable.base.getActiveTable();
+    const fields = {};
 
     for (const config of activeFieldConfigs) {
       const fieldId = fieldNameToId[config.name];
@@ -862,7 +874,8 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
         if (config.type === FieldType.Attachment) {
           const files = await createAttachmentFiles(config, item);
           if (files.length > 0) {
-            await field.setValue(recordId, files.length === 1 ? files[0] : files);
+            const cell = await field.createCell(files.length === 1 ? files[0] : files);
+            fields[fieldId] = await cell.getValue();
           }
           continue;
         }
@@ -870,10 +883,16 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
         const fieldType = await field.getType();
         const value = normalizeFieldValue(config.getValue(item), config, fieldType);
         console.log(`写入字段 ${config.name} (${fieldId}):`, value);
-        await field.setValue(recordId, value);
+        const cell = await field.createCell(value);
+        fields[fieldId] = await cell.getValue();
       } catch (e) {
-        console.error(`写入字段 ${config.name} 失败:`, e);
+        console.error(`准备字段 ${config.name} 失败:`, e);
       }
+    }
+
+    if (Object.keys(fields).length > 0) {
+      await table.setRecord(recordId, { fields });
+      console.log(`记录 ${recordId} 已一次写入 ${Object.keys(fields).length} 个字段`);
     }
   } catch (error) {
     console.error('写入记录失败:', error);
@@ -969,12 +988,12 @@ const fetchVideoDataByRows = async (rowList, {
 
   showToast(`准备处理 ${rowList.length} 条数据...`, true);
 
-  for (let i = 0; i < rowList.length; i++) {
-    const { url, recordId, rawValue } = rowList[i];
+  for (let index = 0; index < rowList.length; index++) {
+    const { url, recordId, rawValue } = rowList[index];
 
     try {
-      showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
-      console.log(`正在处理第 ${i + 1}/${rowList.length} 条:`, { url, rawValue });
+      showToast(`正在处理 ${Math.min(index + 1, rowList.length)}/${rowList.length} 条...`, true);
+      console.log(`正在处理第 ${index + 1}/${rowList.length} 条:`, { url, rawValue });
 
       const response = await request({
         url: '/social/api/v1/feishu/social_info',
@@ -993,21 +1012,22 @@ const fetchVideoDataByRows = async (rowList, {
       if (res.sta === 0 && res.data) {
         const item = { ...res.data, __recordId: recordId };
         if (onSuccess) {
-          await onSuccess(item, i);
+          await onSuccess(item, index);
         }
+        console.log(`第 ${index + 1} 条处理并写入成功`);
         successCount++;
-        console.log(`第 ${i + 1} 条处理并写入成功`);
-      } else {
-        const errorMessage = res?.msg || res?.message || '获取音视频数据失败';
-        console.error(`接口返回错误:`, errorMessage);
-        if (writeFailureToCurrent && recordId && fieldNameToId) {
-          await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
-        }
-        failCount++;
+        continue;
       }
+
+      const errorMessage = res?.msg || res?.message || '获取音视频数据失败';
+      console.error(`接口返回错误:`, errorMessage);
+      if (writeFailureToCurrent && recordId && fieldNameToId) {
+        await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
+      }
+      failCount++;
     } catch (error) {
       const errorMessage = error?.response?.data?.msg || error?.message || '请求失败';
-      console.error(`处理第 ${i + 1} 条失败:`, errorMessage);
+      console.error(`处理第 ${index + 1} 条失败:`, errorMessage);
       if (writeFailureToCurrent && recordId && fieldNameToId) {
         await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
       }

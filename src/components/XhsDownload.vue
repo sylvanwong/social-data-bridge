@@ -383,6 +383,7 @@ const getFinalFileName = (url, baseName, index, total) => {
 const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs) => {
   try {
     const table = await bitable.base.getActiveTable();
+    const fields = {};
 
     for (const config of activeFieldConfigs) {
       const fieldId = fieldNameToId[config.name];
@@ -407,14 +408,20 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
           if (urls.length > 0) {
             try {
               // 先尝试直接下载文件方式（适合小文件/图片）
-              const files = await Promise.all(
+              const results = await Promise.allSettled(
                 urls.map(async (url, index) => {
                   const baseName = config.getFileName();
                   const finalName = getFinalFileName(url, baseName, index, urls.length);
                   return downloadAttachmentAsFile(url, finalName, config.name, item);
                 })
               );
-              await field.setValue(recordId, files.length === 1 ? files[0] : files);
+              const files = results
+                .filter(result => result.status === 'fulfilled')
+                .map(result => result.value);
+              if (files.length > 0) {
+                const cell = await field.createCell(files.length === 1 ? files[0] : files);
+                fields[fieldId] = await cell.getValue();
+              }
             } catch (error) {
               console.log('附件下载失败，跳过附件写入:', error);
               // 下载失败不中断整个流程，只跳过附件字段
@@ -425,11 +432,16 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
           const value = config.name === '平台' && fieldType === FieldType.SingleSelect
             ? (config.getValue(item) || null)
             : config.getValue(item);
-          await field.setValue(recordId, value);
+          const cell = await field.createCell(value);
+          fields[fieldId] = await cell.getValue();
         }
       } catch (e) {
-        console.error(`写入字段 ${config.name} 失败:`, e);
+        console.error(`准备字段 ${config.name} 失败:`, e);
       }
+    }
+
+    if (Object.keys(fields).length > 0) {
+      await table.setRecord(recordId, { fields });
     }
   } catch (error) {
     console.error('写入记录失败:', error);
@@ -583,7 +595,7 @@ const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
   return null;
 };
 
-const fetchXhsByRows = async (rowList) => {
+const fetchXhsByRows = async (rowList, { onSuccess = null } = {}) => {
   let successCount = 0;
   let failCount = 0;
   const successList = [];
@@ -607,7 +619,12 @@ const fetchXhsByRows = async (rowList) => {
       const res = response.data;
 
       if (res.sta === 0 && res.data) {
-        successList.push({ ...res.data, __recordId: recordId });
+        const item = { ...res.data, __recordId: recordId };
+        if (onSuccess) {
+          await onSuccess(item, i);
+        } else {
+          successList.push(item);
+        }
         successCount++;
       } else {
         ElNotification({ message: res.msg || '获取小红书内容失败', type: 'error', duration: 0 });
@@ -666,10 +683,9 @@ const handleTableModeSubmit = async () => {
     }
 
     const rowList = await getCellValuesByFieldId(recordIdList, formData.value.xhsLinkFieldId);
-    const { successList, successCount, failCount } = await fetchXhsByRows(rowList);
-    for (const item of successList) {
-      await writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs);
-    }
+    const { successCount, failCount } = await fetchXhsByRows(rowList, {
+      onSuccess: (item) => writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs),
+    });
 
     showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
 
