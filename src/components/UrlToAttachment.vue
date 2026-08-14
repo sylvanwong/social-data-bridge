@@ -20,6 +20,7 @@ const formData = ref({
   targetTableId: '',
 });
 const MANUAL_TABLE_BASE_NAME = '链接转附件';
+const ATTACHMENT_DOWNLOAD_TIMEOUT = 30000;
 
 const FIELD_CONFIG = [
   {
@@ -321,31 +322,47 @@ const isDirectFetchImageUrl = (url) => {
 
 const downloadAttachmentAsFile = async (url, finalName) => {
   const directFetchImage = isDirectFetchImageUrl(url);
-  let response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
 
-  if (directFetchImage) {
-    try {
-      response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`直连下载失败: HTTP ${response.status}`);
+  const fetchFileResponse = async (requestUrl, headers) => {
+    const response = await fetch(requestUrl, { headers, signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`下载失败: HTTP ${response.status}`);
+    }
+    return response;
+  };
+
+  try {
+    let response;
+
+    if (directFetchImage) {
+      try {
+        response = await fetchFileResponse(url);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw error;
+        }
+        response = await fetchFileResponse(buildProxyDownloadUrl(url, finalName), {
+          authorization: `Bearer ${props.api_key}`,
+        });
       }
-    } catch (error) {
-      response = await fetch(buildProxyDownloadUrl(url, finalName), {
-        headers: { authorization: `Bearer ${props.api_key}` },
+    } else {
+      response = await fetchFileResponse(buildProxyDownloadUrl(url, finalName), {
+        authorization: `Bearer ${props.api_key}`,
       });
     }
-  } else {
-    response = await fetch(buildProxyDownloadUrl(url, finalName), {
-      headers: { authorization: `Bearer ${props.api_key}` },
-    });
-  }
 
-  if (!response.ok) {
-    throw new Error(`下载失败: HTTP ${response.status}`);
+    const blob = await response.blob();
+    return new File([blob], finalName, { type: blob.type || 'application/octet-stream' });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`附件下载超时（${ATTACHMENT_DOWNLOAD_TIMEOUT / 1000} 秒）`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  const blob = await response.blob();
-  return new File([blob], finalName, { type: blob.type || 'application/octet-stream' });
 };
 
 const writeDataToRecord = async (recordId, urls, fieldNameToId, activeFieldConfigs) => {
@@ -459,21 +476,22 @@ const extractUrls = (value) => {
       .filter(Boolean);
   }
 
+  const getUrlLink = (item) => {
+    if (typeof item === 'string') {
+      return item.trim();
+    }
+    if (item?.type === 'url' && typeof item.link === 'string') {
+      return item.link.trim();
+    }
+    return '';
+  };
+
   if (Array.isArray(value)) {
-    return value
-      .map((item) => {
-        if (typeof item === 'string') {
-          return item.trim();
-        }
-        if (item?.type === 'url' && item?.link) {
-          return item.link.trim();
-        }
-        return '';
-      })
-      .filter(Boolean);
+    return value.map(getUrlLink).filter(Boolean);
   }
 
-  return [];
+  const url = getUrlLink(value);
+  return url ? [url] : [];
 };
 
 const getCellValuesByFieldId = async (recordIdList, fieldId) => {

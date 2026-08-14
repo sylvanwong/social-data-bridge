@@ -20,6 +20,7 @@ const formData = ref({
   targetTableId: ''
 });
 const MANUAL_TABLE_BASE_NAME = '小红书下载';
+const ATTACHMENT_DOWNLOAD_TIMEOUT = 60000;
 
 const httpToHttps = (url) => {
   if (typeof url === 'string') {
@@ -81,14 +82,25 @@ const downloadAttachmentAsFile = async (url, finalName, fieldName, item) => {
   const shouldUseProxy = shouldProxyAttachmentDownload(item, fieldName);
   const requestUrl = shouldUseProxy ? buildProxyDownloadUrl(url, finalName) : url;
   const headers = shouldUseProxy ? { authorization: `Bearer ${props.api_key}` } : undefined;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
 
-  const response = await fetch(requestUrl, { headers });
-  if (!response.ok) {
-    throw new Error(`下载失败: HTTP ${response.status}`);
+  try {
+    const response = await fetch(requestUrl, { headers, signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`下载失败: HTTP ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    return new File([blob], finalName, { type: blob.type || 'application/octet-stream' });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`附件下载超时（${ATTACHMENT_DOWNLOAD_TIMEOUT / 1000} 秒）`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  const blob = await response.blob();
-  return new File([blob], finalName, { type: blob.type || 'application/octet-stream' });
 };
 
 const fieldOptions = ref([]);
