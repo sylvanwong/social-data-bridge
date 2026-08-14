@@ -23,6 +23,7 @@ const formData = ref({
   executionMode: 'immediate'
 });
 const MANUAL_TABLE_BASE_NAME = '作品详情获取';
+const ATTACHMENT_DOWNLOAD_TIMEOUT = 30000;
 const REPEAT_TYPE_OPTIONS = [
   { value: 'none', label: '不重复' },
   { value: 'hourly', label: '每小时重复' },
@@ -297,8 +298,11 @@ const shouldUseProxyFirst = (item, config) => {
   return String(item?.social_type || '').trim().toLowerCase() === 'instagram';
 };
 
-const fetchAttachmentResponse = async (requestUrl, useProxy) => {
-  const options = useProxy ? { headers: { authorization: `Bearer ${props.api_key}` } } : undefined;
+const fetchAttachmentResponse = async (requestUrl, useProxy, signal) => {
+  const options = {
+    signal,
+    ...(useProxy ? { headers: { authorization: `Bearer ${props.api_key}` } } : {}),
+  };
   const response = await fetch(requestUrl, options);
   if (!response.ok) {
     throw new Error(`下载失败: HTTP ${response.status}`);
@@ -308,21 +312,37 @@ const fetchAttachmentResponse = async (requestUrl, useProxy) => {
 
 const downloadAttachmentAsFile = async (url, finalName, config, item) => {
   const proxyUrl = buildProxyDownloadUrl(url, finalName);
-  let response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
 
-  if (shouldUseProxyFirst(item, config)) {
-    response = await fetchAttachmentResponse(proxyUrl, true);
-  } else {
-    try {
-      response = await fetchAttachmentResponse(url, false);
-    } catch (error) {
-      response = await fetchAttachmentResponse(proxyUrl, true);
+  const downloadFile = async (requestUrl, useProxy) => {
+    const response = await fetchAttachmentResponse(requestUrl, useProxy, controller.signal);
+    const blob = await response.blob();
+    const normalizedName = normalizeFinalFileName(url, finalName, blob, config, item);
+    return new File([blob], normalizedName, { type: blob.type || 'application/octet-stream' });
+  };
+
+  try {
+    if (shouldUseProxyFirst(item, config)) {
+      return await downloadFile(proxyUrl, true);
     }
-  }
 
-  const blob = await response.blob();
-  const normalizedName = normalizeFinalFileName(url, finalName, blob, config, item);
-  return new File([blob], normalizedName, { type: blob.type || 'application/octet-stream' });
+    try {
+      return await downloadFile(url, false);
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`附件下载超时（${ATTACHMENT_DOWNLOAD_TIMEOUT / 1000} 秒）`);
+      }
+      return await downloadFile(proxyUrl, true);
+    }
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`附件下载超时（${ATTACHMENT_DOWNLOAD_TIMEOUT / 1000} 秒）`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 };
 
 const getAttachmentUrls = (config, item) => {
