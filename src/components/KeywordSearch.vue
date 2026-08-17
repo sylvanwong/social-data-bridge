@@ -4,6 +4,7 @@ import { ElNotification } from "element-plus";
 import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import request from '@/utils/request'
 import { useSocialData, showErrorMsg, KEYWORD_SEARCH_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
+import { useIncrementalTask } from '@/composables/useIncrementalTask'
 
 const props = defineProps({
   api_key: String,
@@ -31,8 +32,13 @@ const formData1 = ref({
 });
 const table_options = ref([]);
 const FIELD_SELECTION_STORAGE_KEY = 'keyword_search_selected_fields_v1';
+const STREAM_TASK_STORAGE_KEY = 'keyword_search_stream_task_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
+const toastVisible = ref(false);
+const toastText = ref('');
+const toastLoading = ref(false);
+let toastTimer = null;
 
 const pages_options = [
   { value: 0, label: "全量获取" },
@@ -189,16 +195,21 @@ const getTableName = () => formData1.value.keyword || '社媒数据助手';
 
 const {
   loading,
-  profileProgress,
-  resetParams,
-  pollTaskStatus,
-  closeInterval,
-  getList,
   createAndWriteData,
   validateTableFields,
 } = useSocialData(getTableName, props.api_key, KEYWORD_SEARCH_FIELD_MAPPING);
 
-const timer = ref(null);
+const showToast = (text, isLoading = true) => {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastText.value = text;
+  toastLoading.value = isLoading;
+  toastVisible.value = true;
+};
+
+const showCompletionToast = (text) => {
+  showToast(text, false);
+  toastTimer = setTimeout(() => { toastVisible.value = false; }, 3000);
+};
 
 const loadSelectedFieldKeys = async () => {
   const defaultKeys = getDefaultSelectedFieldKeys(KEYWORD_SEARCH_FIELD_MAPPING);
@@ -231,39 +242,34 @@ const saveSelectedFieldKeys = async (keys) => {
   }
 };
 
-const getSearchTask = async (task_id, onSuccess) => {
-  await request({
-    url: "/social/api/v1/feishu/keyword/task?task_id=" + task_id,
-    method: "get",
-    headers: { 'authorization': `Bearer ${props.api_key}` },
-  })
-    .then(function (response) {
-      let res = response.data;
-      if (res.sta == 0) {
-        const { status, current_page } = res.data;
-        if (status == 1) {
-          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取完成', done: true };
-          closeInterval();
-          onSuccess();
-        } else if (status == 2) {
-          closeInterval();
-          showErrorMsg("获取数据失败，请稍后重试");
-          loading.value = false;
-        } else {
-          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取中', done: false };
-        }
-      }
-    })
-    .catch(function (error) {
-      console.log(error);
+const keywordStreamTask = useIncrementalTask({
+  storageKey: STREAM_TASK_STORAGE_KEY,
+  getStatus: async (task) => (await request({ url: `/social/api/v1/feishu/keyword/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', headers: { authorization: `Bearer ${props.api_key}` } })).data,
+  getResults: async (task) => (await request({ url: '/social/api/v1/feishu/post/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 20 } })).data,
+  writeBatch: async (items, task) => {
+    const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', task.selectedFieldKeys, {
+      stopAfterCurrentBatch: true,
+      onTargetTableReady: async (tableId) => { task.targetTableId = tableId; },
     });
-};
-
-const getSearchTaskInterval = (task_id, targetTableId = "") => {
-  pollTaskStatus(task_id, getSearchTask, () => {
-    getList(task_id, "", targetTableId, selectedFieldKeys.value);
-  });
-};
+    task.targetTableId = result?.tableId || task.targetTableId;
+  },
+  onProgress: (status, task) => {
+    const processed = Number(status.processed) || 0;
+    const total = Number(status.total) || 0;
+    showToast(`已处理 ${total ? `${processed}/${total}` : processed} 个搜索页，已写入 ${task.writtenCount || 0} 条作品`, true);
+  },
+  onWriting: (items) => showToast(`正在写入 ${items.length} 条作品...`, true),
+  onFinish: async (status, task) => {
+    loading.value = false;
+    showCompletionToast(Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条作品`);
+    if (Number(status.status) === 2) showErrorMsg(status.reason || '获取数据失败，请稍后重试');
+  },
+  onError: async (error) => {
+    loading.value = false;
+    showCompletionToast(error.message || '任务长时间没有进度');
+    showErrorMsg(error.message || '任务长时间没有进度');
+  },
+});
 
 const postSearchTask = async (targetTableId = "") => {
   let filter_config = {};
@@ -329,7 +335,7 @@ const postSearchTask = async (targetTableId = "") => {
       let res = response.data;
       if (res.sta == 0) {
         const data = res.data;
-        getSearchTaskInterval(data.task_id, targetTableId);
+        keywordStreamTask.start({ taskId: data.task_id, targetTableId, selectedFieldKeys: [...selectedFieldKeys.value] });
       } else {
         loading.value = false;
         showErrorMsg(res.msg);
@@ -410,6 +416,15 @@ onMounted(async () => {
   }
   await loadSelectedFieldKeys();
   fieldSelectionReady.value = true;
+  await keywordStreamTask.resume(() => {
+    loading.value = true;
+    showToast('正在恢复未完成的关键词采集任务...', true);
+  });
+});
+
+onUnmounted(() => {
+  keywordStreamTask.stop();
+  if (toastTimer) clearTimeout(toastTimer);
 });
 
 const commit = () => {
@@ -733,9 +748,17 @@ watch(selectedFieldKeys, (keys) => {
       </el-form>
 
       <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="commit">提交</el-button>
-      <div v-if="profileProgress.text" class="profile-progress" :class="{ 'profile-progress--done': profileProgress.done }">
-        <span v-if="profileProgress.done" class="profile-progress-check">✓</span>
-        {{ profileProgress.text }}
+    </div>
+
+    <div class="toast-wrap" :class="{ show: toastVisible }">
+      <div class="toast" :class="{ 'toast-loading': toastLoading }">
+        <div class="toast-icon" v-if="toastLoading">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 2a10 10 0 0 1 10 10" /></svg>
+        </div>
+        <div class="toast-icon" v-else>
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="#00B42A" /><path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        </div>
+        <span>{{ toastText }}</span>
       </div>
     </div>
   </div>
@@ -816,21 +839,13 @@ watch(selectedFieldKeys, (keys) => {
 }
 .commit-btn:hover { background: #C11126; }
 .commit-btn:active { background: #8A0515; }
-.profile-progress {
-  text-align: center;
-  font-size: 14px;
-  color: #1D2129;
-  margin-top: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-}
-.profile-progress-check {
-  color: #67c23a;
-  font-weight: bold;
-  font-size: 16px;
-}
+.toast-wrap { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.95); z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; }
+.toast-wrap.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+.toast { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; background: #FFFFFF; border: 1px solid #E5E6EB; border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); font-size: 14px; font-weight: 500; color: #1D2129; white-space: nowrap; }
+.toast-icon { width: 18px; height: 18px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+.toast-icon svg { width: 100%; height: 100%; }
+.toast-loading .toast-icon { animation: spin 0.8s linear infinite; color: #A8071A; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .c-label {
   display: flex;
   align-items: center;

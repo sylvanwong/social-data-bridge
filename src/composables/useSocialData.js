@@ -453,7 +453,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       });
   };
 
-  const createAndWriteData = async (list, type, task_id, targetTableId = "", selectedFieldKeys = []) => {
+  const createAndWriteData = async (list, type, task_id, targetTableId = "", selectedFieldKeys = [], options = {}) => {
     if (!list || list.length == 0) {
       ElMessage({ message: "获取数据异常，请稍后重试", type: "warning", plain: true });
       resetParams();
@@ -462,14 +462,17 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
     const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
 
     try {
-      if (!type && !targetTableId) {
+      let resolvedTargetTableId = targetTableId;
+      if (!type && !resolvedTargetTableId) {
         const tableName = getTableName(list);
         const { tableId } = await createSequentialTable(tableName);
         await setupTableFields(tableId, selectedFieldKeys, fieldMapping);
+        resolvedTargetTableId = tableId;
+        await options.onTargetTableReady?.(tableId);
       }
 
-      const activeTable = targetTableId
-        ? await bitable.base.getTableById(targetTableId)
+      const activeTable = resolvedTargetTableId
+        ? await bitable.base.getTableById(resolvedTargetTableId)
         : await bitable.base.getActiveTable();
       const fieldMetaList = await activeTable.getFieldMetaList();
       const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
@@ -535,6 +538,10 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       }
       const recordIds = await activeTable.addRecords(records);
 
+      if (options.stopAfterCurrentBatch) {
+        return { tableId: activeTable.id, recordIds };
+      }
+
       if (total > page) {
         page += 1;
         getList(task_id, 'next', targetTableId, selectedFieldKeys);
@@ -548,13 +555,16 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         const tableName = getTableName(list);
         const { tableId: newTableId } = await createSequentialTable(tableName);
         await setupTableFields(newTableId, selectedFieldKeys, fieldMapping);
-        await createAndWriteData(list, type, task_id, newTableId, selectedFieldKeys);
+        return await createAndWriteData(list, type, task_id, newTableId, selectedFieldKeys, options);
         ElNotification({ title: '温馨提示', message: '当前多维表格已达到单表存储上限！已为您自动生成新表格展示全部数据', type: 'success', duration: 3000 });
         return;
       } catch (retryError) {
         console.error("🚀 ~ 创建新表重试写入失败:", retryError)
         const errorMsg = retryError?.message ? `写入失败：${retryError.message}` : "写入失败，请稍后重试";
         ElNotification({ title: '错误', message: errorMsg, type: 'error', duration: 0 });
+        if (options.stopAfterCurrentBatch) {
+          throw retryError;
+        }
         resetParams();
       }
     }
