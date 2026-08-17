@@ -12,6 +12,11 @@ const props = defineProps({
 const TASK_PLUGIN_TYPE = 'profile_fetch';
 const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
 const MANUAL_TABLE_BASE_NAME = '社媒数据助手';
+const STREAM_TASK_STORAGE_KEY = 'profile_fetch_stream_task_v1';
+const STREAM_RESULT_LIMIT = 20;
+const STREAM_ACTIVE_INTERVAL = 2000;
+const STREAM_MAX_INTERVAL = 30000;
+const STREAM_STALL_TIMEOUT = 10 * 60 * 1000;
 
 const formData = ref({
   mode: 'table',
@@ -29,6 +34,10 @@ const fieldOptions = ref([]);
 const FIELD_SELECTION_STORAGE_KEY = 'profile_batch_selected_fields_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
+const toastVisible = ref(false);
+const toastText = ref('');
+const toastLoading = ref(false);
+let toastTimer = null;
 
 const getDefaultDeadlineDate = () => {
   const date = new Date();
@@ -179,16 +188,13 @@ const normalizeTimeValue = (value) => {
 
 const {
   loading,
-  profileProgress,
-  resetParams,
-  pollTaskStatus,
-  closeInterval,
-  getList,
   createAndWriteData,
   validateTableFields,
 } = useSocialData(getTableName, props.api_key, PROFILE_FIELD_MAPPING);
 
-const timer = ref(null);
+const streamTimer = ref(null);
+let activeStreamTask = null;
+let streamRequestInFlight = false;
 
 const ensureOption = (optionsRef, option) => {
   if (!option?.id) {
@@ -250,42 +256,276 @@ const saveSelectedFieldKeys = async (keys) => {
   }
 };
 
-const getProfileTask = async (task_id, onSuccess) => {
-  await request({
-    url: "/social/api/v1/feishu/social/task?task_id=" + task_id,
-    method: "get",
-    headers: { 'authorization': `Bearer ${props.api_key}` },
-  })
-    .then(function (response) {
-      let res = response.data;
-      if (res.sta == 0) {
-        const { status, current_page } = res.data;
-        if (status == 1) {
-          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取完成', done: true };
-          closeInterval();
-          onSuccess();
-        } else if (status == 2) {
-          closeInterval();
-          showErrorMsg("获取数据失败，请稍后重试");
-          loading.value = false;
-        } else {
-          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取中', done: false };
-        }
-      }
-    })
-    .catch(function (error) {
-      console.log(error);
-    });
+const unwrapApiData = (responseData) => {
+  if (responseData?.sta !== undefined) {
+    if (responseData.sta !== 0) {
+      throw new Error(responseData.msg || '请求失败');
+    }
+    return responseData.data || {};
+  }
+  return responseData || {};
 };
 
-const getProfileTaskInterval = (task_id, targetTableId = "") => {
-  pollTaskStatus(task_id, getProfileTask, () => {
-    getList(task_id, "", targetTableId, selectedFieldKeys.value);
+const clearStreamTimer = () => {
+  if (streamTimer.value) {
+    clearTimeout(streamTimer.value);
+    streamTimer.value = null;
+  }
+};
+
+const showToast = (text, isLoading = true) => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+  toastText.value = text;
+  toastLoading.value = isLoading;
+  toastVisible.value = true;
+};
+
+const hideToast = () => {
+  toastVisible.value = false;
+};
+
+const showCompletionToast = (text) => {
+  showToast(text, false);
+  toastTimer = setTimeout(hideToast, 3000);
+};
+
+const saveStreamTask = async (task) => {
+  await bitable.bridge.setData(STREAM_TASK_STORAGE_KEY, task);
+};
+
+const clearSavedStreamTask = async () => {
+  try {
+    await bitable.bridge.setData(STREAM_TASK_STORAGE_KEY, {});
+  } catch (error) {
+    console.error('清除博主作品采集恢复状态失败:', error);
+  }
+};
+
+const stopStreamTask = () => {
+  clearStreamTimer();
+  activeStreamTask = null;
+};
+
+const getStreamProgressText = (taskStatus, streamTask) => {
+  const processed = Number(taskStatus.processed) || 0;
+  const total = Number(taskStatus.total) || 0;
+  const progress = total > 0 ? `${processed}/${total}` : `${processed}`;
+  return `已处理 ${progress} 个主页，已写入 ${streamTask.writtenCount || 0} 条作品`;
+};
+
+const getProfileTaskStatus = async (taskId) => {
+  const response = await request({
+    url: `/social/api/v1/feishu/social/task?task_id=${encodeURIComponent(taskId)}`,
+    method: 'get',
+    headers: { authorization: `Bearer ${props.api_key}` },
   });
+  return unwrapApiData(response.data);
+};
+
+const readAvailablePosts = async (streamTask) => {
+  const response = await request({
+    url: '/social/api/v1/feishu/post/list',
+    method: 'post',
+    headers: { authorization: `Bearer ${props.api_key}` },
+    data: {
+      task_id: streamTask.taskId,
+      after_id: streamTask.cursor || '',
+      limit: STREAM_RESULT_LIMIT,
+    },
+  });
+  const data = unwrapApiData(response.data);
+  return {
+    items: Array.isArray(data.data) ? data.data : (Array.isArray(data.items) ? data.items : []),
+    nextCursor: data.next_cursor || streamTask.cursor || '',
+    hasMore: !!data.has_more,
+  };
+};
+
+const drainAvailablePosts = async (streamTask) => {
+  let wroteData = false;
+
+  while (activeStreamTask === streamTask) {
+    const { items, nextCursor, hasMore } = await readAvailablePosts(streamTask);
+    if (items.length === 0) {
+      return wroteData;
+    }
+
+    if (!nextCursor || nextCursor === streamTask.cursor) {
+      throw new Error('结果接口未返回有效的 next_cursor');
+    }
+
+    showToast(`正在写入 ${items.length} 条作品...`, true);
+    const result = await createAndWriteData(
+      items,
+      streamTask.targetTableId ? 'stream' : '',
+      streamTask.taskId,
+      streamTask.targetTableId || '',
+      streamTask.selectedFieldKeys,
+      {
+        stopAfterCurrentBatch: true,
+        onTargetTableReady: async (tableId) => {
+          streamTask.targetTableId = tableId;
+          await saveStreamTask(streamTask);
+        },
+      }
+    );
+
+    streamTask.targetTableId = result?.tableId || streamTask.targetTableId;
+    streamTask.cursor = nextCursor;
+    streamTask.writtenCount = (streamTask.writtenCount || 0) + items.length;
+    streamTask.lastActivityAt = Date.now();
+    await saveStreamTask(streamTask);
+    wroteData = true;
+
+    if (!hasMore) {
+      return wroteData;
+    }
+  }
+
+  return wroteData;
+};
+
+const finishStreamTask = async (streamTask, taskStatus) => {
+  stopStreamTask();
+  loading.value = false;
+  await clearSavedStreamTask();
+
+  if (Number(taskStatus.status) === 2) {
+    showCompletionToast(taskStatus.reason || '任务失败，已写入任务完成前获取的数据');
+    showErrorMsg(taskStatus.reason || '获取数据失败，请稍后重试');
+    return;
+  }
+
+  showCompletionToast(`处理完成，已写入 ${streamTask.writtenCount || 0} 条作品`);
+};
+
+const scheduleStreamPoll = (streamTask, delay) => {
+  clearStreamTimer();
+  streamTimer.value = setTimeout(() => {
+    pollStreamTask(streamTask);
+  }, delay);
+};
+
+const pollStreamTask = async (streamTask) => {
+  if (activeStreamTask !== streamTask || streamRequestInFlight) {
+    return;
+  }
+
+  streamRequestInFlight = true;
+  try {
+    const taskStatus = await getProfileTaskStatus(streamTask.taskId);
+    const processed = Number(taskStatus.processed) || 0;
+    const heartbeatAt = Number(taskStatus.heartbeat_at) || 0;
+    const progressed = processed !== streamTask.lastProcessed || heartbeatAt !== streamTask.lastHeartbeatAt;
+
+    if (progressed) {
+      streamTask.lastProcessed = processed;
+      streamTask.lastHeartbeatAt = heartbeatAt;
+      streamTask.lastActivityAt = Date.now();
+      streamTask.pollInterval = STREAM_ACTIVE_INTERVAL;
+    } else {
+      streamTask.pollInterval = Math.min(
+        Math.max(streamTask.pollInterval || STREAM_ACTIVE_INTERVAL, STREAM_ACTIVE_INTERVAL) * 2,
+        STREAM_MAX_INTERVAL
+      );
+    }
+
+    showToast(getStreamProgressText(taskStatus, streamTask), true);
+    const wroteData = await drainAvailablePosts(streamTask);
+    if (wroteData) {
+      streamTask.pollInterval = STREAM_ACTIVE_INTERVAL;
+      showToast(getStreamProgressText(taskStatus, streamTask), true);
+    }
+
+    const isTerminal = Number(taskStatus.status) === 1 || Number(taskStatus.status) === 2;
+    if (isTerminal && !wroteData) {
+      await finishStreamTask(streamTask, taskStatus);
+      return;
+    }
+
+    if (Date.now() - (streamTask.lastActivityAt || Date.now()) >= STREAM_STALL_TIMEOUT) {
+      throw new Error('任务超过 10 分钟没有进度更新，请稍后重试');
+    }
+
+    await saveStreamTask(streamTask);
+    scheduleStreamPoll(streamTask, streamTask.pollInterval || STREAM_ACTIVE_INTERVAL);
+  } catch (error) {
+    console.error('轮询博主作品采集任务失败:', error);
+    streamTask.pollInterval = Math.min(
+      Math.max(streamTask.pollInterval || STREAM_ACTIVE_INTERVAL, STREAM_ACTIVE_INTERVAL) * 2,
+      STREAM_MAX_INTERVAL
+    );
+
+    if (Date.now() - (streamTask.lastActivityAt || Date.now()) >= STREAM_STALL_TIMEOUT) {
+      loading.value = false;
+      showCompletionToast(error.message || '任务长时间没有进度');
+      showErrorMsg(error.message || '任务长时间没有进度');
+      return;
+    }
+
+    await saveStreamTask(streamTask);
+    scheduleStreamPoll(streamTask, streamTask.pollInterval);
+  } finally {
+    streamRequestInFlight = false;
+  }
+};
+
+const startStreamTask = async (taskId, targetTableId = '', taskConfig = {}) => {
+  stopStreamTask();
+  const selection = await bitable.base.getSelection();
+  const streamTask = {
+    taskId,
+    cursor: '',
+    targetTableId,
+    selectedFieldKeys: [...(taskConfig.selectedFieldKeys || selectedFieldKeys.value)],
+    writtenCount: 0,
+    lastProcessed: -1,
+    lastHeartbeatAt: 0,
+    lastActivityAt: Date.now(),
+    pollInterval: STREAM_ACTIVE_INTERVAL,
+    baseId: selection.baseId || '',
+  };
+
+  activeStreamTask = streamTask;
+  loading.value = true;
+  await saveStreamTask(streamTask);
+  await pollStreamTask(streamTask);
+};
+
+const resumeSavedStreamTask = async () => {
+  try {
+    const savedTask = await bitable.bridge.getData(STREAM_TASK_STORAGE_KEY);
+    if (!savedTask?.taskId || activeStreamTask) {
+      return;
+    }
+
+    const selection = await bitable.base.getSelection();
+    if (savedTask.baseId && selection.baseId && savedTask.baseId !== selection.baseId) {
+      return;
+    }
+
+    activeStreamTask = {
+      ...savedTask,
+      selectedFieldKeys: Array.isArray(savedTask.selectedFieldKeys)
+        ? savedTask.selectedFieldKeys
+        : [...selectedFieldKeys.value],
+      lastActivityAt: savedTask.lastActivityAt || Date.now(),
+      pollInterval: savedTask.pollInterval || STREAM_ACTIVE_INTERVAL,
+    };
+    loading.value = true;
+    showToast('正在恢复未完成的博主作品采集任务...', true);
+    await pollStreamTask(activeStreamTask);
+  } catch (error) {
+    console.error('恢复博主作品采集任务失败:', error);
+  }
 };
 
 const postProfileTask = async (targetTableId = "", urlText = "") => {
-  await request({
+  try {
+    const response = await request({
     url: "/social/api/v1/feishu/social/task",
     method: "post",
     headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -293,22 +533,17 @@ const postProfileTask = async (targetTableId = "", urlText = "") => {
       url: urlText,
       pages: Number(formData.value.pages),
     },
-  })
-    .then(function (response) {
-      let res = response.data;
-      if (res.sta == 0) {
-        const data = res.data;
-        getProfileTaskInterval(data.task_id, targetTableId);
-      } else {
-        loading.value = false;
-        ElNotification({ title: '错误', message: res.msg, type: 'error', duration: 0 });
-      }
-    })
-    .catch(function (error) {
-      loading.value = false;
-      console.log(error);
-      showErrorMsg(error);
     });
+    const data = unwrapApiData(response.data);
+    if (!data.task_id) {
+      throw new Error('创建采集任务失败，未返回任务 ID');
+    }
+    await startStreamTask(data.task_id, targetTableId);
+  } catch (error) {
+    loading.value = false;
+    console.error('创建博主作品采集任务失败:', error);
+    showErrorMsg(error.message || '创建采集任务失败');
+  }
 };
 
 const loadTableOptions = async () => {
@@ -1073,6 +1308,14 @@ onMounted(async () => {
     loadTaskList(),
   ]);
   fieldSelectionReady.value = true;
+  await resumeSavedStreamTask();
+});
+
+onUnmounted(() => {
+  stopStreamTask();
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+  }
 });
 
 watch(selectedFieldKeys, (keys) => {
@@ -1321,10 +1564,6 @@ watch(
 
       <div v-if="formData.executionMode === 'immediate'" class="action-group">
         <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleImmediateSubmit">立即执行</el-button>
-        <div v-if="profileProgress.text" class="profile-progress" :class="{ 'profile-progress--done': profileProgress.done }">
-          <span v-if="profileProgress.done" class="profile-progress-check">✓</span>
-          {{ profileProgress.text }}
-        </div>
       </div>
 
       <div v-else class="schedule-inline-panel">
@@ -1733,6 +1972,23 @@ watch(
         </div>
       </template>
     </el-dialog>
+
+    <div class="toast-wrap" :class="{ show: toastVisible }">
+      <div class="toast" :class="{ 'toast-loading': toastLoading, 'toast-success': !toastLoading }">
+        <div class="toast-icon" v-if="toastLoading">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 2a10 10 0 0 1 10 10"></path>
+          </svg>
+        </div>
+        <div class="toast-icon" v-else>
+          <svg viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" fill="#00B42A"></circle>
+            <path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
+          </svg>
+        </div>
+        <span>{{ toastText }}</span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -2373,6 +2629,62 @@ watch(
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.toast-wrap {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.95);
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.toast-wrap.show {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.toast {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  background: #FFFFFF;
+  border: 1px solid #E5E6EB;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  font-size: 14px;
+  font-weight: 500;
+  color: #1D2129;
+  white-space: nowrap;
+}
+
+.toast-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toast-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.toast-loading .toast-icon {
+  animation: spin 0.8s linear infinite;
+  color: #A8071A;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 640px) {
