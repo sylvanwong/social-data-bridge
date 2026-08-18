@@ -14,11 +14,13 @@ import SeriesFetch from './SeriesFetch.vue'
 import HotListFetch from './HotListFetch.vue'
 import BaseIdDebug from './BaseIdDebug.vue'
 import WritePerformanceTest from './WritePerformanceTest.vue'
+import SentryTest from './SentryTest.vue'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
 const api_key = ref("");
 const api_key_disabled = ref(true);
 const currentPage = ref("home");
+// const isSentryTestEnabled = import.meta.env.DEV || new URLSearchParams(window.location.search).has('sentry-test');
 
 const PLATFORM_CONFIG_NAMES = {
   search: 'feishu_social_type',
@@ -256,6 +258,16 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           </div>
           <span class="func-name">BaseId 调试</span>
         </div> -->
+        <!-- <div v-if="isSentryTestEnabled" class="arco-card" @click="currentPage = 'sentryTest'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path d="M12 9v4"></path>
+              <path d="M12 17h.01"></path>
+              <path d="M10.3 3.5 2.8 16.1A2 2 0 0 0 4.5 19h15a2 2 0 0 0 1.7-2.9L13.7 3.5a2 2 0 0 0-3.4 0Z"></path>
+            </svg>
+          </div>
+          <span class="func-name">Sentry 测试</span>
+        </div> -->
       </div>
     </div>
   </div>
@@ -300,6 +312,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
   <!-- 二级页面：BaseId 调试 -->
   <!-- <BaseIdDebug v-if="currentPage === 'baseIdDebug'" @back="currentPage = 'home'" /> -->
+
+  <!-- <SentryTest v-if="currentPage === 'sentryTest'" @back="currentPage = 'home'" /> -->
 </template>
 
 <style scoped>
