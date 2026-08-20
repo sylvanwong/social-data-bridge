@@ -408,7 +408,7 @@ const getList = async (task_id, targetTableId = "", page = 1, writeTableId = "")
     .catch(function (error) {
       loading.value = false;
       console.log(error);
-      showErrorMsg(error);
+      showErrorMsg(error.message || '请求失败');
     });
 };
 
@@ -440,7 +440,7 @@ const postSeriesTask = async (targetTableId = "", profileUrlText = "") => {
     .catch(function (error) {
       loading.value = false;
       console.log(error);
-      showErrorMsg(error);
+      showErrorMsg(error.message || '请求失败');
     });
 };
 

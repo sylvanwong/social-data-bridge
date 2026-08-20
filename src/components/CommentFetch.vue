@@ -589,7 +589,7 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
     .catch(function (error) {
       loading.value = false;
       console.log(error);
-      showErrorMsg(error);
+      showErrorMsg(error.message || '请求失败');
     });
 };
 

@@ -41,4 +41,15 @@ service.interceptors.request.use((config) => {
   return config;
 })
 
+service.interceptors.response.use((response) => {
+  if (Number(response.data?.sta) === 4001) {
+    const error = new Error(response.data?.msg || '请输入正确的apikey');
+    error.code = 'INVALID_API_KEY';
+    error.response = response;
+    return Promise.reject(error);
+  }
+
+  return response;
+})
+
 export default service
