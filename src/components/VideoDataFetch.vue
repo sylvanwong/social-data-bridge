@@ -1048,6 +1048,9 @@ const fetchVideoDataByRows = async (rowList, {
     } catch (error) {
       const errorMessage = error?.response?.data?.msg || error?.message || '请求失败';
       console.error(`处理第 ${index + 1} 条失败:`, errorMessage);
+      if (error?.code === 'INVALID_API_KEY') {
+        throw error;
+      }
       if (writeFailureToCurrent && recordId && fieldNameToId) {
         await writeErrorMessageToFirstField(recordId, errorMessage, fieldNameToId, activeFieldConfigs);
       }

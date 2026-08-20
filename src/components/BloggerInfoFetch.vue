@@ -701,6 +701,9 @@ const fetchBloggerInfoByRows = async (rowList, { onSuccess = null } = {}) => {
         failCount++;
       }
     } catch (error) {
+      if (error?.code === 'INVALID_API_KEY') {
+        throw error;
+      }
       ElNotification({ message: error.message || '请求失败', type: 'error', duration: 0 });
       failCount++;
     }
@@ -1364,7 +1367,10 @@ const handleTableModeSubmit = async () => {
       hideToast();
     }, 3000);
   } catch (error) {
-    ElNotification({ message: error.message || '获取数据失败', type: 'error', duration: 0 });
+    const errorMessage = error.message || '获取数据失败';
+    showToast(`处理失败：${errorMessage}`, false);
+    setTimeout(() => hideToast(), 3000);
+    ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
   }
@@ -1398,7 +1404,10 @@ const handleManualModeSubmit = async () => {
       hideToast();
     }, 3000);
   } catch (error) {
-    ElNotification({ message: error.message || '获取数据失败', type: 'error', duration: 0 });
+    const errorMessage = error.message || '获取数据失败';
+    showToast(`处理失败：${errorMessage}`, false);
+    setTimeout(() => hideToast(), 3000);
+    ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
   }

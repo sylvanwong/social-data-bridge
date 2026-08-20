@@ -38,6 +38,7 @@ const fieldSelectionReady = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
+const currentTableName = ref('');
 let toastTimer = null;
 
 const pages_options = [
@@ -191,7 +192,22 @@ const getDefaultSortType = (socialType) => {
   return 'general';
 };
 
-const getTableName = () => formData1.value.keyword || '社媒数据助手';
+const getFirstKeyword = (text) => parseKeywords(text)[0] || '';
+
+const parseKeywords = (text) => {
+  if (!text || typeof text !== 'string') return [];
+
+  return Array.from(
+    new Set(
+      text
+        .split(/[\n,，]+/)
+        .map(item => item.trim())
+        .filter(Boolean)
+    )
+  );
+};
+
+const getTableName = () => currentTableName.value || formData1.value.keyword || '社媒数据助手';
 
 const {
   loading,
@@ -335,7 +351,11 @@ const postSearchTask = async (targetTableId = "") => {
       let res = response.data;
       if (res.sta == 0) {
         const data = res.data;
-        keywordStreamTask.start({ taskId: data.task_id, targetTableId, selectedFieldKeys: [...selectedFieldKeys.value] });
+        keywordStreamTask.start({
+          taskId: data.task_id,
+          targetTableId,
+          selectedFieldKeys: [...selectedFieldKeys.value],
+        });
       } else {
         loading.value = false;
         showErrorMsg(res.msg);
@@ -344,12 +364,13 @@ const postSearchTask = async (targetTableId = "") => {
     .catch(function (error) {
       loading.value = false;
       console.log(error);
-      showErrorMsg(error);
+      showErrorMsg(error.message || '请求失败');
     });
 };
 
 const getSearchData = async (targetTableId = "") => {
   loading.value = true;
+  currentTableName.value = getFirstKeyword(formData1.value.keyword) || '社媒数据助手';
   await postSearchTask(targetTableId);
 };
 
@@ -433,12 +454,13 @@ const commit = () => {
     return;
   }
   const { social_type, keyword, radio, table_id } = formData1.value;
+  const keywords = parseKeywords(keyword);
   if (!social_type || !social_type.trim()) {
     showErrorMsg("请选择平台");
     return;
   }
-  if (!keyword || !keyword.trim()) {
-    showErrorMsg("请输入关键词");
+  if (keywords.length === 0) {
+    showErrorMsg("请输入至少一个关键词");
     return;
   }
   if (social_type === 'bilibili' && formData1.value.publish_time_range === 'custom') {
@@ -535,7 +557,13 @@ watch(selectedFieldKeys, (keys) => {
                 class="help-icon" />
             </el-tooltip>
           </div>
-          <el-input v-model="formData1.keyword" class="c-input" placeholder="请输入" />
+          <el-input
+            v-model="formData1.keyword"
+            type="textarea"
+            :rows="4"
+            class="c-input"
+            placeholder="请输入关键词，支持批量添加，多个关键词可换行或用逗号分隔"
+          />
         </el-form-item>
         <el-form-item label="" v-if="showSortType">
           <div slot="label" class="c-label">

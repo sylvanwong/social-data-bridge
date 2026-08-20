@@ -449,7 +449,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       .catch(function (error) {
         loading.value = false;
         console.log(error);
-        showErrorMsg(error);
+        showErrorMsg(error.message || '请求失败');
       });
   };
 
