@@ -10,7 +10,7 @@
 - `npm run build:prod`: explicit production build alias.
 - `npm run preview`: preview the built app locally on port `4173`.
 
-Run `npm run build` before submitting or publishing changes.
+Run `npm run build` only before submitting or publishing changes. Do not run a production build for each incremental code or style adjustment unless explicitly requested.
 
 ## Coding Style & Naming Conventions
 Use Vue 3 with `<script setup>` and Composition API patterns. Follow the existing code style: 2-space indentation, semicolon-terminated JavaScript, and concise helper functions near their usage. Name Vue components in PascalCase (`KeywordSearch.vue`); name composables and utilities in camelCase (`useSocialData.js`, `platformConfig.js`). Keep UI copy consistent with the existing Chinese interface unless a feature already uses English labels.

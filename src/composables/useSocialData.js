@@ -227,6 +227,23 @@ const resolveFieldMetaByConfig = (fieldMetaMap, config) => {
   return null;
 };
 
+const normalizeUniqueKeyPart = (value) => {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.map(normalizeUniqueKeyPart).filter(Boolean).join(',');
+  if (typeof value === 'object') return normalizeUniqueKeyPart(value.text ?? value.name ?? value.value ?? '');
+  return String(value).trim().toLowerCase();
+};
+
+const buildWorkUniqueKey = (awemeId) => normalizeUniqueKeyPart(awemeId);
+
+const chunkRecords = (records, size = 200) => {
+  const chunks = [];
+  for (let index = 0; index < records.length; index += size) {
+    chunks.push(records.slice(index, index + size));
+  }
+  return chunks;
+};
+
 export const showErrorMsg = (message) => {
   ElMessage({ message, type: "error", plain: true });
 };
@@ -303,17 +320,35 @@ export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMap
   }
 };
 
-export const validateTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING) => {
+export const validateTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING, options = {}) => {
   try {
     const activeTable = await bitable.base.getTableById(tableId);
     const fieldMetaList = await activeTable.getFieldMetaList();
     const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
+    const fieldMetaById = new Map(fieldMetaList.map(meta => [meta.id, meta]));
+    const explicitMappings = new Map(
+      (options.fieldMappings || [])
+        .filter(item => item?.source_key && item?.target_field_id)
+        .map(item => [item.source_key, item])
+    );
     const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
+    if (options.writeMode === 'upsert') {
+      for (const key of ['aweme_id']) {
+        const config = fieldMapping.find(item => item.key === key);
+        if (config && !activeFieldMapping.some(item => item.key === key)) activeFieldMapping.push(config);
+      }
+    }
 
     const fieldList = [];
     const missingFields = [];
     for (const config of activeFieldMapping) {
-      const matchedField = resolveFieldMetaByConfig(fieldMetaByName, config);
+      const explicitMapping = explicitMappings.get(config.key);
+      const matchedField = explicitMapping?.target_field_id
+        ? { fieldMeta: fieldMetaById.get(explicitMapping.target_field_id) }
+        : resolveFieldMetaByConfig(fieldMetaByName, config);
+      if (explicitMapping?.target_field_id && !matchedField.fieldMeta) {
+        throw new Error(`字段“${config.name}”映射的目标字段不存在`);
+      }
       if (!matchedField?.fieldMeta?.id) {
         missingFields.push(config);
         continue;
@@ -353,8 +388,12 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
 
     const refreshedFieldMetaList = await activeTable.getFieldMetaList();
     const refreshedFieldMetaByName = new Map(refreshedFieldMetaList.map(meta => [meta.name, meta]));
+    const refreshedFieldMetaById = new Map(refreshedFieldMetaList.map(meta => [meta.id, meta]));
     for (const config of activeFieldMapping) {
-      const matchedField = resolveFieldMetaByConfig(refreshedFieldMetaByName, config);
+      const explicitMapping = explicitMappings.get(config.key);
+      const matchedField = explicitMapping?.target_field_id
+        ? { fieldMeta: refreshedFieldMetaById.get(explicitMapping.target_field_id) }
+        : resolveFieldMetaByConfig(refreshedFieldMetaByName, config);
       const fieldId = matchedField?.fieldMeta?.id;
       if (!fieldId) continue;
       try {
@@ -395,12 +434,14 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
   let page = 1;
   const page_size = 20;
   let total = 0;
+  const upsertIndexCache = new Map();
 
   const resetParams = () => {
     loading.value = false;
     profileProgress.value = { text: "", done: false };
     page = 1;
     total = 0;
+    upsertIndexCache.clear();
   };
 
   const pollTaskStatus = (task_id, checkFn, onSuccess) => {
@@ -459,7 +500,16 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       resetParams();
       return;
     }
-    const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
+    const selectedFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
+    const keyConfigs = options.writeMode === 'upsert'
+      ? ['aweme_id'].map(key => fieldMapping.find(config => config.key === key)).filter(Boolean)
+      : [];
+    const activeFieldMapping = [...selectedFieldMapping];
+    for (const keyConfig of keyConfigs) {
+      if (!activeFieldMapping.some(config => config.key === keyConfig.key)) {
+        activeFieldMapping.push(keyConfig);
+      }
+    }
 
     try {
       let resolvedTargetTableId = targetTableId;
@@ -474,11 +524,35 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       const activeTable = resolvedTargetTableId
         ? await bitable.base.getTableById(resolvedTargetTableId)
         : await bitable.base.getActiveTable();
-      const fieldMetaList = await activeTable.getFieldMetaList();
-      const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
+      let fieldMetaList = await activeTable.getFieldMetaList();
+      let fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
+      let fieldMetaById = new Map(fieldMetaList.map(meta => [meta.id, meta]));
+      const explicitMappings = new Map(
+        (options.fieldMappings || [])
+          .filter(item => item?.source_key && item?.target_field_id)
+          .map(item => [item.source_key, item])
+      );
+
+      if (options.writeMode === 'upsert') {
+        for (const config of keyConfigs) {
+          const explicitMapping = explicitMappings.get(config.key);
+          if (explicitMapping?.target_field_id && !fieldMetaById.has(explicitMapping.target_field_id)) {
+            throw new Error(`唯一键字段“${config.name}”映射的目标字段不存在`);
+          }
+          if (!explicitMapping && !resolveFieldMetaByConfig(fieldMetaByName, config)?.fieldMeta?.id) {
+            await activeTable.addField({ type: config.type, name: config.name });
+          }
+        }
+        fieldMetaList = await activeTable.getFieldMetaList();
+        fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
+        fieldMetaById = new Map(fieldMetaList.map(meta => [meta.id, meta]));
+      }
       const fieldList = [];
       for (const config of activeFieldMapping) {
-        const matchedField = resolveFieldMetaByConfig(fieldMetaByName, config);
+        const explicitMapping = explicitMappings.get(config.key);
+        const matchedField = explicitMapping?.target_field_id
+          ? { matchedName: explicitMapping.target_field_name || '', fieldMeta: fieldMetaById.get(explicitMapping.target_field_id) }
+          : resolveFieldMetaByConfig(fieldMetaByName, config);
         const fieldId = matchedField?.fieldMeta?.id;
         if (!fieldId) {
           fieldList.push({ field: null, config });
@@ -525,18 +599,82 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       }
 
       let records = [];
+      let normalizedRecords = [];
       for (const item of list) {
         let record = [];
+        let normalizedRecord = {};
         for (const { field, config, fieldType } of availableFieldList) {
           const matchedField = availableFieldList.find(fieldItem => fieldItem.field?.id === field.id && fieldItem.config.key === config.key);
           const valueKeys = config.valueKeys || [config.key];
           const sourceValue = valueKeys.reduce((value, key) => value ?? item?.[key], undefined);
           const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, matchedField?.extra);
           record.push(await field.createCell(value));
+          normalizedRecord[field.id] = value;
         }
         records.push(record);
+        normalizedRecords.push(normalizedRecord);
       }
-      const recordIds = await activeTable.addRecords(records);
+      let recordIds = [];
+      if (options.writeMode === 'upsert') {
+        const keyFields = keyConfigs.map(config => availableFieldList.find(item => item.config.key === config.key)?.field);
+        if (!keyFields.every(Boolean)) {
+          throw new Error('未找到“作品ID”字段，无法执行更新或新增');
+        }
+
+        const uniqueRecords = new Map();
+        let skippedCount = 0;
+        list.forEach((item, index) => {
+          const key = buildWorkUniqueKey(item?.aweme_id);
+          if (!key) {
+            skippedCount += 1;
+            return;
+          }
+          uniqueRecords.set(key, { record: records[index], fields: normalizedRecords[index] });
+        });
+        if (skippedCount > 0) {
+          ElMessage({ message: `${skippedCount} 条作品缺少作品ID，未写入`, type: 'warning', plain: true });
+        }
+
+        const indexCache = options.upsertIndex || upsertIndexCache;
+        const cacheKey = `${options.upsertCacheKey || 'default'}:${activeTable.id}:${keyFields.map(field => field.id).join(':')}`;
+        let existingByKey = indexCache.get(cacheKey);
+        if (!existingByKey) {
+          existingByKey = new Map();
+          let pageToken;
+          do {
+            const response = await activeTable.getRecordsByPage({ pageSize: 200, pageToken });
+            (response.records || []).forEach(existing => {
+              const key = buildWorkUniqueKey(existing.fields?.[keyFields[0].id]);
+              if (key) existingByKey.set(key, existing.recordId);
+            });
+            pageToken = response.hasMore ? response.pageToken : undefined;
+          } while (pageToken !== undefined);
+          indexCache.set(cacheKey, existingByKey);
+        }
+
+        const pendingUpdates = [];
+        const pendingCreates = [];
+        uniqueRecords.forEach(({ record, fields }, key) => {
+          const recordId = existingByKey.get(key);
+          if (recordId) {
+            pendingUpdates.push({ recordId, fields });
+          } else {
+            pendingCreates.push({ key, record });
+          }
+        });
+
+        for (const updates of chunkRecords(pendingUpdates)) {
+          const updated = await activeTable.setRecords(updates);
+          recordIds = recordIds.concat(updated.map(record => record.recordId));
+        }
+        for (const creates of chunkRecords(pendingCreates)) {
+          const created = await activeTable.addRecords(creates.map(item => item.record));
+          recordIds = recordIds.concat(created.map(record => record.recordId));
+          created.forEach((record, index) => existingByKey.set(creates[index].key, record.recordId));
+        }
+      } else {
+        recordIds = await activeTable.addRecords(records);
+      }
 
       if (options.stopAfterCurrentBatch) {
         return { tableId: activeTable.id, recordIds };
@@ -582,6 +720,6 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
     closeInterval,
     getList,
     createAndWriteData,
-    validateTableFields: (tableId, selectedFieldKeys = []) => validateTableFields(tableId, selectedFieldKeys, fieldMapping),
+    validateTableFields: (tableId, selectedFieldKeys = [], options = {}) => validateTableFields(tableId, selectedFieldKeys, fieldMapping, options),
   };
 };

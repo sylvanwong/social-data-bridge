@@ -168,7 +168,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <rect x="3" y="14" width="7" height="7" rx="1"></rect>
             </svg>
           </div>
-          <span class="func-name">博主作品获取</span>
+          <span class="func-name">获取作者作品</span>
         </div>
         <div class="arco-card" @click="currentPage = 'search'">
           <div class="func-icon">
@@ -272,7 +272,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
     </div>
   </div>
 
-  <!-- 二级页面：博主作品获取 -->
+  <!-- 二级页面：获取作者作品 -->
   <ProfileFetch v-if="currentPage === 'profile'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：博主短剧获取 -->
