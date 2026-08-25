@@ -1,7 +1,7 @@
 <script setup>
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import request from '@/utils/request'
 import { useSocialData, showErrorMsg, PROFILE_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 
@@ -11,6 +11,8 @@ const props = defineProps({
 
 const TASK_PLUGIN_TYPE = 'profile_fetch';
 const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
+const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
+const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 const MANUAL_TABLE_BASE_NAME = '社媒数据助手';
 const STREAM_TASK_STORAGE_KEY = 'profile_fetch_stream_task_v1';
 const STREAM_RESULT_LIMIT = 20;
@@ -22,22 +24,34 @@ const formData = ref({
   mode: 'table',
   targetType: 'new',
   manualUrls: "",
-  pages: 1,
+  workFetchRange: { type: 'pages', pages: 1, days: 30, timezone: 'Asia/Shanghai' },
   profileLinkFieldId: '',
   scope: 'n',
   rowCount: 5,
   targetTableId: '',
+  writeMode: 'append',
   executionMode: 'immediate',
 });
 const table_options = ref([]);
 const fieldOptions = ref([]);
 const FIELD_SELECTION_STORAGE_KEY = 'profile_batch_selected_fields_v1';
 const selectedFieldKeys = ref([]);
+const tableOutputConfigs = ref({});
+const tableFieldOptions = ref([]);
+const tableConfigLoading = ref(false);
+const tableConfigApplying = ref(false);
+const tableConfigSaving = ref(false);
+const tableConfigDirty = ref(false);
+const tableConfigSaveStatus = ref('');
+const mappingDraft = ref([]);
+const mappingExpanded = ref(false);
+const taskMappingExpanded = ref(false);
 const fieldSelectionReady = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
 let toastTimer = null;
+let tableConfigSaveTimer = null;
 
 const getDefaultDeadlineDate = () => {
   const date = new Date();
@@ -103,8 +117,9 @@ const getDefaultTaskDialogForm = () => ({
   scope: 'n',
   rowCount: 5,
   manualUrls: '',
-  pages: 1,
+  workFetchRange: { type: 'pages', pages: 1, days: 30, timezone: 'Asia/Shanghai' },
   targetTableId: '',
+  writeMode: 'append',
   selectedFieldKeys: getDefaultSelectedFieldKeys(PROFILE_FIELD_MAPPING),
   sourceTableId: '',
   sourceTableName: '',
@@ -125,20 +140,21 @@ const taskList = ref([]);
 const taskListLoading = ref(false);
 const taskManagerExpanded = ref(false);
 
-const pages_options = [
-  { value: 0, label: "全量获取" },
-  { value: 1, label: "仅获取首页" },
-  { value: 5, label: "获取前5页" },
-  { value: 10, label: "获取前10页" },
-  { value: 20, label: "获取前20页" },
-  { value: 30, label: "获取前30页" },
-  { value: 50, label: "获取前50页" },
+const pages_options = Array.from({ length: 50 }, (_, index) => ({ value: index + 1, label: `最新 ${index + 1} 页` }));
+const workRangeTypes = [
+  { value: 'all', label: '全部作品' },
+  { value: 'pages', label: '最新' },
+  { value: 'days', label: '最近' },
+];
+const writeModeOptions = [
+  { value: 'append', label: '始终新增' },
+  { value: 'upsert', label: '更新或新增' },
 ];
 
 const scopeOptions = [
-  { value: 'all', label: '执行所有行' },
-  { value: 'selected', label: '执行选中行' },
-  { value: 'n', label: '执行前N行' },
+  { value: 'all', label: '所有行' },
+  { value: 'selected', label: '选中行' },
+  { value: 'n', label: '前N行' },
 ];
 
 const getTableName = (list) => {
@@ -147,6 +163,194 @@ const getTableName = (list) => {
 };
 
 const normalizeTargetType = (value) => (value === 'existing' ? 'existing' : 'new');
+
+const parseWorkFetchRange = (value) => {
+  const range = value && typeof value === 'object' ? value : {};
+  const type = range.type === 'all' || range.type === 'days' ? range.type : 'pages';
+  return {
+    type,
+    pages: Math.max(1, Math.min(50, Number(range.pages ?? (type === 'pages' ? range.value : 1)) || 1)),
+    days: Math.max(1, Math.min(365, Number(range.days ?? (type === 'days' ? range.value : 30)) || 30)),
+    timezone: 'Asia/Shanghai',
+  };
+};
+
+const normalizeWorkFetchRange = (value) => {
+  const range = parseWorkFetchRange(value);
+  if (range.type === 'all') return { type: 'all', value: null, timezone: range.timezone };
+  return {
+    type: range.type,
+    value: range.type === 'days' ? range.days : range.pages,
+    timezone: range.timezone,
+  };
+};
+
+const getBaseId = async () => {
+  const selection = await bitable.base.getSelection();
+  return selection.baseId || '';
+};
+
+const getTableConfig = (tableId) => tableOutputConfigs.value[tableId] || {
+  write_mode: 'append', field_mappings: [], target_table_id: tableId,
+};
+
+const applyTableConfig = async (tableId, target = formData.value) => {
+  tableConfigApplying.value = true;
+  try {
+    const config = getTableConfig(tableId);
+    target.writeMode = config.write_mode || 'append';
+    if (target === formData.value) mappingDraft.value = Array.isArray(config.field_mappings) ? [...config.field_mappings] : [];
+    await loadTargetFieldOptions(tableId);
+    tableConfigSaveStatus.value = '';
+  } finally {
+    tableConfigApplying.value = false;
+  }
+};
+
+const loadTableOutputConfigs = async () => {
+  if (!props.api_key) return;
+  tableConfigLoading.value = true;
+  try {
+    const baseId = await getBaseId();
+    const response = await request({
+      url: TABLE_CONFIGS_API_PATH,
+      method: 'get',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId },
+    });
+    const data = unwrapApiData(response.data);
+    const list = Array.isArray(data) ? data : (data.list || data.items || []);
+    tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
+    if (formData.value.targetType === 'existing' && formData.value.targetTableId) {
+      await applyTableConfig(formData.value.targetTableId);
+    }
+  } catch (error) {
+    console.error('读取目标表配置失败:', error);
+    ElNotification({ message: error.message || '读取目标表配置失败', type: 'error', duration: 0 });
+  } finally {
+    tableConfigLoading.value = false;
+  }
+};
+
+const loadTargetFieldOptions = async (tableId) => {
+  if (!tableId) { tableFieldOptions.value = []; return; }
+  try {
+    const table = await bitable.base.getTableById(tableId);
+    const fields = await table.getFieldMetaList();
+    tableFieldOptions.value = fields.map(field => ({ id: field.id, name: field.name, type: field.type }));
+  } catch (error) {
+    tableFieldOptions.value = [];
+    console.error('读取目标表字段失败:', error);
+  }
+};
+
+const saveTableOutputConfig = async (outputConfig = null) => {
+  const targetTableId = outputConfig?.targetTableId || formData.value.targetTableId;
+  const targetType = outputConfig?.targetType || formData.value.targetType;
+  const writeMode = outputConfig?.writeMode || formData.value.writeMode;
+  const fieldMappings = outputConfig?.fieldMappings || mappingDraft.value;
+  if (normalizeTargetType(targetType) !== 'existing' || !targetTableId) return true;
+  if (tableConfigSaveTimer) {
+    clearTimeout(tableConfigSaveTimer);
+    tableConfigSaveTimer = null;
+  }
+  tableConfigSaving.value = true;
+  tableConfigDirty.value = false;
+  tableConfigSaveStatus.value = '保存中';
+  try {
+    const baseId = await getBaseId();
+    const config = {
+      plugin_type: TASK_PLUGIN_TYPE,
+      base_id: baseId,
+      target_table_id: targetTableId,
+      target_table_name: await getTableNameById(targetTableId),
+      write_mode: writeMode || 'append',
+      field_mappings: fieldMappings
+        .filter(item => item.source_key && item.target_field_id)
+        .map(item => ({
+          ...item,
+          source_name: PROFILE_FIELD_MAPPING.find(field => field.key === item.source_key)?.name || item.source_name || '',
+          target_field_name: tableFieldOptions.value.find(field => field.id === item.target_field_id)?.name || item.target_field_name || '',
+          target_field_type: tableFieldOptions.value.find(field => field.id === item.target_field_id)?.type ?? item.target_field_type,
+        })),
+    };
+    const response = await request({
+      url: TABLE_CONFIG_API_PATH,
+      method: 'put',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      data: config,
+    });
+    const saved = unwrapApiData(response.data);
+    tableOutputConfigs.value = { ...tableOutputConfigs.value, [config.target_table_id]: saved };
+    tableConfigSaveStatus.value = '已保存';
+    return true;
+  } catch (error) {
+    tableConfigSaveStatus.value = '保存失败';
+    throw error;
+  } finally {
+    tableConfigSaving.value = false;
+    if (tableConfigDirty.value) scheduleTableOutputConfigSave();
+  }
+};
+
+const applyTaskTableConfig = async (tableId) => {
+  if (normalizeTargetType(taskDialogForm.value.targetType) !== 'existing' || !tableId) {
+    taskDialogForm.value.writeMode = 'append';
+    mappingDraft.value = [];
+    tableFieldOptions.value = [];
+    return;
+  }
+
+  tableConfigApplying.value = true;
+  try {
+    const config = getTableConfig(tableId);
+    taskDialogForm.value.writeMode = config.write_mode || 'append';
+    mappingDraft.value = cloneFieldMappings(config.field_mappings || []);
+    await loadTargetFieldOptions(tableId);
+    tableConfigSaveStatus.value = '';
+  } finally {
+    tableConfigApplying.value = false;
+  }
+};
+
+const handleTaskTargetTypeChange = async () => {
+  if (normalizeTargetType(taskDialogForm.value.targetType) !== 'existing') {
+    taskDialogForm.value.targetTableId = '';
+    await applyTaskTableConfig('');
+    return;
+  }
+
+  if (table_options.value.length === 0) {
+    await loadTableOptions();
+  }
+  if (taskDialogForm.value.targetTableId) {
+    await applyTaskTableConfig(taskDialogForm.value.targetTableId);
+  }
+};
+
+const handleTaskTargetTableChange = async (tableId) => {
+  await applyTaskTableConfig(tableId);
+};
+
+const scheduleTableOutputConfigSave = () => {
+  if (taskDialogVisible.value || tableConfigApplying.value || normalizeTargetType(formData.value.targetType) !== 'existing'
+    || !formData.value.targetTableId) return;
+
+  const hasIncompleteMapping = mappingDraft.value.some(item => !item.source_key || !item.target_field_id);
+  tableConfigDirty.value = true;
+  tableConfigSaveStatus.value = hasIncompleteMapping ? '待完成映射后保存' : '未保存';
+  if (hasIncompleteMapping || tableConfigSaving.value) return;
+
+  if (tableConfigSaveTimer) clearTimeout(tableConfigSaveTimer);
+  tableConfigSaveTimer = setTimeout(async () => {
+    tableConfigSaveTimer = null;
+    try {
+      await saveTableOutputConfig();
+    } catch (error) {
+      console.error('保存输出表配置失败:', error);
+    }
+  }, 600);
+};
 
 const getRepeatTypeLabel = (value) => {
   const normalizedValue = value === 'once' ? 'none' : value;
@@ -215,8 +419,9 @@ const syncMainFormToTaskForm = () => {
     scope: formData.value.scope,
     rowCount: formData.value.rowCount,
     manualUrls: formData.value.manualUrls,
-    pages: formData.value.pages,
+    workFetchRange: { ...formData.value.workFetchRange },
     targetTableId: formData.value.targetTableId,
+    writeMode: formData.value.writeMode,
     selectedFieldKeys: [...selectedFieldKeys.value],
   };
 };
@@ -224,6 +429,49 @@ const syncMainFormToTaskForm = () => {
 const getActiveFieldConfigs = (keys = selectedFieldKeys.value) => PROFILE_FIELD_MAPPING.filter(field =>
   keys.includes(field.key)
 );
+
+const cloneFieldMappings = (mappings = []) => mappings.map(mapping => ({ ...mapping }));
+
+const allFieldKeys = PROFILE_FIELD_MAPPING.map(field => field.key);
+const isAllFieldsSelected = computed(() => allFieldKeys.every(key => selectedFieldKeys.value.includes(key)));
+const isFieldsPartiallySelected = computed(() =>
+  !isAllFieldsSelected.value && selectedFieldKeys.value.some(key => allFieldKeys.includes(key))
+);
+const mappingSourceFields = computed(() =>
+  PROFILE_FIELD_MAPPING.filter(field => selectedFieldKeys.value.includes(field.key))
+);
+const mappingStatus = computed(() => {
+  if (!formData.value.targetTableId) return '选择目标表格后可设置';
+  const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
+  return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
+});
+
+const isTaskAllFieldsSelected = computed(() =>
+  allFieldKeys.every(key => taskDialogForm.value.selectedFieldKeys.includes(key))
+);
+const isTaskFieldsPartiallySelected = computed(() =>
+  !isTaskAllFieldsSelected.value && taskDialogForm.value.selectedFieldKeys.some(key => allFieldKeys.includes(key))
+);
+const taskMappingSourceFields = computed(() =>
+  PROFILE_FIELD_MAPPING.filter(field => taskDialogForm.value.selectedFieldKeys.includes(field.key))
+);
+const taskMappingStatus = computed(() => {
+  if (!taskDialogForm.value.targetTableId) return '选择目标表格后可设置';
+  const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
+  return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
+});
+
+const toggleAllFields = (checked) => {
+  selectedFieldKeys.value = checked
+    ? [...allFieldKeys]
+    : PROFILE_FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+};
+
+const toggleAllTaskFields = (checked) => {
+  taskDialogForm.value.selectedFieldKeys = checked
+    ? [...allFieldKeys]
+    : PROFILE_FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+};
 
 const loadSelectedFieldKeys = async () => {
   const defaultKeys = getDefaultSelectedFieldKeys(PROFILE_FIELD_MAPPING);
@@ -366,6 +614,9 @@ const drainAvailablePosts = async (streamTask) => {
       streamTask.selectedFieldKeys,
       {
         stopAfterCurrentBatch: true,
+        fieldMappings: streamTask.fieldMappings,
+        writeMode: streamTask.writeMode,
+        upsertCacheKey: streamTask.taskId,
         onTargetTableReady: async (tableId) => {
           streamTask.targetTableId = tableId;
           await saveStreamTask(streamTask);
@@ -481,6 +732,8 @@ const startStreamTask = async (taskId, targetTableId = '', taskConfig = {}) => {
     cursor: '',
     targetTableId,
     selectedFieldKeys: [...(taskConfig.selectedFieldKeys || selectedFieldKeys.value)],
+    fieldMappings: cloneFieldMappings(taskConfig.fieldMappings || mappingDraft.value),
+    writeMode: taskConfig.writeMode || formData.value.writeMode || 'append',
     writtenCount: 0,
     lastProcessed: -1,
     lastHeartbeatAt: 0,
@@ -512,6 +765,10 @@ const resumeSavedStreamTask = async () => {
       selectedFieldKeys: Array.isArray(savedTask.selectedFieldKeys)
         ? savedTask.selectedFieldKeys
         : [...selectedFieldKeys.value],
+      fieldMappings: cloneFieldMappings(Array.isArray(savedTask.fieldMappings)
+        ? savedTask.fieldMappings
+        : mappingDraft.value),
+      writeMode: savedTask.writeMode || formData.value.writeMode || 'append',
       lastActivityAt: savedTask.lastActivityAt || Date.now(),
       pollInterval: savedTask.pollInterval || STREAM_ACTIVE_INTERVAL,
     };
@@ -523,7 +780,7 @@ const resumeSavedStreamTask = async () => {
   }
 };
 
-const postProfileTask = async (targetTableId = "", urlText = "") => {
+const postProfileTask = async (targetTableId = "", urlText = "", taskConfig = {}) => {
   try {
     const response = await request({
     url: "/social/api/v1/feishu/social/task",
@@ -531,14 +788,14 @@ const postProfileTask = async (targetTableId = "", urlText = "") => {
     headers: { 'authorization': `Bearer ${props.api_key}` },
     data: {
       url: urlText,
-      pages: Number(formData.value.pages),
+      work_fetch_range: normalizeWorkFetchRange(formData.value.workFetchRange),
     },
     });
     const data = unwrapApiData(response.data);
     if (!data.task_id) {
       throw new Error('创建采集任务失败，未返回任务 ID');
     }
-    await startStreamTask(data.task_id, targetTableId);
+    await startStreamTask(data.task_id, targetTableId, taskConfig);
   } catch (error) {
     loading.value = false;
     console.error('创建博主作品采集任务失败:', error);
@@ -838,7 +1095,7 @@ const buildTaskPayload = async () => {
   }
 
   if (config.mode === 'table' && config.scope === 'selected') {
-    ElNotification({ message: '定时任务不支持“执行选中行”，请改为“执行所有行”或“执行前N行”', type: 'warning', duration: 0 });
+    ElNotification({ message: '定时任务不支持“选中行”，请改为“所有行”或“前N行”', type: 'warning', duration: 0 });
     return null;
   }
 
@@ -891,7 +1148,7 @@ const buildTaskPayload = async () => {
     scope: config.scope,
     row_count: Number(config.rowCount) || 5,
     manual_urls: config.manualUrls || '',
-    pages: Number(config.pages),
+    work_fetch_range: normalizeWorkFetchRange(config.workFetchRange),
     selected_field_keys: [...config.selectedFieldKeys],
     output_fields: activeFieldConfigs.map(item => ({
       key: item.key,
@@ -933,7 +1190,11 @@ const submitProfileUrls = async (urlList, targetTableId = "") => {
   const urlText = urlList.join('\n');
 
   try {
-    await postProfileTask(targetTableId, urlText);
+    await saveTableOutputConfig();
+    await postProfileTask(targetTableId, urlText, {
+      fieldMappings: cloneFieldMappings(mappingDraft.value),
+      writeMode: formData.value.writeMode,
+    });
   } catch (error) {
     loading.value = false;
     throw error;
@@ -960,7 +1221,10 @@ const handleImmediateSubmit = async () => {
   }
 
   if (normalizeTargetType(formData.value.targetType) === 'existing') {
-    validateTableFields(formData.value.targetTableId, selectedFieldKeys.value).then(async isValid => {
+    validateTableFields(formData.value.targetTableId, selectedFieldKeys.value, {
+      fieldMappings: cloneFieldMappings(mappingDraft.value),
+      writeMode: formData.value.writeMode,
+    }).then(async isValid => {
       if (isValid) {
         await submitProfileUrls(urlList, formData.value.targetTableId);
       }
@@ -985,7 +1249,14 @@ const buildTaskSummary = (task) => {
   const snapshot = task.snapshot || {};
   const modeText = snapshot.mode === 'manual' ? '手动链接' : '表格字段';
   const targetText = snapshot.target_type === 'existing' ? '写入现有表' : '新建表格';
-  const pageText = typeof snapshot.pages === 'number' ? `抓取范围 ${snapshot.pages === 0 ? '全量获取' : `前${snapshot.pages}页`}` : '';
+  const range = snapshot.work_fetch_range;
+  const pageText = range?.type === 'days'
+    ? `作品范围 最近${range.value}天`
+    : range?.type === 'all'
+      ? '作品范围 全部作品'
+      : range?.value
+        ? `作品范围 最新${range.value}页`
+        : '';
   return [modeText, targetText, pageText].filter(Boolean).join(' · ');
 };
 
@@ -1082,8 +1353,9 @@ const copyCurrentFormToTaskDialog = async () => {
     scope: formData.value.scope,
     rowCount: formData.value.rowCount,
     manualUrls: formData.value.manualUrls,
-    pages: formData.value.pages,
+    workFetchRange: { ...formData.value.workFetchRange },
     targetTableId: formData.value.targetTableId,
+    writeMode: formData.value.writeMode,
     selectedFieldKeys: [...selectedFieldKeys.value],
   };
 
@@ -1156,7 +1428,9 @@ const openEditTaskDialog = async (task) => {
     scope: snapshot.scope || 'n',
     rowCount: snapshot.row_count || 5,
     manualUrls: snapshot.manual_urls || '',
-    pages: typeof snapshot.pages === 'number' ? snapshot.pages : 1,
+    workFetchRange: parseWorkFetchRange(snapshot.work_fetch_range || (typeof snapshot.pages === 'number'
+      ? { type: snapshot.pages === 0 ? 'all' : 'pages', value: snapshot.pages }
+      : null)),
     targetTableId: snapshot.target_table_id || '',
     selectedFieldKeys: Array.isArray(snapshot.selected_field_keys) && snapshot.selected_field_keys.length > 0
       ? snapshot.selected_field_keys
@@ -1180,6 +1454,10 @@ const openEditTaskDialog = async (task) => {
     name: snapshot.target_table_name || snapshot.resolved_target_table_name || '原目标表',
   });
 
+  if (taskDialogForm.value.targetType === 'existing' && taskDialogForm.value.targetTableId) {
+    await applyTaskTableConfig(taskDialogForm.value.targetTableId);
+  }
+
   taskDialogVisible.value = true;
 };
 
@@ -1187,6 +1465,20 @@ const saveTask = async () => {
   taskDialogLoading.value = true;
 
   try {
+    if (normalizeTargetType(taskDialogForm.value.targetType) === 'existing') {
+      const hasIncompleteMapping = mappingDraft.value.some(item => !item.source_key || !item.target_field_id);
+      if (hasIncompleteMapping) {
+        ElNotification({ message: '请完成字段映射后再保存任务', type: 'warning', duration: 0 });
+        return;
+      }
+      await saveTableOutputConfig({
+        targetType: taskDialogForm.value.targetType,
+        targetTableId: taskDialogForm.value.targetTableId,
+        writeMode: taskDialogForm.value.writeMode,
+        fieldMappings: mappingDraft.value,
+      });
+    }
+
     const payload = await buildTaskPayload();
     if (!payload) {
       return;
@@ -1306,6 +1598,7 @@ onMounted(async () => {
   await Promise.all([
     loadSelectedFieldKeys(),
     loadTaskList(),
+    loadTableOutputConfigs(),
   ]);
   fieldSelectionReady.value = true;
   await resumeSavedStreamTask();
@@ -1313,6 +1606,11 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopStreamTask();
+  if (tableConfigSaveTimer) {
+    clearTimeout(tableConfigSaveTimer);
+    tableConfigSaveTimer = null;
+    void saveTableOutputConfig();
+  }
   if (toastTimer) {
     clearTimeout(toastTimer);
   }
@@ -1336,7 +1634,7 @@ watch(selectedFieldKeys, (keys) => {
 
 watch(
   () => formData.value.targetType,
-  (targetType) => {
+  async (targetType) => {
     if (normalizeTargetType(targetType) === 'existing' && table_options.value.length === 0) {
       loadTableOptions();
       return;
@@ -1344,6 +1642,8 @@ watch(
 
     if (normalizeTargetType(targetType) !== 'existing') {
       formData.value.targetTableId = '';
+      formData.value.writeMode = 'append';
+      mappingDraft.value = [];
     }
 
     if (formData.value.executionMode === 'schedule') {
@@ -1353,12 +1653,27 @@ watch(
 );
 
 watch(
+  () => formData.value.targetTableId,
+  async (tableId) => {
+    if (formData.value.targetType === 'existing' && tableId) {
+      await applyTableConfig(tableId);
+    }
+  }
+);
+
+watch(
+  [() => formData.value.writeMode, mappingDraft],
+  () => scheduleTableOutputConfigSave(),
+  { deep: true }
+);
+
+watch(
   () => [
     formData.value.profileLinkFieldId,
     formData.value.scope,
     formData.value.rowCount,
     formData.value.manualUrls,
-    formData.value.pages,
+    formData.value.workFetchRange,
     formData.value.targetTableId,
     formData.value.executionMode,
   ],
@@ -1381,11 +1696,18 @@ watch(
 
 watch(
   () => taskDialogVisible.value,
-  (visible) => {
+  async (visible) => {
     if (!visible) {
       taskDialogForm.value = getDefaultTaskDialogForm();
       taskDialogMode.value = 'create';
       editingTaskId.value = null;
+      taskMappingExpanded.value = false;
+      if (formData.value.targetType === 'existing' && formData.value.targetTableId) {
+        await applyTableConfig(formData.value.targetTableId);
+      } else {
+        mappingDraft.value = [];
+        tableFieldOptions.value = [];
+      }
     }
   }
 );
@@ -1411,48 +1733,20 @@ watch(
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
       </span>
-      <span class="sub-page-title">博主作品获取</span>
+      <span class="sub-page-title">获取作者作品</span>
     </div>
     <div class="form-card">
-      <div class="mode-switch">
-        <button
-          type="button"
-          class="mode-tab"
-          :class="{ active: formData.mode === 'table' }"
-          @click="formData.mode = 'table'"
-        >
-          从表格选取
-        </button>
-        <button
-          type="button"
-          class="mode-tab"
-          :class="{ active: formData.mode === 'manual' }"
-          @click="formData.mode = 'manual'"
-        >
-          手动输入
-        </button>
-      </div>
+      <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
+      <div class="group-label">作者主页链接来源</div>
+      <el-radio-group v-model="formData.mode" class="source-mode-radio radio-block">
+        <el-radio value="table">从表格选取</el-radio>
+        <el-radio value="manual">手动输入</el-radio>
+      </el-radio-group>
       <el-form ref="form" class="form" :model="formData" label-position="top">
-        <el-form-item label="" style="margin-top: 12px">
-          <div class="field-stack">
-            <div class="c-label">目标表格</div>
-            <el-radio-group v-model="formData.targetType" class="radio-block">
-              <el-radio value="new">新建表格</el-radio>
-              <el-radio value="existing">使用现有表格</el-radio>
-            </el-radio-group>
-          </div>
-        </el-form-item>
-        <el-form-item v-if="formData.targetType === 'existing'" label="">
-          <div slot="label" class="c-label">选择现有表格</div>
-          <el-select v-model="formData.targetTableId" placeholder="请选择" style="width: 100%">
-            <el-option v-for="tl in table_options" :key="tl.id" :label="tl.name" :value="tl.id" />
-          </el-select>
-        </el-form-item>
-
         <template v-if="formData.mode === 'table'">
           <el-form-item>
             <div slot="label" class="c-label">
-              博主主页链接
+              作者主页链接所在字段
               <el-tooltip effect="dark" placement="top">
                 <template #content>仅支持博主主页链接，<br />不支持其他链接</template>
                 <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
@@ -1470,7 +1764,7 @@ watch(
 
           <el-form-item label="">
             <div slot="label" class="c-label">
-              数据范围
+              输入行范围
               <el-tooltip effect="dark" placement="top">
                 <template #content>选择要执行的数据范围</template>
                 <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
@@ -1479,7 +1773,7 @@ watch(
             </div>
             <el-radio-group v-model="formData.scope" class="custom-radio-group">
               <el-radio v-for="option in scopeOptions" :key="option.value" :value="option.value" class="custom-radio-item">
-                <span class="radio-label-text">{{ option.label }}</span>
+                <span class="radio-label-text">{{ option.value === 'n' ? '前' : option.label }}</span>
                 <div v-if="option.value === 'n'" class="custom-stepper-input">
                   <input
                     type="number"
@@ -1504,6 +1798,7 @@ watch(
                     ></button>
                   </div>
                 </div>
+                <span v-if="option.value === 'n'" class="range-unit">行</span>
               </el-radio>
             </el-radio-group>
           </el-form-item>
@@ -1512,7 +1807,7 @@ watch(
         <template v-else>
           <el-form-item>
             <div slot="label" class="c-label">
-              博主主页链接
+              作者主页链接
               <el-tooltip effect="dark" placement="top">
                 <template #content>仅支持博主主页链接，<br />不支持其他链接</template>
                 <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
@@ -1524,34 +1819,125 @@ watch(
         </template>
 
         <el-form-item label="">
-          <div slot="label" class="c-label">
-            数据提取范围
-            <el-tooltip effect="dark" placement="top">
-              <template #content>每页 10 积分，实际扣费会按照<br />提取的页数进行计算</template>
-              <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
-                class="help-icon" />
-            </el-tooltip>
+          <div slot="label" class="c-label">作品获取范围</div>
+          <el-radio-group v-model="formData.workFetchRange.type" class="custom-radio-group">
+            <el-radio v-for="item in workRangeTypes" :key="item.value" :value="item.value" class="custom-radio-item">
+              <span class="radio-label-text">{{ item.label }}</span>
+              <div v-if="item.value === 'pages'" class="custom-stepper-input range-stepper" :class="{ 'is-disabled': formData.workFetchRange.type !== 'pages' }">
+                <input v-model.number="formData.workFetchRange.pages" type="number" min="1" max="50" :disabled="formData.workFetchRange.type !== 'pages'" @click.stop />
+                <div class="stepper-buttons">
+                  <button type="button" class="stepper-btn stepper-btn-up" :disabled="formData.workFetchRange.type !== 'pages'" @click.stop="formData.workFetchRange.pages = Math.min(50, (formData.workFetchRange.pages || 1) + 1)"></button>
+                  <button type="button" class="stepper-btn stepper-btn-down" :disabled="formData.workFetchRange.type !== 'pages'" @click.stop="formData.workFetchRange.pages = Math.max(1, (formData.workFetchRange.pages || 1) - 1)"></button>
+                </div>
+              </div>
+              <span v-if="item.value === 'pages'" class="range-unit">页</span>
+              <div v-if="item.value === 'days'" class="custom-stepper-input range-stepper" :class="{ 'is-disabled': formData.workFetchRange.type !== 'days' }">
+                <input v-model.number="formData.workFetchRange.days" type="number" min="1" max="365" :disabled="formData.workFetchRange.type !== 'days'" @click.stop />
+                <div class="stepper-buttons">
+                  <button type="button" class="stepper-btn stepper-btn-up" :disabled="formData.workFetchRange.type !== 'days'" @click.stop="formData.workFetchRange.days = Math.min(365, (formData.workFetchRange.days || 1) + 1)"></button>
+                  <button type="button" class="stepper-btn stepper-btn-down" :disabled="formData.workFetchRange.type !== 'days'" @click.stop="formData.workFetchRange.days = Math.max(1, (formData.workFetchRange.days || 1) - 1)"></button>
+                </div>
+              </div>
+              <span v-if="item.value === 'days'" class="range-unit">个自然日发布的作品</span>
+            </el-radio>
+          </el-radio-group>
+        </el-form-item>
+
+        <div class="section-heading output-heading"><span class="section-step">2</span><span>输出设置</span></div>
+        <el-form-item label="">
+          <div class="field-stack">
+            <div class="c-label">输出到表格</div>
+            <el-radio-group v-model="formData.targetType" class="radio-block">
+              <el-radio value="new">新建表格</el-radio>
+              <el-radio value="existing">使用现有表格</el-radio>
+            </el-radio-group>
           </div>
-          <el-select v-model="formData.pages" placeholder="请选择" style="width: 100%">
-            <el-option v-for="tl in pages_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+        </el-form-item>
+        <el-form-item v-if="formData.targetType === 'existing'" label="">
+          <div slot="label" class="c-label">选择现有表格</div>
+          <el-select v-model="formData.targetTableId" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in table_options" :key="tl.id" :label="tl.name" :value="tl.id" />
           </el-select>
         </el-form-item>
 
         <el-form-item label="" style="margin-top: 12px">
-          <div slot="label" class="c-label">选择需要的字段</div>
-          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
-            <el-checkbox
-              v-for="field in PROFILE_FIELD_MAPPING"
-              :key="field.key"
-              :label="field.key"
-              :value="field.key"
-              :disabled="field.required"
-              class="field-checkbox-item"
-            >
-              {{ field.name }}
-            </el-checkbox>
-          </el-checkbox-group>
+          <div class="c-label">数据写入方式</div>
+          <el-radio-group v-model="formData.writeMode" class="radio-block">
+            <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
+              {{ item.label }}
+              <el-tooltip v-if="item.value === 'upsert'" effect="dark" placement="top">
+                <template #content>按作品ID判断是否为同一作品；已存在则更新，不存在则新增。</template>
+                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
+              </el-tooltip>
+            </el-radio>
+          </el-radio-group>
         </el-form-item>
+
+        <el-form-item label="" style="margin-top: 12px">
+          <div class="field-selection-content">
+            <div class="field-selection-title">
+              <div slot="label" class="c-label">输出字段</div>
+            </div>
+            <el-checkbox
+              :model-value="isAllFieldsSelected"
+              :indeterminate="isFieldsPartiallySelected"
+              class="select-all-fields"
+              @change="toggleAllFields"
+            >
+              全选
+            </el-checkbox>
+            <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+              <el-checkbox
+                v-for="field in PROFILE_FIELD_MAPPING"
+                :key="field.key"
+                :label="field.key"
+                :value="field.key"
+                :disabled="field.required"
+                class="field-checkbox-item"
+              >
+                {{ field.name }}
+              </el-checkbox>
+            </el-checkbox-group>
+          </div>
+        </el-form-item>
+
+        <div v-if="formData.targetType === 'existing'" class="mapping-accordion">
+          <button
+            type="button"
+            class="mapping-accordion-trigger"
+            :aria-expanded="mappingExpanded"
+            @click="mappingExpanded = !mappingExpanded"
+          >
+            <span class="mapping-accordion-label">
+              字段映射 <span class="mapping-optional">（可选）</span>
+              <span class="mapping-status">{{ mappingStatus }}</span>
+            </span>
+            <span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }" aria-hidden="true"></span>
+          </button>
+          <div v-show="mappingExpanded" class="mapping-accordion-panel">
+            <div v-if="tableConfigLoading" class="sub-hint">正在加载表格配置...</div>
+            <template v-else-if="formData.targetTableId">
+              <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
+              <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
+                <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+                  <el-option v-for="field in mappingSourceFields" :key="field.key" :label="field.name" :value="field.key" />
+                </el-select>
+                <span class="mapping-arrow">→</span>
+                <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+                  <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+                </el-select>
+                <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+              </div>
+              <div class="mapping-actions">
+                <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
+                <span v-if="tableConfigSaveStatus" class="mapping-save-status" :class="{ 'is-error': tableConfigSaveStatus === '保存失败' }">
+                  {{ tableConfigSaving ? '保存中' : tableConfigSaveStatus }}
+                </span>
+              </div>
+            </template>
+            <p v-else class="mapping-empty">选择目标表格后配置字段映射</p>
+          </div>
+        </div>
 
         <el-form-item label="" style="margin-top: 12px">
           <div class="c-label">执行方式</div>
@@ -1740,44 +2126,19 @@ watch(
     >
       <div class="task-dialog-scroll">
         <div class="task-dialog-section task-dialog-card">
-          <div class="mode-switch dialog-mode-switch">
-            <button
-              type="button"
-              class="mode-tab"
-              :class="{ active: taskDialogForm.mode === 'table' }"
-              @click="taskDialogForm.mode = 'table'"
-            >
-              从表格选取
-            </button>
-            <button
-              type="button"
-              class="mode-tab"
-              :class="{ active: taskDialogForm.mode === 'manual' }"
-              @click="taskDialogForm.mode = 'manual'"
-            >
-              手动输入
-            </button>
-          </div>
-
+          <div class="section-heading dialog-section-heading"><span class="section-step">1</span><span>获取设置</span></div>
           <el-form label-position="top">
-            <el-form-item>
-              <div class="c-label">目标表格</div>
-              <el-radio-group v-model="taskDialogForm.targetType" class="radio-block">
-                <el-radio value="new">新建表格</el-radio>
-                <el-radio value="existing">使用现有表格</el-radio>
-              </el-radio-group>
-            </el-form-item>
-
-            <el-form-item v-if="taskDialogForm.targetType === 'existing'">
-              <div class="c-label">选择现有表格</div>
-              <el-select v-model="taskDialogForm.targetTableId" placeholder="请选择" style="width: 100%">
-                <el-option v-for="table in table_options" :key="table.id" :label="table.name" :value="table.id" />
-              </el-select>
-            </el-form-item>
-
             <template v-if="taskDialogForm.mode === 'table'">
               <el-form-item>
-                <div class="c-label">博主主页链接字段</div>
+                <div class="c-label">作者主页链接来源</div>
+                <el-radio-group v-model="taskDialogForm.mode" class="radio-block">
+                  <el-radio value="table">从表格选取</el-radio>
+                  <el-radio value="manual">手动输入</el-radio>
+                </el-radio-group>
+              </el-form-item>
+
+              <el-form-item>
+                <div class="c-label">作者主页链接所在字段</div>
                 <el-select v-model="taskDialogForm.profileLinkFieldId" placeholder="请选择字段" style="width: 100%">
                   <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
                 </el-select>
@@ -1785,11 +2146,11 @@ watch(
               </el-form-item>
 
               <el-form-item>
-                <div class="c-label">数据范围</div>
+                <div class="c-label">输入行范围</div>
                 <el-radio-group v-model="taskDialogForm.scope" class="custom-radio-group">
-                  <el-radio value="all" class="custom-radio-item">执行所有行</el-radio>
+                  <el-radio value="all" class="custom-radio-item">所有行</el-radio>
                   <el-radio value="n" class="custom-radio-item">
-                    <span class="radio-label-text">执行前N行</span>
+                    <span class="radio-label-text">前</span>
                     <div class="custom-stepper-input">
                       <input
                         type="number"
@@ -1814,15 +2175,24 @@ watch(
                         ></button>
                       </div>
                     </div>
+                    <span class="range-unit">行</span>
                   </el-radio>
                 </el-radio-group>
-                <div class="sub-hint warning-text">定时任务不支持“执行选中行”。</div>
+                <div class="sub-hint warning-text">定时任务不支持“选中行”。</div>
               </el-form-item>
             </template>
 
             <template v-else>
               <el-form-item>
-                <div class="c-label">博主主页链接</div>
+                <div class="c-label">作者主页链接来源</div>
+                <el-radio-group v-model="taskDialogForm.mode" class="radio-block">
+                  <el-radio value="table">从表格选取</el-radio>
+                  <el-radio value="manual">手动输入</el-radio>
+                </el-radio-group>
+              </el-form-item>
+
+              <el-form-item>
+                <div class="c-label">作者主页链接</div>
                 <el-input
                   v-model="taskDialogForm.manualUrls"
                   type="textarea"
@@ -1833,14 +2203,68 @@ watch(
             </template>
 
             <el-form-item>
-              <div class="c-label">数据提取范围</div>
-              <el-select v-model="taskDialogForm.pages" placeholder="请选择" style="width: 100%">
-                <el-option v-for="tl in pages_options" :key="tl.value" :label="tl.label" :value="tl.value" />
+              <div class="c-label">作品获取范围</div>
+              <el-radio-group v-model="taskDialogForm.workFetchRange.type" class="custom-radio-group">
+                <el-radio v-for="item in workRangeTypes" :key="item.value" :value="item.value" class="custom-radio-item">
+                  <span class="radio-label-text">{{ item.label }}</span>
+                  <div v-if="item.value === 'pages'" class="custom-stepper-input range-stepper" :class="{ 'is-disabled': taskDialogForm.workFetchRange.type !== 'pages' }">
+                    <input v-model.number="taskDialogForm.workFetchRange.pages" type="number" min="1" max="50" :disabled="taskDialogForm.workFetchRange.type !== 'pages'" @click.stop />
+                    <div class="stepper-buttons">
+                      <button type="button" class="stepper-btn stepper-btn-up" :disabled="taskDialogForm.workFetchRange.type !== 'pages'" @click.stop="taskDialogForm.workFetchRange.pages = Math.min(50, (taskDialogForm.workFetchRange.pages || 1) + 1)"></button>
+                      <button type="button" class="stepper-btn stepper-btn-down" :disabled="taskDialogForm.workFetchRange.type !== 'pages'" @click.stop="taskDialogForm.workFetchRange.pages = Math.max(1, (taskDialogForm.workFetchRange.pages || 1) - 1)"></button>
+                    </div>
+                  </div>
+                  <span v-if="item.value === 'pages'" class="range-unit">页</span>
+                  <div v-if="item.value === 'days'" class="custom-stepper-input range-stepper" :class="{ 'is-disabled': taskDialogForm.workFetchRange.type !== 'days' }">
+                    <input v-model.number="taskDialogForm.workFetchRange.days" type="number" min="1" max="365" :disabled="taskDialogForm.workFetchRange.type !== 'days'" @click.stop />
+                    <div class="stepper-buttons">
+                      <button type="button" class="stepper-btn stepper-btn-up" :disabled="taskDialogForm.workFetchRange.type !== 'days'" @click.stop="taskDialogForm.workFetchRange.days = Math.min(365, (taskDialogForm.workFetchRange.days || 1) + 1)"></button>
+                      <button type="button" class="stepper-btn stepper-btn-down" :disabled="taskDialogForm.workFetchRange.type !== 'days'" @click.stop="taskDialogForm.workFetchRange.days = Math.max(1, (taskDialogForm.workFetchRange.days || 1) - 1)"></button>
+                    </div>
+                  </div>
+                  <span v-if="item.value === 'days'" class="range-unit">个自然日发布的作品</span>
+                </el-radio>
+              </el-radio-group>
+            </el-form-item>
+
+            <div class="section-heading output-heading dialog-section-heading"><span class="section-step">2</span><span>输出设置</span></div>
+            <el-form-item>
+              <div class="c-label">输出到表格</div>
+              <el-radio-group v-model="taskDialogForm.targetType" class="radio-block" @change="handleTaskTargetTypeChange">
+                <el-radio value="new">新建表格</el-radio>
+                <el-radio value="existing">使用现有表格</el-radio>
+              </el-radio-group>
+            </el-form-item>
+
+            <el-form-item v-if="taskDialogForm.targetType === 'existing'">
+              <div class="c-label">选择现有表格</div>
+              <el-select v-model="taskDialogForm.targetTableId" placeholder="请选择" style="width: 100%" @change="handleTaskTargetTableChange">
+                <el-option v-for="table in table_options" :key="table.id" :label="table.name" :value="table.id" />
               </el-select>
             </el-form-item>
 
             <el-form-item>
-              <div class="c-label">选择需要的字段</div>
+              <div class="c-label">数据写入方式</div>
+              <el-radio-group v-model="taskDialogForm.writeMode" class="radio-block">
+                <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
+                  {{ item.label }}
+                  <el-tooltip v-if="item.value === 'upsert'" effect="dark" placement="top">
+                    <template #content>按作品ID判断是否为同一作品；已存在则更新，不存在则新增。</template>
+                    <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
+                  </el-tooltip>
+                </el-radio>
+              </el-radio-group>
+            </el-form-item>
+
+            <el-form-item>
+              <div class="field-selection-content">
+                <div class="field-selection-title"><div class="c-label">输出字段</div></div>
+                <el-checkbox
+                  :model-value="isTaskAllFieldsSelected"
+                  :indeterminate="isTaskFieldsPartiallySelected"
+                  class="select-all-fields"
+                  @change="toggleAllTaskFields"
+                >全选</el-checkbox>
               <el-checkbox-group v-model="taskDialogForm.selectedFieldKeys" class="field-checkbox-group">
                 <el-checkbox
                   v-for="field in PROFILE_FIELD_MAPPING"
@@ -1853,7 +2277,37 @@ watch(
                   {{ field.name }}
                 </el-checkbox>
               </el-checkbox-group>
+              </div>
             </el-form-item>
+
+            <div v-if="taskDialogForm.targetType === 'existing'" class="mapping-accordion dialog-mapping-accordion">
+              <button type="button" class="mapping-accordion-trigger" :aria-expanded="taskMappingExpanded" @click="taskMappingExpanded = !taskMappingExpanded">
+                <span class="mapping-accordion-label">
+                  字段映射 <span class="mapping-optional">（可选）</span>
+                  <span class="mapping-status">{{ taskMappingStatus }}</span>
+                </span>
+                <span class="mapping-chevron" :class="{ 'is-expanded': taskMappingExpanded }" aria-hidden="true"></span>
+              </button>
+              <div v-show="taskMappingExpanded" class="mapping-accordion-panel">
+                <template v-if="taskDialogForm.targetTableId">
+                  <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
+                  <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
+                    <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+                      <el-option v-for="field in taskMappingSourceFields" :key="field.key" :label="field.name" :value="field.key" />
+                    </el-select>
+                    <span class="mapping-arrow">→</span>
+                    <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+                      <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+                    </el-select>
+                    <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+                  </div>
+                  <div class="mapping-actions">
+                    <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
+                  </div>
+                </template>
+                <p v-else class="mapping-empty">选择目标表格后配置字段映射</p>
+              </div>
+            </div>
           </el-form>
         </div>
 
@@ -1995,17 +2449,18 @@ watch(
 <style scoped>
 .sub-page {
   min-height: 100vh;
-  background: #fffcfc;
+  background: #F2F3F5;
+  color: #1D2129;
 }
 .sub-page-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 8px;
   align-items: center;
-  padding: 12px 16px;
+  min-height: 48px;
+  padding: 0 8px;
   background: #FFFFFF;
-  border-bottom: 1px solid #E5E6EB;
-  position: sticky;
-  top: 0;
-  z-index: 100;
+  border-bottom: 1px solid #F0F1F3;
 }
 .sub-page-back {
   width: 20px;
@@ -2016,7 +2471,7 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-right: 12px;
+  margin-right: 0;
 }
 .sub-page-back:hover { color: #A8071A; }
 .sub-page-back svg {
@@ -2027,7 +2482,8 @@ watch(
   stroke-linejoin: round;
 }
 .sub-page-title {
-  font-size: 15px;
+  overflow: hidden;
+  font-size: 18px;
   font-weight: 600;
   color: #1D2129;
   line-height: 24px;
@@ -2036,31 +2492,54 @@ watch(
   margin: 16px;
   padding: 20px;
   background: #FFFFFF;
-  border: 1px solid #E5E6EB;
+  border: 0;
   border-radius: 8px;
   box-sizing: border-box;
 }
 .mode-switch {
   display: flex;
-  gap: 0;
-  margin-bottom: 20px;
-  background: #F7F8FA;
-  border-radius: 6px;
-  padding: 3px;
-  border: 1px solid #E5E6EB;
+  gap: 20px;
+  margin: 0 0 16px;
+  background: transparent;
+  border-radius: 0;
+  padding: 0 0 12px;
+  border-bottom: 1px solid #F0F1F3;
+}
+.source-mode-radio {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #F0F1F3;
+}
+.source-mode-radio :deep(.el-radio) {
+  margin-right: 0;
+}
+.source-mode-radio :deep(.el-radio__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  font-size: 14px;
+}
+.source-mode-radio :deep(.el-radio__input.is-checked .el-radio__inner) {
+  border-color: #A8071A;
+  background: #A8071A;
+}
+.source-mode-radio :deep(.el-radio__input.is-checked + .el-radio__label) {
+  color: #1D2129;
 }
 .mode-tab {
-  flex: 1;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 8px 0;
+  padding: 0 0 8px;
   font-size: 13px;
   font-weight: 500;
   color: #4E5969;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: 0;
   cursor: pointer;
   transition: all 0.2s ease;
   line-height: 20px;
@@ -2069,9 +2548,41 @@ watch(
   color: #1D2129;
 }
 .mode-tab.active {
-  background: #FFFFFF;
   color: #A8071A;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  box-shadow: inset 0 -2px 0 #A8071A;
+}
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  color: #1D2129;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 22px;
+}
+.group-label {
+  margin-bottom: 8px;
+  color: #4E5969;
+  font-size: 14px;
+  line-height: 20px;
+}
+.section-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: #A8071A;
+  background: #FFF1F2;
+  font-size: 12px;
+  font-weight: 600;
+}
+.output-heading {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #F0F1F3;
 }
 .form :deep(.el-form-item__label) {
   font-size: 14px;
@@ -2080,6 +2591,22 @@ watch(
 }
 .form :deep(.el-form-item__content) {
   font-size: 14px;
+}
+.form :deep(.el-form-item) {
+  margin-bottom: 16px;
+}
+.form :deep(.el-input__wrapper),
+.form :deep(.el-select__wrapper),
+.form :deep(.el-textarea__inner) {
+  min-height: 36px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px #E5E6EB inset;
+}
+.form :deep(.el-input-number) {
+  height: 32px;
+}
+.form :deep(.el-input-number .el-input__wrapper) {
+  min-height: 32px;
 }
 .commit-btn {
   background: #A8071A;
@@ -2136,7 +2663,7 @@ watch(
 .custom-radio-group {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   width: 100%;
 }
 
@@ -2186,7 +2713,13 @@ watch(
 }
 
 .radio-label-text {
-  flex-shrink: 0;
+  flex: 0 0 84px;
+  width: 84px;
+}
+
+.custom-radio-group .custom-stepper-input,
+.custom-radio-group .range-stepper {
+  margin-left: 8px;
 }
 
 .custom-stepper-input {
@@ -2200,6 +2733,22 @@ watch(
   border-radius: 6px;
   overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
+}
+.range-stepper {
+  margin-left: auto;
+}
+.range-stepper.is-disabled {
+  background: #F2F3F5;
+  border-color: #E5E6EB;
+}
+.range-stepper.is-disabled input {
+  color: #86909C;
+}
+.range-unit {
+  margin-left: 8px;
+  color: #4E5969;
+  font-size: 14px;
+  white-space: nowrap;
 }
 
 .custom-stepper-input:hover {
@@ -2299,11 +2848,29 @@ watch(
   opacity: 0.4;
 }
 
+.field-selection-content {
+  display: block;
+  width: 100%;
+}
+
 .field-checkbox-group {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 16px;
+  gap: 8px 12px;
   width: 100%;
+}
+
+.field-selection-title {
+  margin-bottom: 10px;
+}
+
+.field-selection-title .c-label {
+  margin-bottom: 0;
+}
+
+.select-all-fields {
+  margin-right: 0;
+  margin-bottom: 10px;
 }
 
 .field-checkbox-item {
@@ -2358,6 +2925,95 @@ watch(
   margin-top: 12px;
   padding-top: 16px;
   border-top: 1px solid #E5E6EB;
+}
+.mapping-accordion {
+  margin: 4px 0 16px;
+  border-top: 1px solid #F0F1F3;
+  border-bottom: 1px solid #F0F1F3;
+}
+.mapping-accordion-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 0;
+  color: #1D2129;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.mapping-accordion-label {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+.mapping-optional,
+.mapping-status {
+  color: #86909C;
+  font-size: 12px;
+  font-weight: 400;
+}
+.mapping-chevron {
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border-right: 1.5px solid #86909C;
+  border-bottom: 1.5px solid #86909C;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 0.2s ease;
+}
+.mapping-chevron.is-expanded {
+  transform: rotate(225deg) translateY(-2px);
+}
+.mapping-accordion-panel {
+  padding: 0 0 12px;
+}
+.mapping-note,
+.mapping-empty {
+  margin: 0 0 10px;
+  color: #86909C;
+  font-size: 12px;
+  line-height: 18px;
+}
+.mapping-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr) auto;
+  gap: 4px;
+  align-items: center;
+  min-height: 44px;
+  border-top: 1px solid #F0F1F3;
+}
+.mapping-arrow {
+  color: #86909C;
+  text-align: center;
+}
+.mapping-delete {
+  min-width: 28px;
+  padding: 4px;
+}
+.mapping-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+.mapping-actions :deep(.el-button) {
+  margin-left: 0;
+}
+.mapping-save-status {
+  color: #86909C;
+  font-size: 12px;
+  line-height: 20px;
+}
+.mapping-save-status.is-error {
+  color: #F53F3F;
 }
 
 .task-dialog-title {
@@ -2608,6 +3264,30 @@ watch(
 
 .task-dialog-card {
   padding: 2px;
+}
+
+.dialog-section-heading {
+  margin-top: 2px;
+}
+
+.task-dialog-card :deep(.el-form-item) {
+  margin-bottom: 16px;
+}
+
+.task-dialog-card :deep(.el-radio) {
+  margin-right: 20px;
+}
+
+.task-dialog-card :deep(.el-radio:last-child) {
+  margin-right: 0;
+}
+
+.task-dialog-card :deep(.custom-radio-group .el-radio) {
+  margin-right: 0;
+}
+
+.dialog-mapping-accordion {
+  margin-top: -4px;
 }
 
 .dialog-mode-switch {
