@@ -157,7 +157,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <path d="M16 11l2 2 4-4"></path>
             </svg>
           </div>
-          <span class="func-name">博主信息获取</span>
+          <span class="func-name">获取作者信息</span>
         </div>
         <div class="arco-card" @click="currentPage = 'profile'">
           <div class="func-icon">
@@ -295,7 +295,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   <!-- 二级页面：作品详情获取 -->
   <VideoDataFetch v-if="currentPage === 'video'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：博主信息获取 -->
+  <!-- 二级页面：获取作者信息 -->
   <BloggerInfoFetch v-if="currentPage === 'blogger'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：提取视频文案 -->
