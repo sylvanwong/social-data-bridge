@@ -1755,7 +1755,7 @@ watch(
             </div>
             <el-select
               v-model="formData.profileLinkFieldId"
-              placeholder="选择包含博主主页链接的字段"
+              placeholder="选择字段"
               style="width: 100%"
             >
               <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
@@ -1860,7 +1860,7 @@ watch(
           </el-select>
         </el-form-item>
 
-        <el-form-item label="" style="margin-top: 12px">
+        <el-form-item v-if="formData.targetType === 'existing'" label="" style="margin-top: 12px">
           <div class="c-label">数据写入方式</div>
           <el-radio-group v-model="formData.writeMode" class="radio-block">
             <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
@@ -2001,7 +2001,7 @@ watch(
           </el-form-item>
 
           <div class="schedule-field-row">
-            <el-form-item>
+            <el-form-item v-if="taskDialogForm.targetType === 'existing'">
               <div class="c-label">重复类型</div>
               <el-select v-model="taskDialogForm.repeatType" style="width: 100%">
                 <el-option v-for="item in REPEAT_TYPE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
@@ -2243,7 +2243,7 @@ watch(
               </el-select>
             </el-form-item>
 
-            <el-form-item>
+            <el-form-item v-if="taskDialogForm.targetType === 'existing'">
               <div class="c-label">数据写入方式</div>
               <el-radio-group v-model="taskDialogForm.writeMode" class="radio-block">
                 <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
@@ -2663,7 +2663,7 @@ watch(
 .custom-radio-group {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   width: 100%;
 }
 
@@ -2713,8 +2713,7 @@ watch(
 }
 
 .radio-label-text {
-  flex: 0 0 84px;
-  width: 84px;
+  flex-shrink: 0;
 }
 
 .custom-radio-group .custom-stepper-input,
