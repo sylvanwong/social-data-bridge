@@ -1816,7 +1816,7 @@ watch(
             </div>
             <el-select
               v-model="formData.profileLinkFieldId"
-              placeholder="选择包含作者主页链接的字段"
+              placeholder="选择字段"
               style="width: 100%"
             >
               <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
@@ -1901,7 +1901,7 @@ watch(
           </el-select>
         </el-form-item>
 
-        <el-form-item v-if="formData.mode === 'manual'" label="" style="margin-top: 12px">
+        <el-form-item v-if="formData.mode === 'manual' && formData.targetType === 'existing'" label="" style="margin-top: 12px">
           <div class="c-label">数据写入方式</div>
           <el-radio-group v-model="writeMode" class="radio-block">
             <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
@@ -2243,7 +2243,7 @@ watch(
                 <el-option v-for="table in tableOptions" :key="table.id" :label="table.name" :value="table.id" />
               </el-select>
             </el-form-item>
-            <el-form-item v-if="taskDialogForm.mode === 'manual'">
+            <el-form-item v-if="taskDialogForm.mode === 'manual' && taskDialogForm.targetType === 'existing'">
               <div class="c-label">数据写入方式</div>
               <el-radio-group v-model="taskDialogForm.writeMode" class="radio-block">
                 <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">{{ item.label }}</el-radio>
