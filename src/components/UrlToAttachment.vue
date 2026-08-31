@@ -2,7 +2,7 @@
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
-import { buildApiUrl } from '@/utils/request';
+import request from '@/utils/request';
 
 const emit = defineEmits(['back']);
 
@@ -20,7 +20,7 @@ const formData = ref({
   targetTableId: '',
 });
 const MANUAL_TABLE_BASE_NAME = '链接转附件';
-const ATTACHMENT_DOWNLOAD_TIMEOUT = 30000;
+const ATTACHMENT_BATCH_SIZE = 5;
 
 const FIELD_CONFIG = [
   {
@@ -28,51 +28,11 @@ const FIELD_CONFIG = [
     name: '附件',
     type: FieldType.Attachment,
     defaultSelected: true,
-    getUrls: (item) => {
-      const value = item?.download_addr || item?.url || item?.link;
-      if (typeof value === 'string') {
-        return value
-          .split(/\s+/)
-          .map((url) => httpToHttps(url))
-          .filter(Boolean);
-      }
-      return [];
-    },
-    getFileName: () => 'attachment',
   },
 ];
 
 const FIELD_TYPE_NAME = {
   [FieldType.Attachment]: '附件',
-};
-
-const httpToHttps = (url) => {
-  if (typeof url === 'string') {
-    return url.replace(/^http:\/\//i, 'https://');
-  }
-  return url;
-};
-
-const getFileExtension = (url) => {
-  if (typeof url !== 'string') return '.jpg';
-
-  const cleanUrl = url.split('?')[0].split('#')[0];
-  const extMatch = cleanUrl.match(/\.([a-zA-Z0-9]{2,5})$/);
-  if (extMatch) {
-    return `.${extMatch[1].toLowerCase()}`;
-  }
-
-  if (cleanUrl.includes('video')) {
-    return '.mp4';
-  }
-
-  return '.jpg';
-};
-
-const getFinalFileName = (url, baseName, index, total) => {
-  const ext = getFileExtension(url);
-  const name = total > 1 ? `${index + 1}_${baseName}` : baseName;
-  return `${name}${ext}`;
 };
 
 const fieldOptions = ref([]);
@@ -305,64 +265,49 @@ const setupNewTableFields = async (tableId) => {
   }
 };
 
-const buildProxyDownloadUrl = (url, fileName) => {
-  const params = new URLSearchParams({
-    url,
-    file_name: fileName,
-  });
-  return buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`);
-};
+const convertUrlsToAttachments = async (urls) => {
+  const links = (Array.isArray(urls) ? urls : [urls])
+    .filter((url) => typeof url === 'string')
+    .map((url) => url.trim())
+    .filter((url) => /^https?:\/\//i.test(url));
 
-const isDirectFetchImageUrl = (url) => {
-  if (typeof url !== 'string') return false;
-
-  const cleanUrl = url.split('?')[0].split('#')[0].toLowerCase();
-  return ['.jpg', '.jpeg', '.png', '.webp'].some((ext) => cleanUrl.endsWith(ext));
-};
-
-const downloadAttachmentAsFile = async (url, finalName) => {
-  const directFetchImage = isDirectFetchImageUrl(url);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
-
-  const fetchFileResponse = async (requestUrl, headers) => {
-    const response = await fetch(requestUrl, { headers, signal: controller.signal });
-    if (!response.ok) {
-      throw new Error(`下载失败: HTTP ${response.status}`);
-    }
-    return response;
-  };
-
-  try {
-    let response;
-
-    if (directFetchImage) {
-      try {
-        response = await fetchFileResponse(url);
-      } catch (error) {
-        if (controller.signal.aborted) {
-          throw error;
-        }
-        response = await fetchFileResponse(buildProxyDownloadUrl(url, finalName), {
-          authorization: `Bearer ${props.api_key}`,
-        });
-      }
-    } else {
-      response = await fetchFileResponse(buildProxyDownloadUrl(url, finalName), {
-        authorization: `Bearer ${props.api_key}`,
-      });
-    }
-
-    const blob = await response.blob();
-    return new File([blob], finalName, { type: blob.type || 'application/octet-stream' });
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new Error(`附件下载超时（${ATTACHMENT_DOWNLOAD_TIMEOUT / 1000} 秒）`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
+  if (links.length === 0) {
+    throw new Error('没有可转换的有效链接');
   }
+
+  const attachmentSources = [];
+  for (let index = 0; index < links.length; index += ATTACHMENT_BATCH_SIZE) {
+    const response = await request({
+      url: '/social/api/v1/feishu/attch',
+      method: 'post',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      data: { links: links.slice(index, index + ATTACHMENT_BATCH_SIZE) },
+    });
+    const result = response.data;
+    if (Number(result?.sta) !== 0) {
+      throw new Error(result?.msg || '附件转换失败');
+    }
+
+    const batchAttachments = Array.isArray(result?.data)
+      ? result.data.filter((item) => item?.content)
+      : [];
+    attachmentSources.push(...batchAttachments);
+  }
+
+  if (attachmentSources.length === 0) {
+    throw new Error('未解析到可用附件');
+  }
+
+  return await Promise.all(attachmentSources.map(async ({ name, content }) => {
+    const response = await fetch(content);
+    if (!response.ok) {
+      throw new Error(`读取附件失败: HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
+    return new File([blob], name || 'attachment', {
+      type: blob.type || 'application/octet-stream',
+    });
+  }));
 };
 
 const writeDataToRecord = async (recordId, urls, fieldNameToId, activeFieldConfigs) => {
@@ -372,55 +317,16 @@ const writeDataToRecord = async (recordId, urls, fieldNameToId, activeFieldConfi
     const fieldId = fieldNameToId[config.name];
     if (!fieldId) continue;
 
-    try {
-      const field = await table.getField(fieldId);
-      const normalizedUrls = (Array.isArray(urls) ? urls : [urls])
-        .filter((url) => url && typeof url === 'string')
-        .map((url) => url.replace(/^http:\/\//i, 'https://'));
-
-      if (normalizedUrls.length > 0) {
-        try {
-          const files = await Promise.all(
-            normalizedUrls.map(async (url, index) => {
-              const baseName = config.getFileName();
-              const finalName = getFinalFileName(url, baseName, index, normalizedUrls.length);
-              return downloadAttachmentAsFile(url, finalName);
-            })
-          );
-          await field.setValue(recordId, files.length === 1 ? files[0] : files);
-        } catch (error) {
-          console.log('附件下载失败，跳过附件写入:', error);
-        }
-      }
-    } catch (error) {
-      console.error(`写入字段 ${config.name} 失败:`, error);
-    }
+    const field = await table.getField(fieldId);
+    const attachments = await convertUrlsToAttachments(urls);
+    await field.setValue(recordId, attachments);
   }
 };
 
 const createAttachmentCell = async (table, fieldId, urls) => {
   const field = await table.getFieldById(fieldId);
-  const normalizedUrls = (Array.isArray(urls) ? urls : [urls])
-    .filter((url) => url && typeof url === 'string')
-    .map((url) => url.replace(/^http:\/\//i, 'https://'));
-
-  if (normalizedUrls.length === 0) {
-    return await field.createCell(null);
-  }
-
-  try {
-    const files = await Promise.all(
-      normalizedUrls.map(async (url, index) => {
-        const baseName = ACTIVE_FIELD_CONFIGS[0].getFileName();
-        const finalName = getFinalFileName(url, baseName, index, normalizedUrls.length);
-        return downloadAttachmentAsFile(url, finalName);
-      })
-    );
-    return await field.createCell(files.length === 1 ? files[0] : files);
-  } catch (error) {
-    console.log('附件下载失败，跳过附件写入:', error);
-    return await field.createCell(null);
-  }
+  const attachments = await convertUrlsToAttachments(urls);
+  return await field.createCell(attachments);
 };
 
 const appendRecordsToTable = async (tableId, rows) => {
@@ -448,24 +354,6 @@ const appendRecordsToTable = async (tableId, rows) => {
   }
 };
 
-const extractUrl = (value) => {
-  if (!value) return null;
-
-  if (typeof value === 'string') {
-    return value.trim() || null;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (item?.type === 'url' && item?.link) {
-        return item.link;
-      }
-    }
-  }
-
-  return null;
-};
-
 const extractUrls = (value) => {
   if (!value) return [];
 
@@ -476,22 +364,21 @@ const extractUrls = (value) => {
       .filter(Boolean);
   }
 
-  const getUrlLink = (item) => {
-    if (typeof item === 'string') {
-      return item.trim();
-    }
-    if (item?.type === 'url' && typeof item.link === 'string') {
-      return item.link.trim();
-    }
-    return '';
-  };
-
   if (Array.isArray(value)) {
-    return value.map(getUrlLink).filter(Boolean);
+    return value.flatMap((item) => extractUrls(item));
   }
 
-  const url = getUrlLink(value);
-  return url ? [url] : [];
+  if (typeof value === 'object') {
+    const keys = ['link', 'url', 'text', 'content', 'value', 'displayText'];
+    for (const key of keys) {
+      const urls = extractUrls(value[key]);
+      if (urls.length > 0) {
+        return urls;
+      }
+    }
+  }
+
+  return [];
 };
 
 const getCellValuesByFieldId = async (recordIdList, fieldId) => {
@@ -589,6 +476,11 @@ const handleTableModeSubmit = async () => {
     if (!fieldNameToId) return;
 
     const rowList = await getCellValuesByFieldId(recordIdList, formData.value.urlFieldId);
+    if (rowList.length === 0) {
+      ElNotification({ message: '所选范围内没有可转换的链接，请检查URL字段和数据范围', type: 'warning', duration: 0 });
+      return;
+    }
+
     let successCount = 0;
     let failCount = 0;
     showToast(`准备处理 ${rowList.length} 条数据...`, true);

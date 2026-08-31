@@ -1,6 +1,6 @@
 <script setup>
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
 
@@ -376,6 +376,25 @@ const getTableFields = async (tableId) => {
   }
 };
 
+const loadCurrentTableFields = async () => {
+  try {
+    const table = await bitable.base.getActiveTable();
+    await getTableFields(table.id);
+  } catch (error) {
+    tableFieldOptions.value = [];
+    console.error('读取当前表格字段失败:', error);
+  }
+};
+
+const loadCurrentTableOutputConfig = async () => {
+  try {
+    const table = await bitable.base.getActiveTable();
+    await loadTableOutputConfig(table.id);
+  } catch (error) {
+    console.error('读取当前表格映射配置失败:', error);
+  }
+};
+
 const loadTableOutputConfig = async (tableId) => {
   if (!props.api_key || !tableId) return;
   tableConfigLoading.value = true;
@@ -736,13 +755,18 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
   }
 };
 
-const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs) => {
+const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs, fieldMappings = []) => {
   try {
     const table = await bitable.base.getActiveTable();
     const fields = {};
+    const explicitMappings = new Map(
+      fieldMappings
+        .filter(mapping => mapping?.source_key && mapping?.target_field_id)
+        .map(mapping => [mapping.source_key, mapping.target_field_id])
+    );
 
     for (const config of activeFieldConfigs) {
-      const fieldId = fieldNameToId[config.name];
+      const fieldId = explicitMappings.get(config.key) || fieldNameToId[config.name];
       if (!fieldId) continue;
 
       try {
@@ -1550,7 +1574,7 @@ const handleTableModeSubmit = async () => {
       const fieldNameToId = await validateAndAddFields(activeTable.id, activeFieldConfigs);
       if (!fieldNameToId) return;
       const { successCount, failCount } = await fetchBloggerInfoByRows(rowList, {
-        onSuccess: (item) => writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs),
+        onSuccess: (item) => writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs, mappingDraft.value),
       });
 
       showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
@@ -1656,6 +1680,8 @@ const handleTaskModeChange = (mode) => {
 onMounted(() => {
   if (formData.value.mode === 'table') {
     getFieldListByType({ silent: true });
+    loadCurrentTableFields();
+    loadCurrentTableOutputConfig();
   }
 
   Promise.all([
@@ -1667,7 +1693,32 @@ onMounted(() => {
 });
 
 const mappingSourceFields = () => FIELD_CONFIG.filter(field => selectedFieldKeys.value.includes(field.key));
+const allFieldKeys = FIELD_CONFIG.map(field => field.key);
+const isAllFieldsSelected = computed(() => allFieldKeys.every(key => selectedFieldKeys.value.includes(key)));
+const isFieldsPartiallySelected = computed(() =>
+  !isAllFieldsSelected.value && selectedFieldKeys.value.some(key => allFieldKeys.includes(key))
+);
+const isTaskAllFieldsSelected = computed(() =>
+  allFieldKeys.every(key => taskDialogForm.value.selectedFieldKeys.includes(key))
+);
+const isTaskFieldsPartiallySelected = computed(() =>
+  !isTaskAllFieldsSelected.value && taskDialogForm.value.selectedFieldKeys.some(key => allFieldKeys.includes(key))
+);
+const toggleAllFields = (checked) => {
+  selectedFieldKeys.value = checked
+    ? [...allFieldKeys]
+    : FIELD_CONFIG.filter(field => field.required).map(field => field.key);
+};
+const toggleAllTaskFields = (checked) => {
+  taskDialogForm.value.selectedFieldKeys = checked
+    ? [...allFieldKeys]
+    : FIELD_CONFIG.filter(field => field.required).map(field => field.key);
+};
 const mappingStatus = () => {
+  if (formData.value.mode === 'table') {
+    const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
+    return count ? `已设置 ${count} 项映射` : '映射到当前表格';
+  }
   if (!formData.value.targetTableId) return '选择目标表格后可设置';
   const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
   return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
@@ -1687,6 +1738,8 @@ watch(
     if (mode === 'table') {
       formData.value.targetType = 'current';
       getFieldListByType({ silent: true });
+      loadCurrentTableFields();
+      loadCurrentTableOutputConfig();
     } else if (formData.value.targetType === 'current') {
       formData.value.targetType = 'new';
     }
@@ -1915,13 +1968,21 @@ watch(
         <el-form-item label="" style="margin-top: 12px">
           <div class="field-selection-content">
             <div class="field-selection-title"><div class="c-label">输出字段</div></div>
+            <el-checkbox
+              :model-value="isAllFieldsSelected"
+              :indeterminate="isFieldsPartiallySelected"
+              class="select-all-fields"
+              @change="toggleAllFields"
+            >
+              全选
+            </el-checkbox>
             <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
               <el-checkbox v-for="field in FIELD_CONFIG" :key="field.key" :label="field.key" class="field-checkbox-item">{{ field.name }}</el-checkbox>
             </el-checkbox-group>
           </div>
         </el-form-item>
 
-        <div v-if="formData.mode === 'manual' && formData.targetType === 'existing'" class="mapping-accordion">
+        <div v-if="formData.mode === 'table' || (formData.mode === 'manual' && formData.targetType === 'existing')" class="mapping-accordion">
           <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded">
             <span>字段映射 <span class="mapping-optional">（可选）</span> <span class="mapping-status">{{ mappingStatus() }}</span></span>
             <span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span>
@@ -2251,17 +2312,27 @@ watch(
             </el-form-item>
 
             <el-form-item>
-              <div class="c-label">选择需要的字段</div>
-              <el-checkbox-group v-model="taskDialogForm.selectedFieldKeys" class="field-checkbox-group">
+              <div class="field-selection-content">
+                <div class="c-label">选择需要的字段</div>
                 <el-checkbox
-                  v-for="field in FIELD_CONFIG"
-                  :key="field.key"
-                  :label="field.key"
-                  class="field-checkbox-item"
+                  :model-value="isTaskAllFieldsSelected"
+                  :indeterminate="isTaskFieldsPartiallySelected"
+                  class="select-all-fields"
+                  @change="toggleAllTaskFields"
                 >
-                  {{ field.name }}
+                  全选
                 </el-checkbox>
-              </el-checkbox-group>
+                <el-checkbox-group v-model="taskDialogForm.selectedFieldKeys" class="field-checkbox-group">
+                  <el-checkbox
+                    v-for="field in FIELD_CONFIG"
+                    :key="field.key"
+                    :label="field.key"
+                    class="field-checkbox-item"
+                  >
+                    {{ field.name }}
+                  </el-checkbox>
+                </el-checkbox-group>
+              </div>
             </el-form-item>
 
             <div v-if="taskDialogForm.mode === 'manual' && taskDialogForm.targetType === 'existing'" class="mapping-accordion">
@@ -2471,8 +2542,7 @@ watch(
   align-items: center;
   gap: 20px;
   margin: 0 0 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #F0F1F3;
+  /* padding-bottom: 12px; */
 }
 .source-mode-radio :deep(.el-radio) {
   margin-right: 0;
@@ -2801,6 +2871,13 @@ watch(
   width: 100%;
 }
 .field-selection-title {
+  margin-bottom: 10px;
+}
+.field-selection-title .c-label {
+  margin-bottom: 0;
+}
+.select-all-fields {
+  margin-right: 0;
   margin-bottom: 10px;
 }
 .mapping-accordion {
