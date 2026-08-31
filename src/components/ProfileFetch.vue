@@ -2510,8 +2510,7 @@ watch(
   align-items: center;
   gap: 20px;
   margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #F0F1F3;
+  /* padding-bottom: 12px; */
 }
 .source-mode-radio :deep(.el-radio) {
   margin-right: 0;

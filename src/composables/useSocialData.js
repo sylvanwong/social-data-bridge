@@ -59,6 +59,7 @@ export const PROFILE_FIELD_MAPPING = [
   { key: 'aweme_id', name: '作品ID', legacyNames: ['视频编号'], type: FieldType.Text, defaultSelected: true, required: true },
   { key: 'note_type', name: '作品类型', legacyNames: ['笔记类型'], type: FieldType.Text, defaultSelected: true },
   { key: 'title', name: '标题', legacyNames: ['视频标题'], type: FieldType.Text, defaultSelected: true },
+  { key: 'content', name: '正文', type: FieldType.Text, defaultSelected: true },
   { key: 'tags', name: '标签', type: FieldType.MultiSelect, defaultSelected: true },
   { key: 'duration', name: '视频时长', legacyNames: ['时长'], type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'digg_count', name: '点赞数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
