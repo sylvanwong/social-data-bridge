@@ -22,7 +22,7 @@ const formData = ref({
 const MANUAL_TABLE_BASE_NAME = '链接转附件';
 const ATTACHMENT_BATCH_SIZE = 5;
 
-const FIELD_CONFIG = [
+const MANUAL_FIELD_CONFIGS = [
   {
     key: 'attachment',
     name: '附件',
@@ -41,7 +41,6 @@ const loading = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
-const ACTIVE_FIELD_CONFIGS = FIELD_CONFIG;
 
 const getFieldListByType = async ({ silent = false } = {}) => {
   try {
@@ -142,7 +141,7 @@ const getRecordIdListByScope = async (scope, rowCount) => {
   return allRecordIdList.slice(0, rowCount);
 };
 
-const validateAndAddFields = async (tableId = '') => {
+const validateAndAddFields = async (tableId = '', activeFieldConfigs = MANUAL_FIELD_CONFIGS) => {
   try {
     const table = tableId
       ? await bitable.base.getTableById(tableId)
@@ -158,7 +157,7 @@ const validateAndAddFields = async (tableId = '') => {
     const missingFields = [];
     const typeMismatchFields = [];
 
-    for (const config of ACTIVE_FIELD_CONFIGS) {
+    for (const config of activeFieldConfigs) {
       const fieldMeta = fieldMetaMap.get(config.name);
       if (!fieldMeta) {
         missingFields.push(config);
@@ -259,8 +258,8 @@ const setupNewTableFields = async (tableId) => {
 
   if (defaultFirstField && defaultFirstField.name === '文本') {
     await table.setField(defaultFirstField.id, {
-      type: ACTIVE_FIELD_CONFIGS[0].type,
-      name: ACTIVE_FIELD_CONFIGS[0].name,
+      type: MANUAL_FIELD_CONFIGS[0].type,
+      name: MANUAL_FIELD_CONFIGS[0].name,
     });
   }
 };
@@ -323,6 +322,16 @@ const writeDataToRecord = async (recordId, urls, fieldNameToId, activeFieldConfi
   }
 };
 
+const getTableAttachmentFieldConfigs = async (table, urlFieldId) => {
+  const urlField = await table.getFieldById(urlFieldId);
+  const urlFieldName = await urlField.getName();
+  return [{
+    key: 'attachment',
+    name: `${urlFieldName}附件`,
+    type: FieldType.Attachment,
+  }];
+};
+
 const createAttachmentCell = async (table, fieldId, urls) => {
   const field = await table.getFieldById(fieldId);
   const attachments = await convertUrlsToAttachments(urls);
@@ -339,7 +348,7 @@ const appendRecordsToTable = async (tableId, rows) => {
     fieldMetaMap.set(name, field.id);
   }
 
-  const attachmentFieldId = fieldMetaMap.get(ACTIVE_FIELD_CONFIGS[0].name);
+  const attachmentFieldId = fieldMetaMap.get(MANUAL_FIELD_CONFIGS[0].name);
   if (!attachmentFieldId) {
     throw new Error('目标表缺少附件字段');
   }
@@ -426,7 +435,7 @@ const resolveTargetTableId = async (targetType) => {
 
   if (targetType === 'existing') {
     const tableId = formData.value.targetTableId;
-    const fieldNameToId = await validateAndAddFields(tableId);
+    const fieldNameToId = await validateAndAddFields(tableId, MANUAL_FIELD_CONFIGS);
     if (!fieldNameToId) {
       return null;
     }
@@ -474,7 +483,8 @@ const handleTableModeSubmit = async () => {
     if (!recordIdList) return;
 
     const activeTable = await bitable.base.getActiveTable();
-    const fieldNameToId = await validateAndAddFields(activeTable.id);
+    const activeFieldConfigs = await getTableAttachmentFieldConfigs(activeTable, formData.value.urlFieldId);
+    const fieldNameToId = await validateAndAddFields(activeTable.id, activeFieldConfigs);
     if (!fieldNameToId) return;
 
     const rowList = await getCellValuesByFieldId(recordIdList, formData.value.urlFieldId);
@@ -491,7 +501,7 @@ const handleTableModeSubmit = async () => {
       const { urls, recordId } = rowList[i];
       try {
         showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
-        await writeDataToRecord(recordId, urls, fieldNameToId, ACTIVE_FIELD_CONFIGS);
+        await writeDataToRecord(recordId, urls, fieldNameToId, activeFieldConfigs);
         successCount += 1;
       } catch (error) {
         ElNotification({ message: error.message || '请求失败', type: 'error', duration: 0 });
