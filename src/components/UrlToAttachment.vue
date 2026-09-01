@@ -354,14 +354,25 @@ const appendRecordsToTable = async (tableId, rows) => {
   }
 };
 
+const extractUrlsFromText = (text) => {
+  if (typeof text !== 'string' || !text.trim()) return [];
+
+  const urls = [];
+  const urlPattern = /https?:\/\/.*?(?=https?:\/\/|[\s,，]|$)/gi;
+  for (const match of text.matchAll(urlPattern)) {
+    const url = match[0].trim().replace(/[，,]+$/, '');
+    if (url) urls.push(url);
+  }
+
+  if (urls.length > 0) return [...new Set(urls)];
+  return text.split(/[\s\n,，]+/).map((url) => url.trim()).filter(Boolean);
+};
+
 const extractUrls = (value) => {
   if (!value) return [];
 
   if (typeof value === 'string') {
-    return value
-      .split(/\s+/)
-      .map((url) => url.trim())
-      .filter(Boolean);
+    return extractUrlsFromText(value);
   }
 
   if (Array.isArray(value)) {
@@ -402,16 +413,7 @@ const getCellValuesByFieldId = async (recordIdList, fieldId) => {
 };
 
 const parseManualUrls = (text) => {
-  if (!text || typeof text !== 'string') {
-    return [];
-  }
-
-  return [...new Set(
-    text
-      .split(/[\n,，]+/)
-      .map((item) => item.trim())
-      .filter(Boolean)
-  )];
+  return extractUrlsFromText(text);
 };
 
 const resolveTargetTableId = async (targetType) => {
