@@ -29,7 +29,7 @@ const formData = ref({
   scope: 'n',
   rowCount: 5,
   targetTableId: '',
-  writeMode: 'append',
+  writeMode: 'upsert',
   executionMode: 'immediate',
 });
 const table_options = ref([]);
@@ -119,7 +119,7 @@ const getDefaultTaskDialogForm = () => ({
   manualUrls: '',
   workFetchRange: { type: 'pages', pages: 1, days: 30, timezone: 'Asia/Shanghai' },
   targetTableId: '',
-  writeMode: 'append',
+  writeMode: 'upsert',
   selectedFieldKeys: getDefaultSelectedFieldKeys(PROFILE_FIELD_MAPPING),
   sourceTableId: '',
   sourceTableName: '',
@@ -147,8 +147,8 @@ const workRangeTypes = [
   { value: 'days', label: '最近' },
 ];
 const writeModeOptions = [
-  { value: 'append', label: '始终新增' },
   { value: 'upsert', label: '更新或新增' },
+  { value: 'append', label: '始终新增' },
 ];
 
 const scopeOptions = [
@@ -191,14 +191,14 @@ const getBaseId = async () => {
 };
 
 const getTableConfig = (tableId) => tableOutputConfigs.value[tableId] || {
-  write_mode: 'append', field_mappings: [], target_table_id: tableId,
+  write_mode: 'upsert', field_mappings: [], target_table_id: tableId,
 };
 
 const applyTableConfig = async (tableId, target = formData.value) => {
   tableConfigApplying.value = true;
   try {
     const config = getTableConfig(tableId);
-    target.writeMode = config.write_mode || 'append';
+    target.writeMode = config.write_mode || 'upsert';
     if (target === formData.value) mappingDraft.value = Array.isArray(config.field_mappings) ? [...config.field_mappings] : [];
     await loadTargetFieldOptions(tableId);
     tableConfigSaveStatus.value = '';
@@ -264,7 +264,7 @@ const saveTableOutputConfig = async (outputConfig = null) => {
       base_id: baseId,
       target_table_id: targetTableId,
       target_table_name: await getTableNameById(targetTableId),
-      write_mode: writeMode || 'append',
+      write_mode: writeMode || 'upsert',
       field_mappings: fieldMappings
         .filter(item => item.source_key && item.target_field_id)
         .map(item => ({
@@ -295,7 +295,7 @@ const saveTableOutputConfig = async (outputConfig = null) => {
 
 const applyTaskTableConfig = async (tableId) => {
   if (normalizeTargetType(taskDialogForm.value.targetType) !== 'existing' || !tableId) {
-    taskDialogForm.value.writeMode = 'append';
+    taskDialogForm.value.writeMode = 'upsert';
     mappingDraft.value = [];
     tableFieldOptions.value = [];
     return;
@@ -304,7 +304,7 @@ const applyTaskTableConfig = async (tableId) => {
   tableConfigApplying.value = true;
   try {
     const config = getTableConfig(tableId);
-    taskDialogForm.value.writeMode = config.write_mode || 'append';
+    taskDialogForm.value.writeMode = config.write_mode || 'upsert';
     mappingDraft.value = cloneFieldMappings(config.field_mappings || []);
     await loadTargetFieldOptions(tableId);
     tableConfigSaveStatus.value = '';
@@ -733,7 +733,7 @@ const startStreamTask = async (taskId, targetTableId = '', taskConfig = {}) => {
     targetTableId,
     selectedFieldKeys: [...(taskConfig.selectedFieldKeys || selectedFieldKeys.value)],
     fieldMappings: cloneFieldMappings(taskConfig.fieldMappings || mappingDraft.value),
-    writeMode: taskConfig.writeMode || formData.value.writeMode || 'append',
+    writeMode: taskConfig.writeMode || formData.value.writeMode || 'upsert',
     writtenCount: 0,
     lastProcessed: -1,
     lastHeartbeatAt: 0,
@@ -768,7 +768,7 @@ const resumeSavedStreamTask = async () => {
       fieldMappings: cloneFieldMappings(Array.isArray(savedTask.fieldMappings)
         ? savedTask.fieldMappings
         : mappingDraft.value),
-      writeMode: savedTask.writeMode || formData.value.writeMode || 'append',
+      writeMode: savedTask.writeMode || formData.value.writeMode || 'upsert',
       lastActivityAt: savedTask.lastActivityAt || Date.now(),
       pollInterval: savedTask.pollInterval || STREAM_ACTIVE_INTERVAL,
     };
@@ -1642,7 +1642,7 @@ watch(
 
     if (normalizeTargetType(targetType) !== 'existing') {
       formData.value.targetTableId = '';
-      formData.value.writeMode = 'append';
+      formData.value.writeMode = 'upsert';
       mappingDraft.value = [];
     }
 
@@ -1747,11 +1747,11 @@ watch(
           <el-form-item>
             <div slot="label" class="c-label">
               作者主页链接所在字段
-              <el-tooltip effect="dark" placement="top">
+              <!-- <el-tooltip effect="dark" placement="top">
                 <template #content>仅支持博主主页链接，<br />不支持其他链接</template>
                 <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                   class="help-icon" />
-              </el-tooltip>
+              </el-tooltip> -->
             </div>
             <el-select
               v-model="formData.profileLinkFieldId"
@@ -2498,7 +2498,7 @@ watch(
 }
 .mode-switch {
   display: flex;
-  gap: 20px;
+  gap: 16px;
   margin: 0 0 16px;
   background: transparent;
   border-radius: 0;
@@ -2508,8 +2508,8 @@ watch(
 .source-mode-radio {
   display: flex;
   align-items: center;
-  gap: 20px;
-  margin-bottom: 16px;
+  gap: 16px;
+  margin-bottom: 12px;
   /* padding-bottom: 12px; */
 }
 .source-mode-radio :deep(.el-radio) {
@@ -2610,12 +2610,12 @@ watch(
 .commit-btn {
   background: #A8071A;
   width: 100%;
-  height: 40px;
+  height: 36px;
   border-radius: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   color: #fff;
   font-size: 14px;
   font-weight: 500;
@@ -2859,7 +2859,7 @@ watch(
 }
 
 .field-selection-title {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .field-selection-title .c-label {
@@ -2868,7 +2868,7 @@ watch(
 
 .select-all-fields {
   margin-right: 0;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .field-checkbox-item {
@@ -2925,7 +2925,7 @@ watch(
   border-top: 1px solid #E5E6EB;
 }
 .mapping-accordion {
-  margin: 4px 0 16px;
+  margin: 12px 0 16px;
   border-top: 1px solid #F0F1F3;
   border-bottom: 1px solid #F0F1F3;
 }
@@ -2975,7 +2975,7 @@ watch(
 }
 .mapping-note,
 .mapping-empty {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   color: #86909C;
   font-size: 12px;
   line-height: 18px;
@@ -3056,7 +3056,7 @@ watch(
 
 .schedule-field-row :deep(.el-form-item),
 .schedule-custom-grid :deep(.el-form-item) {
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 
 .schedule-custom-grid .time-setting-grid,
@@ -3067,7 +3067,7 @@ watch(
 .deadline-radio-option {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-height: 32px;
   width: auto;
   flex: 0 0 auto;
@@ -3094,7 +3094,7 @@ watch(
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
-  column-gap: 6px;
+  column-gap: 8px;
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -3121,7 +3121,7 @@ watch(
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: 16px;
   cursor: pointer;
 }
 
@@ -3178,7 +3178,7 @@ watch(
 }
 
 .task-card {
-  padding: 14px;
+  padding: 16px;
   border: 1px solid #E5E6EB;
   border-radius: 8px;
 }
@@ -3195,7 +3195,7 @@ watch(
 
 .task-card-desc,
 .task-card-meta {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
   color: #86909C;
   line-height: 1.5;
@@ -3261,11 +3261,11 @@ watch(
 }
 
 .task-dialog-card {
-  padding: 2px;
+  padding: 0;
 }
 
 .dialog-section-heading {
-  margin-top: 2px;
+  margin-top: 0;
 }
 
 .task-dialog-card :deep(.el-form-item) {
@@ -3293,7 +3293,7 @@ watch(
 }
 
 .sub-hint {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
   line-height: 1.5;
   color: #86909C;
@@ -3329,7 +3329,7 @@ watch(
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 18px;
+  padding: 8px 16px;
   background: #FFFFFF;
   border: 1px solid #E5E6EB;
   border-radius: 8px;

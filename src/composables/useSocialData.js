@@ -351,7 +351,8 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
         throw new Error(`字段“${config.name}”映射的目标字段不存在`);
       }
       if (!matchedField?.fieldMeta?.id) {
-        missingFields.push(config);
+        // 显式映射的字段由 target_field_id 指定，不能按源字段名自动补列。
+        if (!explicitMapping) missingFields.push(config);
         continue;
       }
       try {

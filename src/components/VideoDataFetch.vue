@@ -22,7 +22,7 @@ const formData = ref({
   rowCount: 5,
   manualUrls: '',
   targetTableId: '',
-  writeMode: 'append',
+  writeMode: 'upsert',
   executionMode: 'immediate'
 });
 const MANUAL_TABLE_BASE_NAME = '作品详情获取';
@@ -425,7 +425,7 @@ const getDefaultTaskDialogForm = () => ({
   rowCount: 5,
   manualUrls: '',
   targetTableId: '',
-  writeMode: 'append',
+  writeMode: 'upsert',
   fieldMappings: [],
   selectedFieldKeys: getDefaultSelectedFieldKeys(),
   sourceTableId: '',
@@ -474,7 +474,7 @@ const mappingStatus = computed(() => {
   const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
   return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
 });
-const getTableConfig = (tableId) => tableOutputConfigs.value[tableId] || { write_mode: 'append', field_mappings: [] };
+const getTableConfig = (tableId) => tableOutputConfigs.value[tableId] || { write_mode: 'upsert', field_mappings: [] };
 const loadTargetFieldOptions = async (tableId) => {
   if (!tableId) { tableFieldOptions.value = []; return; }
   try {
@@ -496,7 +496,7 @@ const loadTableOutputConfigs = async () => {
 };
 const applyTableConfig = async (tableId) => {
   const config = getTableConfig(tableId);
-  formData.value.writeMode = config.write_mode || 'append';
+  formData.value.writeMode = config.write_mode || 'upsert';
   mappingDraft.value = cloneFieldMappings(config.field_mappings || []);
   await loadTargetFieldOptions(tableId);
 };
@@ -520,7 +520,7 @@ const loadTaskTableOutputConfig = async (tableId) => {
     await loadTableOutputConfigs();
   }
   const config = getTableConfig(tableId);
-  taskDialogForm.value.writeMode = config.write_mode || 'append';
+  taskDialogForm.value.writeMode = config.write_mode || 'upsert';
   taskDialogForm.value.fieldMappings = cloneFieldMappings(config.field_mappings || []);
 };
 const saveTableOutputConfig = async (outputConfig = null) => {
@@ -541,7 +541,7 @@ const saveTableOutputConfig = async (outputConfig = null) => {
       target_field_name: tableFieldOptions.value.find(field => field.id === item.target_field_id)?.name || '',
       target_field_type: tableFieldOptions.value.find(field => field.id === item.target_field_id)?.type,
     }));
-    const config = { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId, target_table_id: targetTableId, target_table_name: tableName, write_mode: sourceConfig.writeMode || 'append', field_mappings: fieldMappings };
+    const config = { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId, target_table_id: targetTableId, target_table_name: tableName, write_mode: sourceConfig.writeMode || 'upsert', field_mappings: fieldMappings };
     const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: config });
     const saved = response.data?.data || response.data || config;
     tableOutputConfigs.value = { ...tableOutputConfigs.value, [config.target_table_id]: saved };
@@ -1300,7 +1300,7 @@ const validateBaseForm = (config) => {
 
   if (config.mode === 'table') {
     if (!config.videoLinkFieldId) {
-      ElNotification({ message: '请选择视频链接字段', type: 'warning', duration: 0 });
+      ElNotification({ message: '请选择作品链接所在字段', type: 'warning', duration: 0 });
       return false;
     }
 
@@ -1411,7 +1411,7 @@ const buildTaskPayload = async () => {
 
   const activeFieldConfigs = getWriteFieldConfigs(
     config.selectedFieldKeys,
-    config.mode === 'manual' ? config.writeMode : 'append'
+    config.mode === 'manual' ? config.writeMode : 'upsert'
   );
   let sourceContext = {
     baseId: '',
@@ -1692,7 +1692,7 @@ const openEditTaskDialog = async (task) => {
     rowCount: snapshot.row_count || 5,
     manualUrls: snapshot.manual_urls || '',
     targetTableId: snapshot.target_table_id || '',
-    writeMode: snapshot.write_mode || 'append',
+    writeMode: snapshot.write_mode || 'upsert',
     fieldMappings: cloneFieldMappings(snapshot.field_mappings || []),
     selectedFieldKeys: Array.isArray(snapshot.selected_field_keys) && snapshot.selected_field_keys.length > 0
       ? snapshot.selected_field_keys
@@ -2061,7 +2061,7 @@ watch(
 
     if (targetType !== 'existing' && formData.value.mode !== 'table') {
       formData.value.targetTableId = '';
-      formData.value.writeMode = 'append';
+      formData.value.writeMode = 'upsert';
       mappingDraft.value = [];
       tableFieldOptions.value = [];
     }
@@ -2162,12 +2162,7 @@ watch(
         <template v-if="formData.mode === 'table'">
         <el-form-item label="">
           <div slot="label" class="c-label">
-            视频链接
-            <el-tooltip effect="dark" placement="top">
-              <template #content>支持抖音、小红书、快手、微博、微信、哔哩哔哩平台的视频链接</template>
-              <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
-                class="help-icon" />
-            </el-tooltip>
+            作品链接所在字段
           </div>
           <el-select
             v-model="formData.videoLinkFieldId"
@@ -2180,12 +2175,7 @@ watch(
 
         <el-form-item label="" style="margin-top: 12px">
           <div slot="label" class="c-label">
-            数据范围
-            <el-tooltip effect="dark" placement="top">
-              <template #content>选择要执行的数据范围</template>
-              <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
-                class="help-icon" />
-            </el-tooltip>
+            输入行范围
           </div>
           <el-radio-group v-model="formData.scope" class="custom-radio-group">
             <el-radio value="all" class="custom-radio-item">所有行</el-radio>
@@ -2225,19 +2215,14 @@ watch(
         <template v-else>
           <el-form-item>
             <div slot="label" class="c-label">
-              视频链接
-              <el-tooltip effect="dark" placement="top">
-                <template #content>仅支持视频链接，<br />不支持其他链接</template>
-                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
-                  class="help-icon" />
-              </el-tooltip>
+              作品链接
             </div>
             <el-input
               v-model="formData.manualUrls"
               type="textarea"
               :rows="4"
               class="c-input"
-              placeholder="请输入正确的视频链接，支持批量添加，多个链接可换行或用逗号分隔"
+              placeholder="请输入作品链接，支持批量输入（多个链接请换行或用逗号分隔）"
             />
           </el-form-item>
         </template>
@@ -2259,8 +2244,8 @@ watch(
         <el-form-item v-if="formData.mode === 'manual' && formData.targetType === 'existing'" label="" style="margin-top: 12px">
           <div class="c-label">数据写入方式</div>
           <el-radio-group v-model="formData.writeMode" class="radio-block">
-            <el-radio value="append">始终新增</el-radio>
             <el-radio value="upsert">更新或新增</el-radio>
+            <el-radio value="append">始终新增</el-radio>
           </el-radio-group>
         </el-form-item>
 
@@ -2297,7 +2282,7 @@ watch(
                 <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select>
                 <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
               </div>
-              <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button><span v-if="tableConfigSaveStatus" class="mapping-save-status">{{ tableConfigSaving ? '保存中' : tableConfigSaveStatus }}</span></div>
+              <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
             </template>
           </div>
         </div>
@@ -2507,29 +2492,26 @@ watch(
     >
       <div class="task-dialog-scroll">
         <div class="task-dialog-section task-dialog-card">
-          <div class="mode-switch dialog-mode-switch">
-            <button
-              type="button"
-              class="mode-tab"
-              :class="{ active: taskDialogForm.mode === 'table' }"
-              @click="taskDialogForm.mode = 'table'; taskDialogForm.targetType = 'current'"
-            >
-              从表格选取
-            </button>
-            <button
-              type="button"
-              class="mode-tab"
-              :class="{ active: taskDialogForm.mode === 'manual' }"
-              @click="taskDialogForm.mode = 'manual'; if (taskDialogForm.targetType === 'current') taskDialogForm.targetType = 'new'"
-            >
-              手动输入
-            </button>
-          </div>
+          <div class="group-label">作品链接来源</div>
+          <el-radio-group
+            v-model="taskDialogForm.mode"
+            class="source-mode-radio dialog-source-mode-radio"
+            @change="(mode) => {
+              if (mode === 'table') {
+                taskDialogForm.targetType = 'current';
+              } else if (taskDialogForm.targetType === 'current') {
+                taskDialogForm.targetType = 'new';
+              }
+            }"
+          >
+            <el-radio value="table">从表格选取</el-radio>
+            <el-radio value="manual">手动输入</el-radio>
+          </el-radio-group>
 
           <el-form label-position="top">
             <template v-if="taskDialogForm.mode === 'table'">
               <el-form-item>
-                <div class="c-label">视频链接字段</div>
+                <div class="c-label">作品链接所在字段</div>
                 <el-select v-model="taskDialogForm.videoLinkFieldId" placeholder="请选择字段" style="width: 100%">
                   <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
                 </el-select>
@@ -2537,7 +2519,7 @@ watch(
               </el-form-item>
 
               <el-form-item>
-                <div class="c-label">数据范围</div>
+                <div class="c-label">输入行范围</div>
                 <el-radio-group v-model="taskDialogForm.scope" class="custom-radio-group">
                   <el-radio value="all" class="custom-radio-item">所有行</el-radio>
                   <el-radio value="n" class="custom-radio-item">
@@ -2590,12 +2572,12 @@ watch(
               </el-form-item>
 
               <el-form-item>
-                <div class="c-label">视频链接</div>
+                <div class="c-label">作品链接</div>
                 <el-input
                   v-model="taskDialogForm.manualUrls"
                   type="textarea"
                   :rows="4"
-                  placeholder="请输入正确的视频链接，多个链接可换行或用逗号分隔"
+                  placeholder="请输入作品链接，支持批量输入（多个链接请换行或用逗号分隔）"
                 />
               </el-form-item>
             </template>
@@ -2616,8 +2598,8 @@ watch(
             <el-form-item v-if="taskDialogForm.targetType === 'existing'">
               <div class="c-label">数据写入方式</div>
               <el-radio-group v-model="taskDialogForm.writeMode" class="radio-block">
-                <el-radio value="append">始终新增</el-radio>
                 <el-radio value="upsert">更新或新增</el-radio>
+                <el-radio value="append">始终新增</el-radio>
               </el-radio-group>
             </el-form-item>
             <div v-if="taskDialogForm.targetType === 'current' || (taskDialogForm.mode === 'manual' && taskDialogForm.targetType === 'existing')" class="mapping-accordion">
@@ -2763,9 +2745,12 @@ watch(
   background: #fffcfc;
 }
 .sub-page-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 8px;
   align-items: center;
-  padding: 12px 16px;
+  min-height: 48px;
+  padding: 0 8px;
   background: #FFFFFF;
   border-bottom: 1px solid #E5E6EB;
   position: sticky;
@@ -2781,7 +2766,7 @@ watch(
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-right: 12px;
+  margin-right: 0;
 }
 .sub-page-back:hover { color: #A8071A; }
 .sub-page-back svg {
@@ -2811,14 +2796,14 @@ watch(
   margin-bottom: 20px;
   background: #F7F8FA;
   border-radius: 6px;
-  padding: 3px;
+  padding: 4px;
   border: 1px solid #E5E6EB;
 }
 .source-mode-radio {
   display: flex;
   align-items: center;
-  gap: 20px;
-  margin: 0 0 16px;
+  gap: 16px;
+  margin: 0 0 12px;
 }
 .source-mode-radio :deep(.el-radio) { margin-right: 0; }
 .source-mode-radio :deep(.el-radio__label) { padding-left: 8px; color: #1D2129; font-size: 14px; }
@@ -2846,7 +2831,7 @@ watch(
   font-weight: 600;
 }
 .output-heading { margin-top: 20px; padding-top: 16px; border-top: 1px solid #F0F1F3; }
-.fields-accordion { margin-top: 4px; }
+.fields-accordion { margin-top: 12px; }
 .mode-tab {
   flex: 1;
   display: flex;
@@ -2910,12 +2895,12 @@ watch(
 .commit-btn {
   background: #A8071A;
   width: 100%;
-  height: 40px;
+  height: 36px;
   border-radius: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   color: #fff;
   font-size: 14px;
   font-weight: 500;
@@ -3089,7 +3074,7 @@ watch(
 }
 
 .field-selection-title {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .field-selection-title .c-label {
@@ -3098,7 +3083,7 @@ watch(
 
 .select-all-fields {
   margin-right: 0;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .field-checkbox-group {
@@ -3195,7 +3180,7 @@ watch(
 
 .mapping-note,
 .mapping-empty {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   color: #86909C;
   font-size: 12px;
   line-height: 18px;
@@ -3321,7 +3306,7 @@ watch(
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: 16px;
   cursor: pointer;
   transition: background 0.2s ease;
   border-bottom: 1px solid transparent;
@@ -3363,7 +3348,7 @@ watch(
   font-size: 12px;
   color: #86909C;
   background: #F7F8FA;
-  padding: 2px 8px;
+  padding: 4px 8px;
   border-radius: 10px;
   border: 1px solid #E5E6EB;
   line-height: 18px;
@@ -3406,8 +3391,8 @@ watch(
   background: #FFFFFF;
   border: 1px solid #E5E6EB;
   border-radius: 6px;
-  padding: 14px 16px;
-  margin-bottom: 10px;
+  padding: 16px;
+  margin-bottom: 8px;
   transition: border-color 0.2s ease;
 }
 
@@ -3424,7 +3409,7 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .task-card-title {
@@ -3450,7 +3435,7 @@ watch(
   display: flex;
   gap: 8px;
   margin-top: 12px;
-  padding-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid #E5E6EB;
   flex-wrap: wrap;
 }
@@ -3510,14 +3495,14 @@ watch(
 }
 
 .task-dialog-section + .task-dialog-section {
-  margin-top: 12px;
+  margin-top: 16px;
 }
 
 .task-dialog-card {
-  padding: 14px;
-  border: 1px solid #E5E6EB;
-  border-radius: 8px;
-  background: #FFFFFF;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .task-dialog-scroll {
@@ -3549,7 +3534,7 @@ watch(
 
 .schedule-field-row :deep(.el-form-item),
 .schedule-custom-grid :deep(.el-form-item) {
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 
 .schedule-custom-grid .time-setting-grid,
@@ -3570,14 +3555,14 @@ watch(
 .deadline-setting-grid {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 6px;
+  gap: 8px;
   width: 100%;
 }
 
 .deadline-radio-option {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
   min-height: 32px;
   padding: 0;
@@ -3603,7 +3588,7 @@ watch(
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
-  column-gap: 6px;
+  column-gap: 8px;
   min-width: 0;
 }
 
@@ -3615,7 +3600,7 @@ watch(
 }
 
 :deep(.schedule-edit-dialog .el-dialog__header) {
-  padding: 14px 16px;
+  padding: 16px;
   margin-right: 0;
   border-bottom: 1px solid #E5E6EB;
 }
@@ -3627,13 +3612,13 @@ watch(
 }
 
 :deep(.schedule-edit-dialog .el-dialog__body) {
-  padding: 12px;
-  background: #fffcfc;
+  padding: 16px 20px;
+  background: #FFFFFF;
 }
 
 :deep(.schedule-edit-dialog .el-dialog__footer) {
-  padding: 0 12px 12px;
-  background: #fffcfc;
+  padding: 0 20px 16px;
+  background: #FFFFFF;
 }
 
 /* Toast 样式 */
@@ -3657,7 +3642,7 @@ watch(
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 18px;
+  padding: 8px 16px;
   background: #FFFFFF;
   border: 1px solid #E5E6EB;
   border-radius: 8px;

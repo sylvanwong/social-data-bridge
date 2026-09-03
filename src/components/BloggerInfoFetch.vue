@@ -17,8 +17,8 @@ const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output
 const MANUAL_TABLE_BASE_NAME = '博主信息';
 const FIELD_SELECTION_STORAGE_KEY = 'blogger_info_selected_fields_v2';
 const writeModeOptions = [
-  { value: 'append', label: '始终新增' },
   { value: 'upsert', label: '更新或新增' },
+  { value: 'append', label: '始终新增' },
 ];
 
 const REPEAT_TYPE_OPTIONS = [
@@ -126,7 +126,7 @@ const getDefaultTaskDialogForm = () => ({
   rowCount: 5,
   manualUrls: '',
   targetTableId: '',
-  writeMode: 'append',
+  writeMode: 'upsert',
   fieldMappings: [],
   selectedFieldKeys: getDefaultSelectedFieldKeys(),
   sourceTableId: '',
@@ -147,7 +147,7 @@ const formData = ref({
   rowCount: 5,
   manualUrls: '',
   targetTableId: '',
-  writeMode: 'append',
+  writeMode: 'upsert',
   fieldMappings: [],
   executionMode: 'immediate'
 });
@@ -159,7 +159,7 @@ const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
 const selectedFieldKeys = ref([]);
-const writeMode = ref('append');
+const writeMode = ref('upsert');
 const mappingDraft = ref([]);
 const taskMappingDraft = ref([]);
 const tableFieldOptions = ref([]);
@@ -410,7 +410,7 @@ const loadTableOutputConfig = async (tableId) => {
     const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
     tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
     const config = tableOutputConfigs.value[tableId];
-    writeMode.value = config?.write_mode || 'append';
+    writeMode.value = config?.write_mode || 'upsert';
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
   } catch (error) {
     console.error('读取目标表配置失败:', error);
@@ -420,7 +420,7 @@ const loadTableOutputConfig = async (tableId) => {
 };
 
 const applyTaskTableOutputConfig = async (tableId) => {
-  taskDialogForm.value.writeMode = 'append';
+  taskDialogForm.value.writeMode = 'upsert';
   taskDialogForm.value.fieldMappings = [];
   taskMappingDraft.value = [];
   if (!tableId) {
@@ -440,7 +440,7 @@ const applyTaskTableOutputConfig = async (tableId) => {
     const data = response.data?.data;
     const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
     const config = list.find(item => item?.target_table_id === tableId);
-    taskDialogForm.value.writeMode = config?.write_mode || 'append';
+    taskDialogForm.value.writeMode = config?.write_mode || 'upsert';
     taskMappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
     taskDialogForm.value.fieldMappings = taskMappingDraft.value.map(item => ({ ...item }));
   } catch (error) {
@@ -1402,7 +1402,7 @@ const openEditTaskDialog = async (task) => {
     rowCount: snapshot.row_count || 5,
     manualUrls: snapshot.manual_urls || '',
     targetTableId: snapshot.target_table_id || '',
-    writeMode: 'append',
+    writeMode: 'upsert',
     fieldMappings: [],
     selectedFieldKeys: Array.isArray(snapshot.selected_field_keys) && snapshot.selected_field_keys.length > 0
       ? snapshot.selected_field_keys
@@ -1765,7 +1765,7 @@ watch(
       formData.value.targetTableId = '';
       tableFieldOptions.value = [];
       mappingDraft.value = [];
-      writeMode.value = 'append';
+      writeMode.value = 'upsert';
     } else if (formData.value.targetTableId) {
       getTableFields(formData.value.targetTableId);
       loadTableOutputConfig(formData.value.targetTableId);
@@ -1861,11 +1861,7 @@ watch(
         <template v-if="formData.mode === 'table'">
           <el-form-item label="">
             <div class="c-label">
-              作者主页链接
-              <el-tooltip effect="dark" placement="top">
-                <template #content>支持抖音、小红书、快手、微博、微信、哔哩哔哩等平台的博主主页链接</template>
-                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
-              </el-tooltip>
+              作者主页链接所在字段
             </div>
             <el-select
               v-model="formData.profileLinkFieldId"
@@ -1923,17 +1919,13 @@ watch(
           <el-form-item>
             <div class="c-label">
               作者主页链接
-              <el-tooltip effect="dark" placement="top">
-                <template #content>仅支持作者主页链接，不支持其他链接</template>
-                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
-              </el-tooltip>
             </div>
             <el-input
               v-model="formData.manualUrls"
               type="textarea"
               :rows="4"
               class="c-input"
-              placeholder="请输入正确的作者主页链接，支持批量添加，多个链接可换行或用逗号分隔"
+              placeholder="请输入作者主页链接，支持批量输入（多个链接请换行或用逗号分隔）"
             />
           </el-form-item>
         </template>
@@ -2540,8 +2532,8 @@ watch(
 .source-mode-radio {
   display: flex;
   align-items: center;
-  gap: 20px;
-  margin: 0 0 16px;
+  gap: 16px;
+  margin: 0 0 12px;
   /* padding-bottom: 12px; */
 }
 .source-mode-radio :deep(.el-radio) {
@@ -2636,12 +2628,12 @@ watch(
 .commit-btn,
 .secondary-btn {
   width: 100%;
-  height: 40px;
+  height: 36px;
   border-radius: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 14px;
   font-weight: 500;
   margin-top: 0;
@@ -2871,17 +2863,17 @@ watch(
   width: 100%;
 }
 .field-selection-title {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 .field-selection-title .c-label {
   margin-bottom: 0;
 }
 .select-all-fields {
   margin-right: 0;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 .mapping-accordion {
-  margin: 4px 0 16px;
+  margin: 12px 0 16px;
   border-top: 1px solid #F0F1F3;
   border-bottom: 1px solid #F0F1F3;
 }
@@ -2921,7 +2913,7 @@ watch(
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   margin-bottom: 8px;
 }
 .mapping-arrow { color: #86909C; }
@@ -3002,7 +2994,7 @@ watch(
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: 16px;
   cursor: pointer;
   transition: background 0.2s ease;
   border-bottom: 1px solid transparent;
@@ -3044,7 +3036,7 @@ watch(
   font-size: 12px;
   color: #86909C;
   background: #F7F8FA;
-  padding: 2px 8px;
+  padding: 4px 8px;
   border-radius: 10px;
   border: 1px solid #E5E6EB;
   line-height: 18px;
@@ -3087,8 +3079,8 @@ watch(
   background: #FFFFFF;
   border: 1px solid #E5E6EB;
   border-radius: 6px;
-  padding: 14px 16px;
-  margin-bottom: 10px;
+  padding: 16px;
+  margin-bottom: 8px;
   transition: border-color 0.2s ease;
 }
 
@@ -3105,7 +3097,7 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 
 .task-card-title {
@@ -3136,7 +3128,7 @@ watch(
   display: flex;
   gap: 8px;
   margin-top: 12px;
-  padding-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid #E5E6EB;
   flex-wrap: wrap;
 }
@@ -3200,7 +3192,7 @@ watch(
 }
 
 .task-dialog-card {
-  padding: 14px;
+  padding: 16px;
   border: 1px solid #E5E6EB;
   border-radius: 8px;
   background: #FFFFFF;
@@ -3247,14 +3239,14 @@ watch(
 .deadline-setting-grid {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 6px;
+  gap: 8px;
   width: 100%;
 }
 
 .deadline-radio-option {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
   min-height: 32px;
   padding: 0;
@@ -3280,7 +3272,7 @@ watch(
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
-  column-gap: 6px;
+  column-gap: 8px;
   min-width: 0;
 }
 
@@ -3292,7 +3284,7 @@ watch(
 }
 
 :deep(.schedule-edit-dialog .el-dialog__header) {
-  padding: 14px 16px;
+  padding: 16px;
   margin-right: 0;
   border-bottom: 1px solid #E5E6EB;
 }
@@ -3333,7 +3325,7 @@ watch(
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 18px;
+  padding: 8px 16px;
   background: #FFFFFF;
   border: 1px solid #E5E6EB;
   border-radius: 8px;
