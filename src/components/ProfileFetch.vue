@@ -1930,9 +1930,6 @@ watch(
               </div>
               <div class="mapping-actions">
                 <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
-                <span v-if="tableConfigSaveStatus" class="mapping-save-status" :class="{ 'is-error': tableConfigSaveStatus === '保存失败' }">
-                  {{ tableConfigSaving ? '保存中' : tableConfigSaveStatus }}
-                </span>
               </div>
             </template>
             <p v-else class="mapping-empty">选择目标表格后配置字段映射</p>
@@ -3005,15 +3002,6 @@ watch(
 .mapping-actions :deep(.el-button) {
   margin-left: 0;
 }
-.mapping-save-status {
-  color: #86909C;
-  font-size: 12px;
-  line-height: 20px;
-}
-.mapping-save-status.is-error {
-  color: #F53F3F;
-}
-
 .task-dialog-title {
   font-size: 15px;
   font-weight: 600;
