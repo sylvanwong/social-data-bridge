@@ -468,7 +468,7 @@ const mappingSourceFields = computed(() => FIELD_CONFIG.filter(field => selected
 const mappingStatus = computed(() => {
   if (formData.value.mode === 'table') {
     const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
-    return count ? `已设置 ${count} 项映射` : '映射到当前表格';
+    return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
   }
   if (!formData.value.targetTableId) return '选择目标表格后可设置';
   const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;

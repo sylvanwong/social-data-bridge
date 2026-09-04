@@ -66,7 +66,7 @@ const pages_options = [
 const xhs_pages_options = pages_options.filter(item => item.value !== 0);
 const workRangeTypes = [
   { value: 'all', label: '全部作品' },
-  { value: 'pages', label: '最新' },
+  { value: 'pages', label: '前' },
   { value: 'days', label: '最近' },
 ];
 const writeModeOptions = [
@@ -947,7 +947,7 @@ watch(selectedFieldKeys, (keys) => {
             <span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }" aria-hidden="true"></span>
           </button>
           <div v-show="mappingExpanded" class="mapping-accordion-panel">
-            <p class="mapping-note">同名字段将自动写入；不同名时请指定目标列。</p>
+            <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
             <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
               <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
                 <el-option v-for="field in mappingSourceFields" :key="field.key" :label="field.name" :value="field.key" />
