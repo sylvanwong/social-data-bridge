@@ -140,10 +140,10 @@ const taskList = ref([]);
 const taskListLoading = ref(false);
 const taskManagerExpanded = ref(false);
 
-const pages_options = Array.from({ length: 50 }, (_, index) => ({ value: index + 1, label: `最新 ${index + 1} 页` }));
+const pages_options = Array.from({ length: 50 }, (_, index) => ({ value: index + 1, label: `前 ${index + 1} 页` }));
 const workRangeTypes = [
   { value: 'all', label: '全部作品' },
-  { value: 'pages', label: '最新' },
+  { value: 'pages', label: '前' },
   { value: 'days', label: '最近' },
 ];
 const writeModeOptions = [
@@ -1255,7 +1255,7 @@ const buildTaskSummary = (task) => {
     : range?.type === 'all'
       ? '作品范围 全部作品'
       : range?.value
-        ? `作品范围 最新${range.value}页`
+        ? `作品范围 前${range.value}页`
         : '';
   return [modeText, targetText, pageText].filter(Boolean).join(' · ');
 };
