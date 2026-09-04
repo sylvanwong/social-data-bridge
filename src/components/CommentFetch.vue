@@ -1,13 +1,17 @@
 <script setup>
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage, ElNotification } from "element-plus";
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import request from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
 
 const props = defineProps({
   api_key: String,
 })
+
+const TASK_PLUGIN_TYPE = 'comment_fetch';
+const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
+const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 
 let note_timer = null;
 const formData = ref({
@@ -20,10 +24,21 @@ const formData = ref({
   pages: 1,
   reply_pages: -1,
   sortType: 'default',
+  writeMode: 'upsert',
   table_id: "",
 });
+const commentPagesType = ref(formData.value.pages === 0 ? 'all' : 'pages');
+const replyPagesType = ref(formData.value.reply_pages === -1 ? 'none' : (formData.value.reply_pages === 0 ? 'all' : 'pages'));
+const replyPageCount = ref(Number(formData.value.reply_pages) > 0 ? Number(formData.value.reply_pages) : 1);
 const table_options = ref([]);
 const fieldOptions = ref([]);
+const tableFieldOptions = ref([]);
+const tableOutputConfigs = ref({});
+const mappingDraft = ref([]);
+const mappingExpanded = ref(false);
+const tableConfigLoading = ref(false);
+const tableConfigApplying = ref(false);
+const tableConfigSaving = ref(false);
 const loading = ref(false);
 const profileProgress = ref({ text: "", done: false });
 let page = 1;
@@ -129,11 +144,39 @@ const xhsCommentSortOptions = [
   { value: 'time_descending', label: '最新评论优先' },
   { value: 'like_count_descending', label: '点赞最多优先' },
 ];
+const writeModeOptions = [
+  { value: 'upsert', label: '更新或新增' },
+  { value: 'append', label: '始终新增' },
+];
+
+watch(commentPagesType, (type) => {
+  if (type === 'all') {
+    formData.value.pages = 0;
+  } else if (Number(formData.value.pages) === 0) {
+    formData.value.pages = 1;
+  }
+});
+
+watch(replyPagesType, (type) => {
+  if (type === 'none') {
+    formData.value.reply_pages = -1;
+  } else if (type === 'all') {
+    formData.value.reply_pages = 0;
+  } else if (Number(formData.value.reply_pages) <= 0) {
+    formData.value.reply_pages = replyPageCount.value;
+  }
+});
+
+watch(replyPageCount, (count) => {
+  if (replyPagesType.value === 'pages') {
+    formData.value.reply_pages = Math.max(1, Math.min(50, Number(count) || 1));
+  }
+});
 
 const scopeOptions = [
-  { value: 'all', label: '执行所有行' },
-  { value: 'selected', label: '执行选中行' },
-  { value: 'n', label: '执行前N行' },
+  { value: 'all', label: '全部行' },
+  { value: 'selected', label: '选中行' },
+  { value: 'n', label: '前N行' },
 ];
 
 const showErrorMsg = (message) => {
@@ -159,6 +202,26 @@ const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
 const getActiveFieldConfigs = () => {
   const selectedKeySet = new Set(selectedFieldKeys.value);
   return FIELD_CONFIG.filter(field => field.required || selectedKeySet.has(field.key));
+};
+
+const mappingSourceFields = computed(() => FIELD_CONFIG.filter(field => selectedFieldKeys.value.includes(field.key)));
+const mappingStatus = computed(() => {
+  if (!formData.value.table_id) return '选择目标表格后可设置';
+  const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
+  return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
+});
+
+const selectableFieldKeys = computed(() => FIELD_CONFIG.filter(field => !field.required).map(field => field.key));
+const isAllFieldsSelected = computed(() => selectableFieldKeys.value.every(key => selectedFieldKeys.value.includes(key)));
+const isFieldsPartiallySelected = computed(() => {
+  const selectedCount = selectableFieldKeys.value.filter(key => selectedFieldKeys.value.includes(key)).length;
+  return selectedCount > 0 && selectedCount < selectableFieldKeys.value.length;
+});
+const toggleAllFields = (checked) => {
+  const requiredKeys = FIELD_CONFIG.filter(field => field.required).map(field => field.key);
+  selectedFieldKeys.value = checked
+    ? [...requiredKeys, ...selectableFieldKeys.value]
+    : requiredKeys;
 };
 
 const loadSelectedFieldKeys = async () => {
@@ -207,6 +270,7 @@ const closeNoteInterval = () => {
 onMounted(async () => {
   await loadFieldOptions({ silent: true });
   await loadSelectedFieldKeys();
+  await loadTableOutputConfigs();
   fieldSelectionReady.value = true;
   await commentStreamTask.resume(() => {
     loading.value = true;
@@ -233,6 +297,101 @@ const loadTableOptions = async () => {
   } catch (error) {
     console.error("获取表格列表失败:", error);
     showErrorMsg("获取表格列表失败，请稍后重试");
+  }
+};
+
+const loadTargetFieldOptions = async (tableId) => {
+  if (!tableId) {
+    tableFieldOptions.value = [];
+    return;
+  }
+  tableConfigLoading.value = true;
+  try {
+    const table = await bitable.base.getTableById(tableId);
+    const fields = await table.getFieldMetaList();
+    tableFieldOptions.value = fields.map(field => ({ id: field.id, name: field.name, type: field.type }));
+  } catch (error) {
+    tableFieldOptions.value = [];
+    console.error('读取目标表字段失败:', error);
+  } finally {
+    tableConfigLoading.value = false;
+  }
+};
+
+const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
+
+const loadTableOutputConfigs = async () => {
+  if (!props.api_key) return;
+  try {
+    const response = await request({
+      url: TABLE_CONFIGS_API_PATH,
+      method: 'get',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() },
+    });
+    const data = response.data?.data || response.data;
+    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
+    tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
+    if (formData.value.radio === 2 && formData.value.table_id) {
+      await applyTableOutputConfig(formData.value.table_id);
+    }
+  } catch (error) {
+    console.error('读取评论表格配置失败:', error);
+  }
+};
+
+const applyTableOutputConfig = async (tableId) => {
+  tableConfigApplying.value = true;
+  try {
+    const config = tableOutputConfigs.value[tableId];
+    formData.value.writeMode = config?.write_mode || 'upsert';
+    mappingDraft.value = Array.isArray(config?.field_mappings)
+      ? config.field_mappings.map(item => ({ ...item }))
+      : [];
+    await loadTargetFieldOptions(tableId);
+  } finally {
+    tableConfigApplying.value = false;
+  }
+};
+
+const saveTableOutputConfig = async () => {
+  const targetTableId = formData.value.table_id;
+  if (formData.value.radio !== 2 || !targetTableId || tableConfigApplying.value || tableConfigSaving.value) return;
+  tableConfigSaving.value = true;
+  try {
+    const table = await bitable.base.getTableById(targetTableId);
+    const fields = tableFieldOptions.value;
+    const fieldMappings = mappingDraft.value
+      .filter(item => item.source_key && item.target_field_id)
+      .map(item => {
+        const source = FIELD_CONFIG.find(field => field.key === item.source_key);
+        const target = fields.find(field => field.id === item.target_field_id);
+        return {
+          ...item,
+          source_name: source?.name || item.source_name || '',
+          target_field_name: target?.name || item.target_field_name || '',
+          target_field_type: target?.type ?? item.target_field_type,
+        };
+      });
+    const response = await request({
+      url: TABLE_CONFIG_API_PATH,
+      method: 'put',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      data: {
+        plugin_type: TASK_PLUGIN_TYPE,
+        base_id: await getBaseId(),
+        target_table_id: targetTableId,
+        target_table_name: await table.getName(),
+        write_mode: formData.value.writeMode,
+        field_mappings: fieldMappings,
+      },
+    });
+    const saved = response.data?.data || response.data;
+    tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: saved };
+  } catch (error) {
+    console.error('保存评论表格配置失败:', error);
+  } finally {
+    tableConfigSaving.value = false;
   }
 };
 
@@ -387,6 +546,26 @@ watch(
 );
 
 watch(
+  () => formData.value.table_id,
+  async (tableId) => {
+    mappingExpanded.value = false;
+    if (!tableId) {
+      mappingDraft.value = [];
+      tableFieldOptions.value = [];
+      return;
+    }
+    if (tableOutputConfigs.value[tableId]) {
+      await applyTableOutputConfig(tableId);
+    } else {
+      mappingDraft.value = [];
+      await loadTargetFieldOptions(tableId);
+    }
+  }
+);
+
+watch([() => formData.value.writeMode, mappingDraft], saveTableOutputConfig, { deep: true });
+
+watch(
   () => formData.value.mode,
   (mode) => {
     if (mode === 'table') {
@@ -465,9 +644,14 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
 
     if (resolvedTargetTableId) {
       let existingFieldMap = await getFieldInstanceMapByConfigs(activeTable, activeFieldConfigs);
+      const mappingBySource = new Map(
+        (options.fieldMappings || mappingDraft.value)
+          .filter(item => item.source_key && item.target_field_id)
+          .map(item => [item.source_key, item.target_field_id])
+      );
 
       for (const config of activeFieldConfigs) {
-        if (!existingFieldMap.has(config.name)) {
+        if (!mappingBySource.has(config.key) && !existingFieldMap.has(config.name)) {
           await activeTable.addField(buildFieldPayload(config));
         }
       }
@@ -475,7 +659,10 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
       existingFieldMap = await getFieldInstanceMapByConfigs(activeTable, activeFieldConfigs);
 
       for (const config of activeFieldConfigs) {
-        const field = existingFieldMap.get(config.name);
+        const mappedFieldId = mappingBySource.get(config.key);
+        const field = mappedFieldId
+          ? await activeTable.getFieldById(mappedFieldId)
+          : existingFieldMap.get(config.name);
         if (!field) {
           throw new Error(`字段 ${config.name} 创建后读取失败`);
         }
@@ -486,19 +673,55 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
         }
       }
       const records = [];
+      const normalizedRecords = [];
       for (const item of list) {
         const record = [];
+        const fieldsById = {};
         for (const config of activeFieldConfigs) {
-          const field = existingFieldMap.get(config.name);
+          const mappedFieldId = mappingBySource.get(config.key);
+          const field = mappedFieldId
+            ? await activeTable.getFieldById(mappedFieldId)
+            : existingFieldMap.get(config.name);
+          if (!field) {
+            throw new Error(`字段 ${config.name} 映射目标不存在`);
+          }
           const fieldType = await field.getType();
           const value = (config.name === '评论者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect
             ? (config.getValue(item) || null)
             : config.getValue(item);
-          record.push(await field.createCell(value));
+          const cell = await field.createCell(value);
+          record.push(cell);
+          fieldsById[field.id] = await cell.getValue();
         }
         records.push(record);
+        normalizedRecords.push(fieldsById);
       }
-      await activeTable.addRecords(records);
+      if (options.writeMode === 'upsert') {
+        const keyFieldId = mappingBySource.get('cid') || existingFieldMap.get('评论ID')?.id;
+        if (!keyFieldId) throw new Error('更新或新增需要“评论ID”字段');
+        const existingByCid = new Map();
+        let pageToken;
+        do {
+          const result = await activeTable.getRecordsByPage({ pageSize: 200, pageToken });
+          for (const record of result.records || []) {
+            const cid = record.fields?.[keyFieldId];
+            if (cid !== null && cid !== undefined && String(cid).trim()) existingByCid.set(String(cid).trim(), record.recordId);
+          }
+          pageToken = result.hasMore ? result.pageToken : undefined;
+        } while (pageToken !== undefined);
+        const updates = [];
+        const creates = [];
+        list.forEach((item, index) => {
+          const cid = item?.cid === null || item?.cid === undefined ? '' : String(item.cid).trim();
+          const recordId = cid ? existingByCid.get(cid) : null;
+          if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
+          else creates.push(records[index]);
+        });
+        if (updates.length) await activeTable.setRecords(updates);
+        if (creates.length) await activeTable.addRecords(creates);
+      } else {
+        await activeTable.addRecords(records);
+      }
       if (options.stopAfterCurrentBatch) return { tableId: activeTable.id };
       resetParams();
       return;
@@ -542,6 +765,8 @@ const commentStreamTask = useIncrementalTask({
   writeBatch: async (items, task) => {
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', {
       stopAfterCurrentBatch: true,
+      writeMode: task.writeMode || 'upsert',
+      fieldMappings: task.fieldMappings || [],
       onTargetTableReady: async (tableId) => { task.targetTableId = tableId; },
     });
     task.targetTableId = result?.tableId || task.targetTableId;
@@ -580,7 +805,12 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
       let res = response.data;
       if (res.sta == 0) {
         const data = res.data;
-        commentStreamTask.start({ taskId: data.task_id, targetTableId });
+        commentStreamTask.start({
+          taskId: data.task_id,
+          targetTableId,
+          writeMode: formData.value.writeMode,
+          fieldMappings: mappingDraft.value.map(item => ({ ...item })),
+        });
       } else {
         loading.value = false;
         showErrorMsg(res.msg);
@@ -704,54 +934,26 @@ watch(selectedFieldKeys, (keys) => {
       <span class="sub-page-title">评论列表获取</span>
     </div>
     <div class="form-card">
-      <div class="mode-switch">
-        <button
-          type="button"
-          class="mode-tab"
-          :class="{ active: formData.mode === 'table' }"
-          @click="formData.mode = 'table'"
-        >
-          从表格选取
-        </button>
-        <button
-          type="button"
-          class="mode-tab"
-          :class="{ active: formData.mode === 'manual' }"
-          @click="formData.mode = 'manual'"
-        >
-          手动输入
-        </button>
-      </div>
+      <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
+      <div class="group-label">作品链接来源</div>
+      <el-radio-group v-model="formData.mode" class="radio-block source-mode-radio">
+        <el-radio value="table">从表格选取</el-radio>
+        <el-radio value="manual">手动输入</el-radio>
+      </el-radio-group>
       <el-form ref="form" class="form" :model="formData" label-position="top">
-        <el-form-item label="" style="margin-top: 12px">
-          <div class="field-stack">
-            <div class="c-label">目标表格</div>
-            <el-radio-group v-model="formData.radio" class="radio-block">
-              <el-radio :value="1">新建表格</el-radio>
-              <el-radio :value="2">使用现有表格</el-radio>
-            </el-radio-group>
-          </div>
-        </el-form-item>
-        <el-form-item v-if="formData.radio === 2" label="">
-          <div slot="label" class="c-label">选择现有表格</div>
-          <el-select v-model="formData.table_id" placeholder="请选择" style="width: 100%">
-            <el-option v-for="tl in table_options" :key="tl.id" :label="tl.name" :value="tl.id" />
-          </el-select>
-        </el-form-item>
-
         <template v-if="formData.mode === 'table'">
           <el-form-item>
             <div slot="label" class="c-label">
-              帖子链接
+              作品链接
               <el-tooltip effect="dark" placement="top">
-                <template #content>支持多条帖子链接，<br />可换行或逗号分隔</template>
+                <template #content>支持多条作品链接，<br />可换行或逗号分隔</template>
                 <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                   class="help-icon" />
               </el-tooltip>
             </div>
             <el-select
               v-model="formData.noteLinkFieldId"
-              placeholder="选择包含帖子链接的字段"
+              placeholder="选择字段"
               style="width: 100%"
             >
               <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
@@ -760,16 +962,16 @@ watch(selectedFieldKeys, (keys) => {
 
           <el-form-item>
             <div slot="label" class="c-label">
-              数据范围
+              输入行范围
               <el-tooltip effect="dark" placement="top">
-                <template #content>选择要执行的数据范围</template>
+                <template #content>选择要执行的输入行范围</template>
                 <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                   class="help-icon" />
               </el-tooltip>
             </div>
             <el-radio-group v-model="formData.scope" class="custom-radio-group">
               <el-radio v-for="option in scopeOptions" :key="option.value" :value="option.value" class="custom-radio-item">
-                <span class="radio-label-text">{{ option.label }}</span>
+                <span class="radio-label-text">{{ option.value === 'n' ? '前' : option.label }}</span>
                 <div v-if="option.value === 'n'" class="custom-stepper-input">
                   <input
                     type="number"
@@ -794,6 +996,7 @@ watch(selectedFieldKeys, (keys) => {
                     ></button>
                   </div>
                 </div>
+                <span v-if="option.value === 'n'" class="range-unit">行</span>
               </el-radio>
             </el-radio-group>
           </el-form-item>
@@ -802,9 +1005,9 @@ watch(selectedFieldKeys, (keys) => {
         <template v-else>
           <el-form-item>
             <div slot="label" class="c-label">
-              帖子链接
+              作品链接
               <el-tooltip effect="dark" placement="top">
-                <template #content>支持多条帖子链接，<br />可换行或逗号分隔</template>
+                <template #content>支持多条作品链接，<br />可换行或逗号分隔</template>
                 <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                   class="help-icon" />
               </el-tooltip>
@@ -814,7 +1017,7 @@ watch(selectedFieldKeys, (keys) => {
               type="textarea"
               :rows="4"
               class="c-input"
-              placeholder="请输入正确的帖子链接，支持批量添加，多个链接可换行或用逗号分隔"
+              placeholder="请输入作品链接，支持批量输入（多个链接请换行或用逗号分隔）"
             />
           </el-form-item>
         </template>
@@ -828,15 +1031,78 @@ watch(selectedFieldKeys, (keys) => {
                 class="help-icon" />
             </el-tooltip>
           </div>
-          <el-select v-model="formData.pages" placeholder="请选择" style="width: 100%">
-            <el-option v-for="tl in pages_options" :key="tl.value" :label="tl.label" :value="tl.value" />
-          </el-select>
+          <el-radio-group v-model="commentPagesType" class="custom-radio-group">
+            <el-radio value="all" class="custom-radio-item">
+              <span class="radio-label-text">全部评论</span>
+            </el-radio>
+            <el-radio value="pages" class="custom-radio-item">
+              <span class="radio-label-text">前</span>
+              <div class="custom-stepper-input range-stepper">
+                <input
+                  v-model.number="formData.pages"
+                  type="number"
+                  min="1"
+                  max="50"
+                  :disabled="commentPagesType !== 'pages'"
+                  @click.stop
+                />
+                <div class="stepper-buttons">
+                  <button
+                    type="button"
+                    class="stepper-btn stepper-btn-up"
+                    :disabled="commentPagesType !== 'pages'"
+                    @click.stop="formData.pages = Math.min(50, (formData.pages || 1) + 1)"
+                  ></button>
+                  <button
+                    type="button"
+                    class="stepper-btn stepper-btn-down"
+                    :disabled="commentPagesType !== 'pages'"
+                    @click.stop="formData.pages = Math.max(1, (formData.pages || 1) - 1)"
+                  ></button>
+                </div>
+              </div>
+              <span class="range-unit">页</span>
+            </el-radio>
+          </el-radio-group>
         </el-form-item>
         <el-form-item label="">
           <div slot="label" class="c-label">子评论提取范围</div>
-          <el-select v-model="formData.reply_pages" placeholder="请选择" style="width: 100%">
-            <el-option v-for="tl in reply_pages_options" :key="tl.value" :label="tl.label" :value="tl.value" />
-          </el-select>
+          <el-radio-group v-model="replyPagesType" class="custom-radio-group">
+            <el-radio value="none" class="custom-radio-item">
+              <span class="radio-label-text">不获取</span>
+            </el-radio>
+            <el-radio value="all" class="custom-radio-item">
+              <span class="radio-label-text">全部评论</span>
+            </el-radio>
+            <el-radio value="pages" class="custom-radio-item">
+              <span class="radio-label-text">前</span>
+              <div class="custom-stepper-input range-stepper">
+                <input
+                  v-model.number="replyPageCount"
+                  type="number"
+                  min="1"
+                  max="50"
+                  :disabled="replyPagesType !== 'pages'"
+                  @click.stop
+                />
+                <div class="stepper-buttons">
+                  <button
+                    type="button"
+                    class="stepper-btn stepper-btn-up"
+                    :disabled="replyPagesType !== 'pages'"
+                    @click.stop="replyPageCount = Math.min(50, (replyPageCount || 1) + 1)"
+                  ></button>
+                  <button
+                    type="button"
+                    class="stepper-btn stepper-btn-down"
+                    :disabled="replyPagesType !== 'pages'"
+                    @click.stop="replyPageCount = Math.max(1, (replyPageCount || 1) - 1)"
+                  ></button>
+                </div>
+              </div>
+              <span class="range-unit">页</span>
+            </el-radio>
+          </el-radio-group>
         </el-form-item>
         <el-form-item label="">
           <div slot="label" class="c-label">评论排序（仅小红书）</div>
@@ -845,8 +1111,46 @@ watch(selectedFieldKeys, (keys) => {
           </el-select>
         </el-form-item>
 
+        <div class="section-heading output-heading"><span class="section-step">2</span><span>输出设置</span></div>
+        <el-form-item label="">
+          <div class="field-stack">
+            <div class="c-label">输出到表格</div>
+            <el-radio-group v-model="formData.radio" class="radio-block">
+              <el-radio :value="1">新建表格</el-radio>
+              <el-radio :value="2">使用现有表格</el-radio>
+            </el-radio-group>
+          </div>
+        </el-form-item>
+        <el-form-item v-if="formData.radio === 2" label="">
+          <div slot="label" class="c-label">选择现有表格</div>
+          <el-select v-model="formData.table_id" placeholder="请选择" style="width: 100%">
+            <el-option v-for="tl in table_options" :key="tl.id" :label="tl.name" :value="tl.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="formData.radio === 2" label="" style="margin-top: 12px">
+          <div class="c-label">数据写入方式</div>
+          <el-radio-group v-model="formData.writeMode" class="radio-block">
+            <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
+              {{ item.label }}
+              <el-tooltip v-if="item.value === 'upsert'" effect="dark" placement="top">
+                <template #content>按评论ID判断是否为同一条评论；已存在则更新，不存在则新增。</template>
+                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
+              </el-tooltip>
+            </el-radio>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="" style="margin-top: 12px">
-          <div slot="label" class="c-label">选择需要的字段</div>
+          <div class="field-selection-title">
+            <div class="c-label">输出字段</div>
+            <el-checkbox
+              :model-value="isAllFieldsSelected"
+              :indeterminate="isFieldsPartiallySelected"
+              class="select-all-fields"
+              @change="toggleAllFields"
+            >
+              全选
+            </el-checkbox>
+          </div>
           <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
             <el-checkbox
               v-for="field in FIELD_CONFIG"
@@ -859,6 +1163,32 @@ watch(selectedFieldKeys, (keys) => {
             </el-checkbox>
           </el-checkbox-group>
         </el-form-item>
+        <div v-if="formData.radio === 2" class="mapping-accordion">
+          <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded">
+            <span class="mapping-accordion-label">字段映射 <span class="mapping-optional">（可选）</span><span class="mapping-status">{{ mappingStatus }}</span></span>
+            <span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }" aria-hidden="true"></span>
+          </button>
+          <div v-show="mappingExpanded" class="mapping-accordion-panel">
+            <div v-if="tableConfigLoading" class="sub-hint">正在加载表格配置...</div>
+            <template v-else-if="formData.table_id">
+              <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。</p>
+              <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
+                <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+                  <el-option v-for="field in mappingSourceFields" :key="field.key" :label="field.name" :value="field.key" />
+                </el-select>
+                <span class="mapping-arrow">→</span>
+                <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+                  <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+                </el-select>
+                <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+              </div>
+              <div class="mapping-actions">
+                <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
+              </div>
+            </template>
+            <p v-else class="mapping-empty">选择目标表格后配置字段映射</p>
+          </div>
+        </div>
       </el-form>
 
       <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="commit">提交</el-button>
@@ -922,38 +1252,59 @@ watch(selectedFieldKeys, (keys) => {
   border-radius: 8px;
   box-sizing: border-box;
 }
-.mode-switch {
-  display: flex;
-  gap: 0;
-  margin-bottom: 20px;
-  background: #F7F8FA;
-  border-radius: 6px;
-  padding: 3px;
-  border: 1px solid #E5E6EB;
-}
-.mode-tab {
-  flex: 1;
+.section-heading {
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 8px 0;
-  font-size: 13px;
+  gap: 8px;
+  margin: 0 0 12px;
+  color: #1D2129;
+  font-size: 16px;
   font-weight: 500;
+  line-height: 22px;
+}
+.section-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: #A8071A;
+  background: #FFF1F2;
+  font-size: 12px;
+  font-weight: 600;
+}
+.group-label {
+  margin-bottom: 8px;
   color: #4E5969;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.2s ease;
+  font-size: 14px;
   line-height: 20px;
 }
-.mode-tab:hover {
+.source-mode-radio {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.source-mode-radio :deep(.el-radio) {
+  margin-right: 0;
+}
+.source-mode-radio :deep(.el-radio__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  font-size: 14px;
+}
+.source-mode-radio :deep(.el-radio__input.is-checked .el-radio__inner) {
+  border-color: #A8071A;
+  background: #A8071A;
+}
+.source-mode-radio :deep(.el-radio__input.is-checked + .el-radio__label) {
   color: #1D2129;
 }
-.mode-tab.active {
-  background: #FFFFFF;
-  color: #A8071A;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+.output-heading {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #F0F1F3;
 }
 .form :deep(.el-form-item__label) {
   font-size: 14px;
@@ -1060,6 +1411,11 @@ watch(selectedFieldKeys, (keys) => {
   flex-shrink: 0;
 }
 
+.custom-radio-group .custom-stepper-input,
+.custom-radio-group .range-stepper {
+  margin-left: 8px;
+}
+
 .custom-stepper-input {
   display: flex;
   align-items: center;
@@ -1072,6 +1428,48 @@ watch(selectedFieldKeys, (keys) => {
   overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
+
+.range-stepper {
+  margin-left: auto;
+}
+
+.range-unit {
+  margin-left: 8px;
+  color: #4E5969;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.mapping-accordion {
+  margin: 12px 0 16px;
+  border-top: 1px solid #F0F1F3;
+  border-bottom: 1px solid #F0F1F3;
+}
+.mapping-accordion-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 0;
+  color: #1D2129;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.mapping-accordion-label { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; font-size: 14px; font-weight: 500; line-height: 22px; }
+.mapping-optional, .mapping-status { color: #86909C; font-size: 12px; font-weight: 400; }
+.mapping-chevron { width: 8px; height: 8px; margin-right: 4px; border-right: 1.5px solid #86909C; border-bottom: 1.5px solid #86909C; transform: rotate(45deg) translateY(-2px); transition: transform 0.2s ease; }
+.mapping-chevron.is-expanded { transform: rotate(225deg) translateY(-2px); }
+.mapping-accordion-panel { padding: 0 0 12px; }
+.mapping-note, .mapping-empty { margin: 0 0 12px; color: #86909C; font-size: 12px; line-height: 18px; }
+.mapping-row { display: grid; grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr) auto; gap: 4px; align-items: center; min-height: 44px; border-top: 1px solid #F0F1F3; }
+.mapping-arrow { color: #86909C; text-align: center; }
+.mapping-delete { min-width: 28px; padding: 4px; }
+.mapping-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.mapping-actions :deep(.el-button) { margin-left: 0; }
 
 .custom-stepper-input:hover {
   border-color: #86909C;
@@ -1175,6 +1573,19 @@ watch(selectedFieldKeys, (keys) => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px 16px;
   width: 100%;
+}
+
+.field-selection-title {
+  margin-bottom: 8px;
+}
+
+.field-selection-title .c-label {
+  margin-bottom: 0;
+}
+
+.select-all-fields {
+  margin-right: 0;
+  margin-bottom: 8px;
 }
 
 .field-checkbox-item {
