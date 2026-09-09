@@ -1814,7 +1814,7 @@ watch(
                   class="help-icon" />
               </el-tooltip>
             </div>
-            <el-input v-model="formData.manualUrls" type="textarea" :rows="4" class="c-input" placeholder="请输入正确的博主主页链接，支持批量添加，多个链接可换行或用逗号分隔" />
+            <el-input v-model="formData.manualUrls" type="textarea" :rows="4" class="c-input" placeholder="请输入作者主页链接，支持批量输入（多个链接请换行或用逗号分隔）" />
           </el-form-item>
         </template>
 
@@ -2194,7 +2194,7 @@ watch(
                   v-model="taskDialogForm.manualUrls"
                   type="textarea"
                   :rows="4"
-                  placeholder="请输入正确的博主主页链接，多个链接可换行或用逗号分隔"
+                  placeholder="请输入作者主页链接，支持批量输入（多个链接请换行或用逗号分隔）"
                 />
               </el-form-item>
             </template>
