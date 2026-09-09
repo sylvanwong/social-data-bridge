@@ -106,7 +106,7 @@ const mappingSourceFields = computed(() => FIELD_MAPPING.filter(field => selecte
 const mappingStatus = computed(() => {
   if (!formData.value.table_id) return '选择目标表格后可设置';
   const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
-  return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
+  return count ? `已设置 ${count} 项映射` : '选择目标表格后可设置';
 });
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
@@ -1057,7 +1057,7 @@ watch(selectedFieldKeys, (keys) => {
           <div v-show="mappingExpanded" class="mapping-accordion-panel">
             <p v-if="tableConfigLoading" class="mapping-empty">正在读取目标表字段...</p>
             <template v-else-if="tableFieldOptions.length">
-              <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。</p>
+              <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
               <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
                 <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
                   <el-option v-for="field in mappingSourceFields" :key="field.key" :label="field.name" :value="field.key" />

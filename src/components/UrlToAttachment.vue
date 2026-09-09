@@ -1,6 +1,6 @@
 <script setup>
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
-import { ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
 
@@ -41,6 +41,19 @@ const loading = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
+const mappingExpanded = ref(false);
+const mappingDraft = ref([]);
+const targetFieldOptions = ref([]);
+const tableOutputConfigs = ref({});
+const tableConfigApplying = ref(false);
+const tableConfigSaving = ref(false);
+const TASK_PLUGIN_TYPE = 'url_to_attachment';
+const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
+const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const mappingStatus = computed(() => { const count = mappingDraft.value.filter(item => item?.source_key && item?.target_field_id).length; return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射'; });
+const selectedUrlFieldName = computed(() => (
+  fieldOptions.value.find(field => field.id === formData.value.urlFieldId)?.name || ''
+));
 
 const getFieldListByType = async ({ silent = false } = {}) => {
   try {
@@ -83,6 +96,18 @@ const loadTableOptions = async () => {
     tableOptions.value = [];
     ElNotification({ message: '获取表格列表失败，请稍后重试', type: 'error', duration: 0 });
   }
+};
+const loadTargetFieldOptions = async (tableId) => {
+  if (!tableId) { targetFieldOptions.value = []; return; }
+  try { targetFieldOptions.value = await (await bitable.base.getTableById(tableId)).getFieldMetaList(); } catch (error) { targetFieldOptions.value = []; }
+};
+const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
+const loadTableOutputConfigs = async () => { if (!props.api_key) return; try { const r = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } }); const d = r.data?.data || r.data; const list = Array.isArray(d) ? d : (d?.list || d?.items || []); tableOutputConfigs.value = Object.fromEntries(list.filter(i => i?.target_table_id).map(i => [i.target_table_id, i])); } catch (e) {} };
+const applyTableOutputConfig = async (id) => { tableConfigApplying.value = true; try { const c = tableOutputConfigs.value[id]; mappingDraft.value = Array.isArray(c?.field_mappings) ? c.field_mappings.map(i => ({ ...i })) : []; await loadTargetFieldOptions(id); } finally { tableConfigApplying.value = false; } };
+const saveTableOutputConfig = async () => { const id = formData.value.targetTableId; if (formData.value.targetType !== 'existing' || !id || !props.api_key || tableConfigApplying.value || tableConfigSaving.value) return; tableConfigSaving.value = true; try { const table = await bitable.base.getTableById(id); const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: id, target_table_name: await table.getName(), write_mode: 'append', field_mappings: mappingDraft.value.filter(i => i.source_key && i.target_field_id).map(i => ({ ...i, source_name: '附件', target_field_name: targetFieldOptions.value.find(f => f.id === i.target_field_id)?.name || '' })) }; const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload }); tableOutputConfigs.value = { ...tableOutputConfigs.value, [id]: response.data?.data || response.data || payload }; } finally { tableConfigSaving.value = false; } };
+const resolveAttachmentFieldId = (fieldNameToId, config = MANUAL_FIELD_CONFIGS[0]) => {
+  const mapping = mappingDraft.value.find(item => item?.source_key === config.key && item?.target_field_id);
+  return mapping?.target_field_id || fieldNameToId[config.name];
 };
 
 const getAllVisibleRecordIdList = async (view) => {
@@ -158,6 +183,18 @@ const validateAndAddFields = async (tableId = '', activeFieldConfigs = MANUAL_FI
     const typeMismatchFields = [];
 
     for (const config of activeFieldConfigs) {
+      const mappedFieldId = mappingDraft.value.find(mapping => mapping?.source_key === config.key && mapping?.target_field_id)?.target_field_id;
+      if (mappedFieldId) {
+        const mappedField = fieldList.find(field => field.id === mappedFieldId);
+        if (!mappedField) {
+          ElNotification({ message: `映射目标字段不存在: ${config.name}`, type: 'error', duration: 0 });
+          return null;
+        }
+        if (mappedField.type !== config.type) {
+          typeMismatchFields.push({ name: `${config.name} → ${await mappedField.getName()}`, expected: FIELD_TYPE_NAME[config.type] || config.type, actual: mappedField.type });
+        }
+        continue;
+      }
       const fieldMeta = fieldMetaMap.get(config.name);
       if (!fieldMeta) {
         missingFields.push(config);
@@ -313,7 +350,7 @@ const writeDataToRecord = async (recordId, urls, fieldNameToId, activeFieldConfi
   const table = await bitable.base.getActiveTable();
 
   for (const config of activeFieldConfigs) {
-    const fieldId = fieldNameToId[config.name];
+    const fieldId = resolveAttachmentFieldId(fieldNameToId, config);
     if (!fieldId) continue;
 
     const field = await table.getField(fieldId);
@@ -348,7 +385,7 @@ const appendRecordsToTable = async (tableId, rows) => {
     fieldMetaMap.set(name, field.id);
   }
 
-  const attachmentFieldId = fieldMetaMap.get(MANUAL_FIELD_CONFIGS[0].name);
+  const attachmentFieldId = resolveAttachmentFieldId(Object.fromEntries(fieldMetaMap));
   if (!attachmentFieldId) {
     throw new Error('目标表缺少附件字段');
   }
@@ -570,6 +607,7 @@ const handleSubmit = async () => {
 };
 
 onMounted(() => {
+  loadTableOutputConfigs();
   if (formData.value.mode === 'table') {
     loadFieldOptions({ silent: true });
   }
@@ -611,6 +649,9 @@ watch(
     }
   }
 );
+watch(() => formData.value.targetTableId, (id) => loadTargetFieldOptions(id));
+watch(() => formData.value.targetTableId, async id => { if (id && tableOutputConfigs.value[id]) await applyTableOutputConfig(id); else mappingDraft.value = []; });
+watch(mappingDraft, saveTableOutputConfig, { deep: true });
 </script>
 
 <template>
@@ -624,42 +665,13 @@ watch(
       <span class="sub-page-title">链接转附件</span>
     </div>
     <div class="form-card">
-      <div class="mode-switch">
-        <button
-          type="button"
-          class="mode-tab"
-          :class="{ active: formData.mode === 'table' }"
-          @click="formData.mode = 'table'"
-        >
-          从表格选取
-        </button>
-        <button
-          type="button"
-          class="mode-tab"
-          :class="{ active: formData.mode === 'manual' }"
-          @click="formData.mode = 'manual'"
-        >
-          手动输入
-        </button>
-      </div>
+      <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
+      <div class="group-label">URL来源</div>
+      <el-radio-group v-model="formData.mode" class="source-mode-radio radio-block">
+        <el-radio value="table">从表格选取</el-radio>
+        <el-radio value="manual">手动输入</el-radio>
+      </el-radio-group>
       <el-form class="form" :model="formData" label-position="top">
-        <el-form-item v-if="formData.mode === 'manual'" label="" style="margin-top: 12px">
-          <div class="field-stack">
-            <div class="c-label">目标表格</div>
-            <el-radio-group v-model="formData.targetType" class="radio-block">
-              <el-radio value="new">新建表格</el-radio>
-              <el-radio value="existing">使用现有表格</el-radio>
-            </el-radio-group>
-          </div>
-        </el-form-item>
-
-        <el-form-item v-if="formData.mode === 'manual' && formData.targetType === 'existing'" label="">
-          <div class="c-label">选择现有表格</div>
-          <el-select v-model="formData.targetTableId" placeholder="请选择" style="width: 100%">
-            <el-option v-for="table in tableOptions" :key="table.id" :label="table.name" :value="table.id" />
-          </el-select>
-        </el-form-item>
-
         <template v-if="formData.mode === 'table'">
           <el-form-item label="">
             <div class="c-label">
@@ -683,10 +695,10 @@ watch(
               </el-tooltip>
             </div>
             <el-radio-group v-model="formData.scope" class="custom-radio-group">
-              <el-radio value="all" class="custom-radio-item">执行所有行</el-radio>
-              <el-radio value="selected" class="custom-radio-item">执行选中行</el-radio>
+              <el-radio value="all" class="custom-radio-item">所有行</el-radio>
+              <el-radio value="selected" class="custom-radio-item">选中行</el-radio>
               <el-radio value="n" class="custom-radio-item">
-                <span class="radio-label-text">执行前N行</span>
+                <span class="radio-label-text">前</span>
                 <div class="custom-stepper-input">
                   <input
                     type="number"
@@ -701,6 +713,7 @@ watch(
                     <button @click.stop="stepNumber(-1)" :disabled="formData.rowCount <= 1" class="stepper-btn stepper-btn-down"></button>
                   </div>
                 </div>
+                <span class="range-unit">行</span>
               </el-radio>
             </el-radio-group>
           </el-form-item>
@@ -723,7 +736,39 @@ watch(
               placeholder="请输入正确的URL，支持批量添加，多个链接可换行或用逗号分隔"
             />
           </el-form-item>
+          <el-form-item label="">
+            <div class="field-stack">
+              <div class="c-label">输出到表格</div>
+              <el-radio-group v-model="formData.targetType" class="radio-block">
+                <el-radio value="new">新建表格</el-radio>
+                <el-radio value="existing">使用现有表格</el-radio>
+              </el-radio-group>
+            </div>
+          </el-form-item>
+          <el-form-item v-if="formData.targetType === 'existing'" label="">
+            <div class="c-label">选择现有表格</div>
+            <el-select v-model="formData.targetTableId" placeholder="请选择" style="width: 100%">
+              <el-option v-for="table in tableOptions" :key="table.id" :label="table.name" :value="table.id" />
+            </el-select>
+          </el-form-item>
         </template>
+
+        <div class="section-heading output-heading"><span class="section-step">2</span><span>输出设置</span></div>
+        <el-form-item label="">
+          <div class="output-field-group">
+            <div class="c-label">输出字段</div>
+            <el-checkbox :model-value="true" disabled class="output-field-preview">
+              {{ formData.mode === 'table' ? (selectedUrlFieldName ? `${selectedUrlFieldName}附件` : '请先选择 URL 字段') : '附件' }}
+            </el-checkbox>
+          </div>
+        </el-form-item>
+        <div v-if="formData.targetType === 'existing'" class="mapping-accordion">
+          <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded"><span class="mapping-accordion-label">字段映射 <span class="mapping-optional">（可选）</span><span class="mapping-status">{{ mappingStatus }}</span></span><span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span></button>
+          <div v-show="mappingExpanded" class="mapping-accordion-panel"><p class="mapping-note">可将“附件”写入现有表格的指定字段。</p>
+            <div v-for="(mapping,index) in mappingDraft" :key="index" class="mapping-row"><span>附件</span><span class="mapping-arrow">→</span><el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in targetFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select><el-button link type="danger" @click="mappingDraft.splice(index,1)">删除</el-button></div>
+            <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({source_key:'attachment',target_field_id:''})">+ 添加字段映射</el-button></div>
+          </div>
+        </div>
 
       </el-form>
 
@@ -797,38 +842,38 @@ watch(
   border-radius: 8px;
   box-sizing: border-box;
 }
-.mode-switch {
+.section-heading {
   display: flex;
-  gap: 0;
-  margin-bottom: 20px;
-  background: #F7F8FA;
-  border-radius: 6px;
-  padding: 3px;
-  border: 1px solid #E5E6EB;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  color: #1D2129;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 22px;
 }
-.mode-tab {
-  flex: 1;
+.section-step {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 8px 0;
-  font-size: 13px;
-  font-weight: 500;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: #A8071A;
+  background: #FFF1F2;
+  font-size: 12px;
+  font-weight: 600;
+}
+.group-label {
+  margin-bottom: 8px;
   color: #4E5969;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.2s ease;
+  font-size: 14px;
   line-height: 20px;
 }
-.mode-tab:hover {
-  color: #1D2129;
-}
-.mode-tab.active {
-  background: #FFFFFF;
-  color: #A8071A;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+.output-heading {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #F0F1F3;
 }
 .form :deep(.el-form-item__label) {
   font-size: 14px;
@@ -867,6 +912,61 @@ watch(
 }
 .radio-block {
   width: 100%;
+}
+.source-mode-radio {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.source-mode-radio :deep(.el-radio) { margin-right: 0; }
+.source-mode-radio :deep(.el-radio__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  font-size: 14px;
+}
+.source-mode-radio :deep(.el-radio__input.is-checked .el-radio__inner) {
+  border-color: #A8071A;
+  background: #A8071A;
+}
+.source-mode-radio :deep(.el-radio__input.is-checked + .el-radio__label) { color: #1D2129; }
+.output-value {
+  min-height: 32px;
+  padding: 6px 10px;
+  box-sizing: border-box;
+  color: #1D2129;
+  background: #F7F8FA;
+  border: 1px solid #E5E6EB;
+  border-radius: 6px;
+  line-height: 20px;
+}
+.output-placeholder { color: #86909C; }
+.output-field-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+}
+.output-field-group .c-label {
+  margin-bottom: 8px;
+}
+.output-field-preview {
+  margin-right: 0;
+}
+.output-field-preview :deep(.el-checkbox__label) {
+  padding-left: 8px;
+  color: #1D2129;
+  line-height: 22px;
+}
+.output-field-preview :deep(.el-checkbox__inner) {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border-color: #A8071A;
+  background: #A8071A;
+}
+.output-field-preview :deep(.el-checkbox__inner::after) {
+  border-color: #FFFFFF;
 }
 .custom-radio-group {
   display: flex;
@@ -923,13 +1023,17 @@ watch(
 .radio-label-text {
   flex-shrink: 0;
 }
+.range-unit {
+  margin-left: 6px;
+  flex-shrink: 0;
+}
 
 .custom-stepper-input {
   display: flex;
   align-items: center;
   height: 32px;
   width: 80px;
-  margin-left: auto;
+  margin-left: 8px;
   background: #FFFFFF;
   border: 1px solid #E5E6EB;
   border-radius: 6px;
@@ -1043,6 +1147,17 @@ watch(
 .field-checkbox-item {
   margin-right: 0;
 }
+.mapping-accordion { margin: 12px 0 16px; border-top: 1px solid #F0F1F3; border-bottom: 1px solid #F0F1F3; }
+.mapping-accordion-trigger { display:flex; align-items:center; justify-content:space-between; width:100%; min-height:48px; padding:12px 0; color:#1D2129; background:transparent; border:0; cursor:pointer; font:inherit; text-align:left; }
+.mapping-accordion-label { display:flex; align-items:baseline; gap:4px; font-size:14px; font-weight:500; }
+.mapping-optional,.mapping-status,.mapping-note { color:#86909C; font-size:12px; font-weight:400; }
+.mapping-chevron { width:8px; height:8px; margin-right:4px; border-right:1.5px solid #86909C; border-bottom:1.5px solid #86909C; transform:rotate(45deg) translateY(-2px); }
+.mapping-chevron.is-expanded { transform:rotate(225deg) translateY(-2px); }
+.mapping-accordion-panel { padding:0 0 12px; }
+.mapping-note { margin:0 0 12px; line-height:18px; }
+.mapping-row { display:grid; grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr) auto; gap:4px; align-items:center; min-height:44px; border-top:1px solid #F0F1F3; }
+.mapping-arrow { color:#86909C; text-align:center; }
+.mapping-actions { display:flex; align-items:center; margin-top:8px; }
 .toast-wrap {
   position: fixed;
   top: 50%;

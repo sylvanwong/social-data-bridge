@@ -2278,7 +2278,7 @@ watch(
                   v-model="taskDialogForm.manualUrls"
                   type="textarea"
                   :rows="4"
-                  placeholder="请输入正确的博主主页链接，多个链接可换行或用逗号分隔"
+                  placeholder="请输入作者主页链接，支持批量输入（多个链接请换行或用逗号分隔）"
                 />
               </el-form-item>
             </template>

@@ -1,6 +1,6 @@
 <script setup>
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
@@ -62,6 +62,29 @@ const toastLoading = ref(false);
 const FIELD_SELECTION_STORAGE_KEY = 'hot_list_selected_fields_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
+const mappingExpanded = ref(false);
+const mappingDraft = ref([]);
+const targetFieldOptions = ref([]);
+const tableOutputConfigs = ref({});
+const tableConfigLoading = ref(false);
+const mappingStatus = computed(() => {
+  const count = mappingDraft.value.filter(item => item?.source_key && item?.target_field_id).length;
+  return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
+});
+const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
+const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TASK_PLUGIN_TYPE = 'hot_list';
+const allFieldKeys = FIELD_MAPPING.map(field => field.key);
+const isAllFieldsSelected = computed(() => allFieldKeys.every(key => selectedFieldKeys.value.includes(key)));
+const isFieldsIndeterminate = computed(() => {
+  const selectedCount = allFieldKeys.filter(key => selectedFieldKeys.value.includes(key)).length;
+  return selectedCount > 0 && selectedCount < allFieldKeys.length;
+});
+const toggleAllFields = (checked) => {
+  selectedFieldKeys.value = checked
+    ? [...allFieldKeys]
+    : FIELD_MAPPING.filter(field => field.required).map(field => field.key);
+};
 
 const showToast = (text, isLoading = true) => {
   toastText.value = text;
@@ -114,6 +137,38 @@ const saveSelectedFieldKeys = async (keys) => {
     console.error('保存字段勾选状态失败:', error);
   }
 };
+const loadTargetFieldOptions = async (tableId) => {
+  if (!tableId) { targetFieldOptions.value = []; return; }
+  try { targetFieldOptions.value = await (await bitable.base.getTableById(tableId)).getFieldMetaList(); } catch (error) { targetFieldOptions.value = []; }
+};
+const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
+const loadTableOutputConfigs = async () => {
+  if (!props.api_key) return;
+  try {
+    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
+    const data = response.data?.data || response.data;
+    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
+    tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
+  } catch (error) { console.error('读取表格配置失败:', error); }
+};
+const applyTableOutputConfig = async (tableId) => {
+  const config = tableOutputConfigs.value[tableId];
+  mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
+  await loadTargetFieldOptions(tableId);
+};
+const saveTableOutputConfig = async () => {
+  const tableId = formData.value.table_id;
+  if (formData.value.radio !== 2 || !tableId || !props.api_key) return;
+  try {
+    const table = await bitable.base.getTableById(tableId);
+    const fields = targetFieldOptions.value;
+    const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({ ...item, source_name: FIELD_MAPPING.find(field => field.key === item.source_key)?.name || '', target_field_name: fields.find(field => field.id === item.target_field_id)?.name || '' }));
+    const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: tableId, target_table_name: await table.getName(), write_mode: 'append', field_mappings: fieldMappings };
+    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    tableOutputConfigs.value = { ...tableOutputConfigs.value, [tableId]: response.data?.data || response.data || payload };
+  } catch (error) { console.error('保存表格配置失败:', error); }
+};
+const resolveFieldId = (config, fieldMetaMap) => mappingDraft.value.find(item => item?.source_key === config.key && item?.target_field_id)?.target_field_id || fieldMetaMap.get(config.name);
 
 const createSequentialTable = async (baseTableName) => {
   const existingTables = await bitable.base.getTableMetaList();
@@ -154,7 +209,7 @@ const setupTableFields = async (tableId, isNewTable = false) => {
 
   for (let index = 0; index < activeFieldMapping.length; index++) {
     const config = activeFieldMapping[index];
-    const fieldId = fieldMetaMap.get(config.name);
+    const fieldId = resolveFieldId(config, fieldMetaMap);
     if (fieldId) {
       const field = await table.getFieldById(fieldId);
       const fieldType = await field.getType();
@@ -248,6 +303,9 @@ watch(
     }
   }
 );
+watch(() => formData.value.table_id, (id) => loadTargetFieldOptions(id));
+watch(() => formData.value.table_id, async (id) => { mappingExpanded.value = false; if (id && tableOutputConfigs.value[id]) await applyTableOutputConfig(id); else mappingDraft.value = []; });
+watch(mappingDraft, saveTableOutputConfig, { deep: true });
 
 const normalizeValue = (value, config, fieldType) => {
   if (config?.key === 'social_type' && fieldType === FieldType.SingleSelect) {
@@ -276,7 +334,7 @@ const writeDataToTable = async (table, list, isExistingTable = false) => {
   const fieldList = [];
 
   for (const config of activeFieldMapping) {
-    const fieldId = fieldMetaMap.get(config.name);
+    const fieldId = resolveFieldId(config, fieldMetaMap);
     if (!fieldId) continue;
     const field = await table.getFieldById(fieldId);
     if (config.formatter && !isExistingTable) {
@@ -381,6 +439,7 @@ const commit = () => {
 onMounted(async () => {
   await loadPlatformOptions();
   await loadSelectedFieldKeys();
+  await loadTableOutputConfigs();
   fieldSelectionReady.value = true;
 });
 
@@ -412,10 +471,21 @@ watch(selectedFieldKeys, (keys) => {
       <span class="sub-page-title">热榜获取</span>
     </div>
     <div class="form-card">
+      <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
       <el-form class="form" :model="formData" label-position="top">
+        <el-form-item>
+          <div class="c-label">
+            <span class="required">*</span>
+            平台
+          </div>
+          <el-select v-model="formData.platform" placeholder="请选择" style="width: 100%">
+            <el-option v-for="option in platformOptions" :key="option.value" :label="option.label" :value="option.value" />
+          </el-select>
+        </el-form-item>
+        <div class="section-heading output-heading"><span class="section-step">2</span><span>输出设置</span></div>
         <el-form-item label="">
           <div class="field-stack">
-            <div class="c-label">目标表格</div>
+            <div class="c-label">输出到表格</div>
             <el-radio-group v-model="formData.radio" class="radio-block">
               <el-radio :value="1">新建表格</el-radio>
               <el-radio :value="2">使用现有表格</el-radio>
@@ -428,18 +498,11 @@ watch(selectedFieldKeys, (keys) => {
             <el-option v-for="table in table_options" :key="table.id" :label="table.name" :value="table.id" />
           </el-select>
         </el-form-item>
-        <el-form-item>
-          <div class="c-label">
-            <span class="required">*</span>
-            平台
-          </div>
-          <el-select v-model="formData.platform" placeholder="请选择" style="width: 100%">
-            <el-option v-for="option in platformOptions" :key="option.value" :label="option.label" :value="option.value" />
-          </el-select>
-        </el-form-item>
-
         <el-form-item label="" style="margin-top: 12px">
-          <div class="c-label">选择需要的字段</div>
+          <div class="field-selection-title">
+            <div class="c-label">输出字段</div>
+            <el-checkbox :model-value="isAllFieldsSelected" :indeterminate="isFieldsIndeterminate" class="select-all-fields" @change="toggleAllFields">全选</el-checkbox>
+          </div>
           <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
             <el-checkbox
               v-for="field in FIELD_MAPPING"
@@ -452,6 +515,13 @@ watch(selectedFieldKeys, (keys) => {
             </el-checkbox>
           </el-checkbox-group>
         </el-form-item>
+        <div v-if="formData.radio === 2" class="mapping-accordion">
+          <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded"><span class="mapping-accordion-label">字段映射 <span class="mapping-optional">（可选）</span><span class="mapping-status">{{ mappingStatus }}</span></span><span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span></button>
+          <div v-show="mappingExpanded" class="mapping-accordion-panel"><p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
+            <div v-for="(mapping,index) in mappingDraft" :key="index" class="mapping-row"><el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in FIELD_MAPPING" :key="field.key" :label="field.name" :value="field.key" /></el-select><span class="mapping-arrow">→</span><el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in targetFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select><el-button link type="danger" @click="mappingDraft.splice(index,1)">删除</el-button></div>
+            <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({source_key:'',target_field_id:''})">+ 添加字段映射</el-button></div>
+          </div>
+        </div>
       </el-form>
 
       <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="commit">提交</el-button>
@@ -524,6 +594,33 @@ watch(selectedFieldKeys, (keys) => {
   border-radius: 8px;
   box-sizing: border-box;
 }
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  color: #1D2129;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 22px;
+}
+.section-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: #A8071A;
+  background: #FFF1F2;
+  font-size: 12px;
+  font-weight: 600;
+}
+.output-heading {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #F0F1F3;
+}
 .field-stack {
   width: 100%;
 }
@@ -531,6 +628,16 @@ watch(selectedFieldKeys, (keys) => {
   font-size: 14px;
   font-weight: 500;
   color: #1D2129;
+  margin-bottom: 8px;
+}
+.field-selection-title {
+  margin-bottom: 8px;
+}
+.field-selection-title .c-label {
+  margin-bottom: 0;
+}
+.select-all-fields {
+  margin-right: 0;
   margin-bottom: 8px;
 }
 .radio-block {
@@ -546,6 +653,17 @@ watch(selectedFieldKeys, (keys) => {
 .field-checkbox-item {
   margin-right: 0;
 }
+.mapping-accordion { margin: 12px 0 16px; border-top: 1px solid #F0F1F3; border-bottom: 1px solid #F0F1F3; }
+.mapping-accordion-trigger { display:flex; align-items:center; justify-content:space-between; width:100%; min-height:48px; padding:12px 0; color:#1D2129; background:transparent; border:0; cursor:pointer; font:inherit; text-align:left; }
+.mapping-accordion-label { display:flex; align-items:baseline; gap:4px; font-size:14px; font-weight:500; }
+.mapping-optional,.mapping-status,.mapping-note { color:#86909C; font-size:12px; font-weight:400; }
+.mapping-chevron { width:8px; height:8px; margin-right:4px; border-right:1.5px solid #86909C; border-bottom:1.5px solid #86909C; transform:rotate(45deg) translateY(-2px); }
+.mapping-chevron.is-expanded { transform:rotate(225deg) translateY(-2px); }
+.mapping-accordion-panel { padding:0 0 12px; }
+.mapping-note { margin:0 0 12px; line-height:18px; }
+.mapping-row { display:grid; grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr) auto; gap:4px; align-items:center; min-height:44px; border-top:1px solid #F0F1F3; }
+.mapping-arrow { color:#86909C; text-align:center; }
+.mapping-actions { display:flex; align-items:center; margin-top:8px; }
 
 .field-checkbox-group :deep(.el-checkbox) {
   margin-right: 0;
