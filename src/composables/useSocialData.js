@@ -1,7 +1,7 @@
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage, ElNotification } from "element-plus";
 import { ref, onUnmounted } from "vue";
-import request from '@/utils/request'
+import request, { buildApiUrl } from '@/utils/request'
 
 export const FIELD_MAPPING = [
   { key: 'aweme_id', name: '视频编号', type: FieldType.Text, defaultSelected: true, required: true },
@@ -44,6 +44,7 @@ export const KEYWORD_SEARCH_FIELD_MAPPING = [
   { key: 'share_count', name: '分享数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'share_url', name: '作品链接', legacyNames: ['视频链接'], type: FieldType.Text, defaultSelected: true },
   { key: 'cover_url', name: '封面链接', legacyNames: ['封面'], type: FieldType.Text, defaultSelected: true },
+  { key: 'cover_attachment', name: '封面附件', type: FieldType.Attachment, defaultSelected: true, getUrls: (item) => item?.cover_url ? [item.cover_url] : [], getFileName: () => 'cover' },
   { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
   { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
   { key: 'last_update_time', name: '更新时间', legacyNames: ['最后更新时间'], type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
@@ -68,6 +69,7 @@ export const PROFILE_FIELD_MAPPING = [
   { key: 'share_count', name: '分享数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'share_url', name: '作品链接', legacyNames: ['视频链接'], type: FieldType.Text, defaultSelected: true },
   { key: 'cover_url', name: '封面链接', legacyNames: ['封面'], type: FieldType.Text, defaultSelected: true },
+  { key: 'cover_attachment', name: '封面附件', type: FieldType.Attachment, defaultSelected: true, getUrls: (item) => item?.cover_url ? [item.cover_url] : [], getFileName: () => 'cover' },
   { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
   { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
   { key: 'last_update_time', name: '更新时间', legacyNames: ['最后更新时间'], type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
@@ -186,7 +188,80 @@ const normalizeTagsCompatibleValue = (value, fieldType, tagOptionIdMap = null) =
   return tags.join(' ');
 };
 
-const normalizeCellValue = async (table, field, value, config, fieldType, extra = {}) => {
+const ATTACHMENT_DOWNLOAD_TIMEOUT = 30000;
+
+const httpToHttps = (url) => typeof url === 'string' ? url.replace(/^http:\/\//i, 'https://') : url;
+
+const getAttachmentUrls = (config, item) => {
+  let urls = config.getUrls?.(item) || [];
+  if (typeof urls === 'string') urls = [urls];
+  if (!Array.isArray(urls)) return [];
+  return urls.filter(url => typeof url === 'string' && url).map(httpToHttps);
+};
+
+const getAttachmentFileName = (url, baseName, index, total) => {
+  const extension = url.match(/\.([a-zA-Z0-9]{2,5})(?:\?|$)/)?.[1];
+  const prefix = total > 1 ? `${index + 1}_` : '';
+  return `${prefix}${baseName || 'attachment'}.${extension || 'jpg'}`;
+};
+
+const getBlobExtension = (blob) => ({
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/heic': 'heic',
+  'image/heif': 'heic',
+}[String(blob.type || '').split(';')[0].trim().toLowerCase()]);
+
+const downloadAttachmentAsFile = async (url, fileName, apiKey) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
+  const proxyUrl = buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${new URLSearchParams({ url, file_name: fileName }).toString()}`);
+  const download = async (requestUrl, useProxy = false) => {
+    const response = await fetch(requestUrl, {
+      signal: controller.signal,
+      ...(useProxy ? { headers: { authorization: `Bearer ${apiKey}` } } : {}),
+    });
+    if (!response.ok) throw new Error(`下载失败: HTTP ${response.status}`);
+    const blob = await response.blob();
+    const extension = getBlobExtension(blob);
+    const normalizedName = extension ? fileName.replace(/\.[a-zA-Z0-9]{2,5}$/, `.${extension}`) : fileName;
+    return new File([blob], normalizedName, { type: blob.type || 'application/octet-stream' });
+  };
+
+  try {
+    try {
+      return await download(url);
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error(`附件下载超时（${ATTACHMENT_DOWNLOAD_TIMEOUT / 1000} 秒）`);
+      return await download(proxyUrl, true);
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const createAttachmentFiles = async (config, item, apiKey) => {
+  const urls = getAttachmentUrls(config, item);
+  const results = await Promise.allSettled(urls.map((url, index) =>
+    downloadAttachmentAsFile(url, getAttachmentFileName(url, config.getFileName?.(item), index, urls.length), apiKey)
+  ));
+
+  return results.flatMap(result => {
+    if (result.status === 'fulfilled') return [result.value];
+    console.warn('附件下载失败，跳过附件写入:', result.reason);
+    return [];
+  });
+};
+
+const normalizeCellValue = async (table, field, value, config, fieldType, extra = {}, item, apiKey) => {
+  if (config.type === FieldType.Attachment) {
+    const files = await createAttachmentFiles(config, item, apiKey);
+    return files.length === 1 ? files[0] : files;
+  }
+
   let nextValue = value;
   if (config.isTimestamp && nextValue) {
     nextValue = nextValue * 1000;
@@ -609,9 +684,10 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
           const matchedField = availableFieldList.find(fieldItem => fieldItem.field?.id === field.id && fieldItem.config.key === config.key);
           const valueKeys = config.valueKeys || [config.key];
           const sourceValue = valueKeys.reduce((value, key) => value ?? item?.[key], undefined);
-          const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, matchedField?.extra);
-          record.push(await field.createCell(value));
-          normalizedRecord[field.id] = value;
+          const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, matchedField?.extra, item, api_key);
+          const cell = await field.createCell(value);
+          record.push(cell);
+          normalizedRecord[field.id] = config.type === FieldType.Attachment ? await cell.getValue() : value;
         }
         records.push(record);
         normalizedRecords.push(normalizedRecord);
