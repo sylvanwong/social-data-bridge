@@ -52,6 +52,7 @@ const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
 const currentTableName = ref('');
+const isSubmitting = ref(false);
 let toastTimer = null;
 
 const pages_options = [
@@ -556,53 +557,63 @@ onUnmounted(() => {
   if (toastTimer) clearTimeout(toastTimer);
 });
 
-const commit = () => {
-  if (!props.api_key) {
-    showErrorMsg("请输入API key");
-    return;
-  }
-  const { social_type, keyword, radio, table_id } = formData1.value;
-  const keywords = parseKeywords(keyword);
-  if (!social_type || !social_type.trim()) {
-    showErrorMsg("请选择平台");
-    return;
-  }
-  if (keywords.length === 0) {
-    showErrorMsg("请输入至少一个关键词");
-    return;
-  }
-  if (social_type === 'bilibili' && formData1.value.publish_time_range === 'custom') {
-    const { publish_time_start_date, publish_time_end_date } = formData1.value;
-    if (!publish_time_start_date || !publish_time_end_date) {
-      showErrorMsg("请选择完整的自定义发布时间范围");
-      return;
-    }
-    if (publish_time_start_date > publish_time_end_date) {
-      showErrorMsg("发布时间开始日期不能晚于结束日期");
-      return;
-    }
-  }
-  if (radio === 2 && !table_id) {
-    showErrorMsg("请选择现有表格");
+const commit = async () => {
+  if (isSubmitting.value || loading.value) {
     return;
   }
 
-  if (radio === 2) {
-    validateTableFields(table_id, selectedFieldKeys.value, {
-      writeMode: formData1.value.writeMode,
-      fieldMappings: mappingDraft.value,
-    }).then(isValid => {
-      if (isValid) getSearchData(table_id);
-    }).catch(error => {
-      console.error("验证表格字段时出错:", error);
-      showErrorMsg("验证表格字段失败，请稍后重试");
-    });
-    return;
-  }
+  isSubmitting.value = true;
+  try {
+    if (!props.api_key) {
+      showErrorMsg("请输入API key");
+      return;
+    }
+    const { social_type, keyword, radio, table_id } = formData1.value;
+    const keywords = parseKeywords(keyword);
+    if (!social_type || !social_type.trim()) {
+      showErrorMsg("请选择平台");
+      return;
+    }
+    if (keywords.length === 0) {
+      showErrorMsg("请输入至少一个关键词");
+      return;
+    }
+    if (social_type === 'bilibili' && formData1.value.publish_time_range === 'custom') {
+      const { publish_time_start_date, publish_time_end_date } = formData1.value;
+      if (!publish_time_start_date || !publish_time_end_date) {
+        showErrorMsg("请选择完整的自定义发布时间范围");
+        return;
+      }
+      if (publish_time_start_date > publish_time_end_date) {
+        showErrorMsg("发布时间开始日期不能晚于结束日期");
+        return;
+      }
+    }
+    if (radio === 2 && !table_id) {
+      showErrorMsg("请选择现有表格");
+      return;
+    }
 
-  getSearchData("");
-  bitable.bridge.setData("search_platform", formData1.value.social_type);
-  bitable.bridge.setData("search_keyword", formData1.value.keyword);
+    if (radio === 2) {
+      const isValid = await validateTableFields(table_id, selectedFieldKeys.value, {
+        writeMode: formData1.value.writeMode,
+        fieldMappings: mappingDraft.value,
+      });
+      if (isValid) {
+        await getSearchData(table_id);
+      }
+      return;
+    }
+
+    await getSearchData("");
+    bitable.bridge.setData("search_platform", formData1.value.social_type);
+    bitable.bridge.setData("search_keyword", formData1.value.keyword);
+  } catch (error) {
+    console.error("提交关键词搜索任务失败:", error);
+    showErrorMsg(error.message || "提交失败，请稍后重试");
+  } finally {
+    isSubmitting.value = false;
+  }
 };
 
 watch(selectedFieldKeys, (keys) => {
@@ -966,7 +977,7 @@ watch(selectedFieldKeys, (keys) => {
         </section>
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="commit">提交</el-button>
+      <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">提交</el-button>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">
