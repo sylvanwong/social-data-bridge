@@ -140,6 +140,8 @@ const taskList = ref([]);
 const taskListLoading = ref(false);
 const taskManagerExpanded = ref(false);
 const isSubmitting = ref(false);
+const isCancelling = ref(false);
+const activeProfileTaskId = ref('');
 
 const pages_options = Array.from({ length: 50 }, (_, index) => ({ value: index + 1, label: `前 ${index + 1} 页` }));
 const workRangeTypes = [
@@ -643,11 +645,18 @@ const drainAvailablePosts = async (streamTask) => {
 const finishStreamTask = async (streamTask, taskStatus) => {
   stopStreamTask();
   loading.value = false;
+  isCancelling.value = false;
+  activeProfileTaskId.value = '';
   await clearSavedStreamTask();
 
   if (Number(taskStatus.status) === 2) {
     showCompletionToast(taskStatus.reason || '任务失败，已写入任务完成前获取的数据');
     showErrorMsg(taskStatus.reason || '获取数据失败，请稍后重试');
+    return;
+  }
+
+  if (Number(taskStatus.status) === 3) {
+    showCompletionToast(`任务已停止，已写入 ${streamTask.writtenCount || 0} 条作品`);
     return;
   }
 
@@ -685,14 +694,24 @@ const pollStreamTask = async (streamTask) => {
       );
     }
 
-    showToast(getStreamProgressText(taskStatus, streamTask), true);
+    if (taskStatus.status_text === 'cancel_requested' || taskStatus.cancel_requested) {
+      isCancelling.value = true;
+      showToast(`正在停止任务，已写入 ${streamTask.writtenCount || 0} 条作品`, true);
+    } else {
+      showToast(getStreamProgressText(taskStatus, streamTask), true);
+    }
     const wroteData = await drainAvailablePosts(streamTask);
     if (wroteData) {
       streamTask.pollInterval = STREAM_ACTIVE_INTERVAL;
-      showToast(getStreamProgressText(taskStatus, streamTask), true);
+      showToast(
+        taskStatus.status_text === 'cancel_requested' || taskStatus.cancel_requested
+          ? `正在停止任务，已写入 ${streamTask.writtenCount || 0} 条作品`
+          : getStreamProgressText(taskStatus, streamTask),
+        true
+      );
     }
 
-    const isTerminal = Number(taskStatus.status) === 1 || Number(taskStatus.status) === 2;
+    const isTerminal = [1, 2, 3].includes(Number(taskStatus.status));
     if (isTerminal && !wroteData) {
       await finishStreamTask(streamTask, taskStatus);
       return;
@@ -713,6 +732,8 @@ const pollStreamTask = async (streamTask) => {
 
     if (Date.now() - (streamTask.lastActivityAt || Date.now()) >= STREAM_STALL_TIMEOUT) {
       loading.value = false;
+      isCancelling.value = false;
+      activeProfileTaskId.value = '';
       showCompletionToast(error.message || '任务长时间没有进度');
       showErrorMsg(error.message || '任务长时间没有进度');
       return;
@@ -744,6 +765,7 @@ const startStreamTask = async (taskId, targetTableId = '', taskConfig = {}) => {
   };
 
   activeStreamTask = streamTask;
+  activeProfileTaskId.value = taskId;
   loading.value = true;
   await saveStreamTask(streamTask);
   await pollStreamTask(streamTask);
@@ -773,6 +795,7 @@ const resumeSavedStreamTask = async () => {
       lastActivityAt: savedTask.lastActivityAt || Date.now(),
       pollInterval: savedTask.pollInterval || STREAM_ACTIVE_INTERVAL,
     };
+    activeProfileTaskId.value = activeStreamTask.taskId;
     loading.value = true;
     showToast('正在恢复未完成的博主作品采集任务...', true);
     await pollStreamTask(activeStreamTask);
@@ -799,8 +822,34 @@ const postProfileTask = async (targetTableId = "", urlText = "", taskConfig = {}
     await startStreamTask(data.task_id, targetTableId, taskConfig);
   } catch (error) {
     loading.value = false;
+    activeProfileTaskId.value = '';
     console.error('创建博主作品采集任务失败:', error);
     showErrorMsg(error.message || '创建采集任务失败');
+  }
+};
+
+const cancelProfileTask = async () => {
+  if (!activeStreamTask?.taskId || isCancelling.value) {
+    return;
+  }
+
+  isCancelling.value = true;
+  showToast(`正在停止任务，已写入 ${activeStreamTask.writtenCount || 0} 条作品`, true);
+  try {
+    const response = await request({
+      url: '/social/api/v1/feishu/social/task/cancel',
+      method: 'post',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      data: { task_id: activeStreamTask.taskId },
+    });
+    const data = response.data;
+    if (data?.sta !== 0) {
+      throw new Error(data?.msg || '停止任务失败');
+    }
+  } catch (error) {
+    isCancelling.value = false;
+    console.error('停止博主作品采集任务失败:', error);
+    showErrorMsg(error.message || '停止任务失败，请稍后重试');
   }
 };
 
@@ -1945,7 +1994,10 @@ watch(
       </el-form>
 
       <div v-if="formData.executionMode === 'immediate'" class="action-group">
-        <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="handleImmediateSubmit">立即执行</el-button>
+        <div class="task-actions">
+          <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="handleImmediateSubmit">立即执行</el-button>
+          <el-button v-if="loading && activeProfileTaskId" class="cancel-btn" :loading="isCancelling" :disabled="isCancelling" @click="cancelProfileTask">停止任务</el-button>
+        </div>
       </div>
 
       <div v-else class="schedule-inline-panel">
@@ -2624,6 +2676,20 @@ watch(
 .commit-btn:active { background: #8A0515; }
 .action-group {
   margin-top: 8px;
+}
+.task-actions {
+  display: flex;
+  gap: 8px;
+}
+.task-actions .commit-btn {
+  flex: 1;
+}
+.cancel-btn {
+  width: 104px;
+  height: 36px;
+  margin: 0;
+  border-color: #d5495c;
+  color: #a8071a;
 }
 .profile-progress {
   text-align: center;
