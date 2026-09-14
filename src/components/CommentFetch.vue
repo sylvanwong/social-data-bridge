@@ -53,6 +53,21 @@ const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
 let toastTimer = null;
+const commentUpsertIndexCache = new Map();
+
+const normalizeCommentId = (value) => {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.map(normalizeCommentId).filter(Boolean).join(',');
+  if (typeof value === 'object') return normalizeCommentId(value.text ?? value.name ?? value.value ?? '');
+  return String(value).trim();
+};
+const chunkRecords = (records, size = 200) => {
+  const chunks = [];
+  for (let index = 0; index < records.length; index += size) {
+    chunks.push(records.slice(index, index + size));
+  }
+  return chunks;
+};
 
 const FIELD_CONFIG = [
   { key: "cid", name: "评论ID", type: FieldType.Text, defaultSelected: true, required: true, getValue: (item) => item?.cid ?? "" },
@@ -700,26 +715,56 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
       if (options.writeMode === 'upsert') {
         const keyFieldId = mappingBySource.get('cid') || existingFieldMap.get('评论ID')?.id;
         if (!keyFieldId) throw new Error('更新或新增需要“评论ID”字段');
-        const existingByCid = new Map();
-        let pageToken;
-        do {
-          const result = await activeTable.getRecordsByPage({ pageSize: 200, pageToken });
-          for (const record of result.records || []) {
-            const cid = record.fields?.[keyFieldId];
-            if (cid !== null && cid !== undefined && String(cid).trim()) existingByCid.set(String(cid).trim(), record.recordId);
-          }
-          pageToken = result.hasMore ? result.pageToken : undefined;
-        } while (pageToken !== undefined);
-        const updates = [];
-        const creates = [];
+
+        const uniqueRecords = new Map();
+        let skippedCount = 0;
         list.forEach((item, index) => {
-          const cid = item?.cid === null || item?.cid === undefined ? '' : String(item.cid).trim();
-          const recordId = cid ? existingByCid.get(cid) : null;
-          if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
-          else creates.push(records[index]);
+          const cid = normalizeCommentId(item?.cid);
+          if (!cid) {
+            skippedCount += 1;
+            return;
+          }
+          uniqueRecords.set(cid, { record: records[index], fields: normalizedRecords[index] });
         });
-        if (updates.length) await activeTable.setRecords(updates);
-        if (creates.length) await activeTable.addRecords(creates);
+        if (skippedCount > 0) {
+          ElMessage({ message: `${skippedCount} 条评论缺少评论ID，未写入`, type: 'warning', plain: true });
+        }
+
+        const indexCache = options.upsertIndex || commentUpsertIndexCache;
+        const cacheKey = `${options.upsertCacheKey || 'default'}:${activeTable.id}:${keyFieldId}`;
+        let existingByCid = indexCache.get(cacheKey);
+        if (!existingByCid) {
+          existingByCid = new Map();
+          let pageToken;
+          do {
+            const result = await activeTable.getRecordsByPage({ pageSize: 200, pageToken });
+            for (const record of result.records || []) {
+              const cid = normalizeCommentId(record.fields?.[keyFieldId]);
+              if (cid) existingByCid.set(cid, record.recordId);
+            }
+            pageToken = result.hasMore ? result.pageToken : undefined;
+          } while (pageToken !== undefined);
+          indexCache.set(cacheKey, existingByCid);
+        }
+
+        const pendingUpdates = [];
+        const pendingCreates = [];
+        uniqueRecords.forEach(({ record, fields }, cid) => {
+          const recordId = existingByCid.get(cid);
+          if (recordId) {
+            pendingUpdates.push({ recordId, fields });
+          } else {
+            pendingCreates.push({ cid, record });
+          }
+        });
+
+        for (const updates of chunkRecords(pendingUpdates)) {
+          await activeTable.setRecords(updates);
+        }
+        for (const creates of chunkRecords(pendingCreates)) {
+          const created = await activeTable.addRecords(creates.map(item => item.record));
+          created.forEach((record, index) => existingByCid.set(creates[index].cid, record.recordId));
+        }
       } else {
         await activeTable.addRecords(records);
       }
@@ -768,6 +813,7 @@ const commentStreamTask = useIncrementalTask({
       stopAfterCurrentBatch: true,
       writeMode: task.writeMode || 'upsert',
       fieldMappings: task.fieldMappings || [],
+      upsertCacheKey: task.taskId,
       onTargetTableReady: async (tableId) => { task.targetTableId = tableId; },
     });
     task.targetTableId = result?.tableId || task.targetTableId;
