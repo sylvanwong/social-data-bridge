@@ -12,7 +12,7 @@ const unwrapApiData = (responseData) => {
   return responseData || {};
 };
 
-export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBatch, onProgress, onWriting, onFinish, onError }) => {
+export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBatch, onProgress, onWriting, onFinish, onError, isTerminal }) => {
   let activeTask = null;
   let timer = null;
   let inFlight = false;
@@ -81,7 +81,9 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
         onProgress?.(status, task, 'written');
       }
 
-      const terminal = Number(status.status) === 1 || Number(status.status) === 2;
+      const terminal = isTerminal
+        ? isTerminal(status)
+        : Number(status.status) === 1 || Number(status.status) === 2;
       if (terminal && !wroteData) {
         stop();
         await clear();
@@ -129,5 +131,5 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
     return true;
   };
 
-  return { start, resume, stop };
+  return { start, resume, stop, getActiveTask: () => activeTask };
 };
