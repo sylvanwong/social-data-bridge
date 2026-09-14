@@ -101,10 +101,56 @@ const loadTargetFieldOptions = async (tableId) => {
   if (!tableId) { targetFieldOptions.value = []; return; }
   try { targetFieldOptions.value = await (await bitable.base.getTableById(tableId)).getFieldMetaList(); } catch (error) { targetFieldOptions.value = []; }
 };
+const loadCurrentTargetFieldOptions = async () => {
+  try {
+    const table = await bitable.base.getActiveTable();
+    targetFieldOptions.value = await table.getFieldMetaList();
+  } catch (error) {
+    targetFieldOptions.value = [];
+  }
+};
 const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
 const loadTableOutputConfigs = async () => { if (!props.api_key) return; try { const r = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } }); const d = r.data?.data || r.data; const list = Array.isArray(d) ? d : (d?.list || d?.items || []); tableOutputConfigs.value = Object.fromEntries(list.filter(i => i?.target_table_id).map(i => [i.target_table_id, i])); } catch (e) {} };
 const applyTableOutputConfig = async (id) => { tableConfigApplying.value = true; try { const c = tableOutputConfigs.value[id]; mappingDraft.value = Array.isArray(c?.field_mappings) ? c.field_mappings.map(i => ({ ...i })) : []; await loadTargetFieldOptions(id); } finally { tableConfigApplying.value = false; } };
-const saveTableOutputConfig = async () => { const id = formData.value.targetTableId; if (formData.value.targetType !== 'existing' || !id || !props.api_key || tableConfigApplying.value || tableConfigSaving.value) return; tableConfigSaving.value = true; try { const table = await bitable.base.getTableById(id); const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: id, target_table_name: await table.getName(), write_mode: 'append', field_mappings: mappingDraft.value.filter(i => i.source_key && i.target_field_id).map(i => ({ ...i, source_name: '附件', target_field_name: targetFieldOptions.value.find(f => f.id === i.target_field_id)?.name || '' })) }; const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload }); tableOutputConfigs.value = { ...tableOutputConfigs.value, [id]: response.data?.data || response.data || payload }; } finally { tableConfigSaving.value = false; } };
+const loadCurrentTableOutputConfig = async () => {
+  try {
+    const table = await bitable.base.getActiveTable();
+    await applyTableOutputConfig(table.id);
+  } catch (error) {
+    mappingDraft.value = [];
+    targetFieldOptions.value = [];
+  }
+};
+const saveTableOutputConfig = async () => {
+  if (!props.api_key || tableConfigApplying.value || tableConfigSaving.value) return;
+
+  let id = formData.value.targetTableId;
+  if (formData.value.targetType === 'current') {
+    id = (await bitable.base.getActiveTable()).id;
+  }
+  if (!id) return;
+
+  tableConfigSaving.value = true;
+  try {
+    const table = await bitable.base.getTableById(id);
+    const payload = {
+      plugin_type: TASK_PLUGIN_TYPE,
+      base_id: await getBaseId(),
+      target_table_id: id,
+      target_table_name: await table.getName(),
+      write_mode: 'append',
+      field_mappings: mappingDraft.value.filter(i => i.source_key && i.target_field_id).map(i => ({
+        ...i,
+        source_name: '附件',
+        target_field_name: targetFieldOptions.value.find(f => f.id === i.target_field_id)?.name || '',
+      })),
+    };
+    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    tableOutputConfigs.value = { ...tableOutputConfigs.value, [id]: response.data?.data || response.data || payload };
+  } finally {
+    tableConfigSaving.value = false;
+  }
+};
 const resolveAttachmentFieldId = (fieldNameToId, config = MANUAL_FIELD_CONFIGS[0]) => {
   const mapping = mappingDraft.value.find(item => item?.source_key === config.key && item?.target_field_id);
   return mapping?.target_field_id || fieldNameToId[config.name];
@@ -606,10 +652,11 @@ const handleSubmit = async () => {
   await handleTableModeSubmit();
 };
 
-onMounted(() => {
-  loadTableOutputConfigs();
+onMounted(async () => {
+  await loadTableOutputConfigs();
   if (formData.value.mode === 'table') {
     loadFieldOptions({ silent: true });
+    loadCurrentTableOutputConfig();
   }
 });
 
@@ -619,6 +666,7 @@ watch(
     if (mode === 'table') {
       formData.value.targetType = 'current';
       loadFieldOptions({ silent: false });
+      loadCurrentTableOutputConfig();
     }
 
     if (mode === 'manual' && formData.value.targetType === 'current') {
@@ -652,6 +700,9 @@ watch(
 watch(() => formData.value.targetTableId, (id) => loadTargetFieldOptions(id));
 watch(() => formData.value.targetTableId, async id => { if (id && tableOutputConfigs.value[id]) await applyTableOutputConfig(id); else mappingDraft.value = []; });
 watch(mappingDraft, saveTableOutputConfig, { deep: true });
+watch(() => formData.value.targetType, async (type) => {
+  if (type === 'current') await loadCurrentTargetFieldOptions();
+});
 </script>
 
 <template>
@@ -733,7 +784,7 @@ watch(mappingDraft, saveTableOutputConfig, { deep: true });
               type="textarea"
               :rows="4"
               class="c-input"
-              placeholder="请输入正确的URL，支持批量添加，多个链接可换行或用逗号分隔"
+              placeholder="请输入链接，支持批量输入（多个链接请换行或用逗号分隔）"
             />
           </el-form-item>
           <el-form-item label="">
@@ -762,10 +813,10 @@ watch(mappingDraft, saveTableOutputConfig, { deep: true });
             </el-checkbox>
           </div>
         </el-form-item>
-        <div v-if="formData.targetType === 'existing'" class="mapping-accordion">
+        <div v-if="formData.mode === 'table' || formData.targetType === 'existing'" class="mapping-accordion">
           <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded"><span class="mapping-accordion-label">字段映射 <span class="mapping-optional">（可选）</span><span class="mapping-status">{{ mappingStatus }}</span></span><span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span></button>
           <div v-show="mappingExpanded" class="mapping-accordion-panel"><p class="mapping-note">可将“附件”写入现有表格的指定字段。</p>
-            <div v-for="(mapping,index) in mappingDraft" :key="index" class="mapping-row"><span>附件</span><span class="mapping-arrow">→</span><el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in targetFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select><el-button link type="danger" @click="mappingDraft.splice(index,1)">删除</el-button></div>
+            <div v-for="(mapping,index) in mappingDraft" :key="index" class="mapping-row"><el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option value="attachment" :label="formData.mode === 'table' && selectedUrlFieldName ? `${selectedUrlFieldName}附件` : '附件'" /></el-select><span class="mapping-arrow">→</span><el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in targetFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select><el-button link type="danger" @click="mappingDraft.splice(index,1)">删除</el-button></div>
             <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({source_key:'attachment',target_field_id:''})">+ 添加字段映射</el-button></div>
           </div>
         </div>
@@ -1156,8 +1207,11 @@ watch(mappingDraft, saveTableOutputConfig, { deep: true });
 .mapping-accordion-panel { padding:0 0 12px; }
 .mapping-note { margin:0 0 12px; line-height:18px; }
 .mapping-row { display:grid; grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr) auto; gap:4px; align-items:center; min-height:44px; border-top:1px solid #F0F1F3; }
+.mapping-row :deep(.el-select__wrapper) { min-height:36px; height:36px; padding:0 12px; border-radius:6px; box-shadow:0 0 0 1px #E5E6EB inset; }
 .mapping-arrow { color:#86909C; text-align:center; }
-.mapping-actions { display:flex; align-items:center; margin-top:8px; }
+.mapping-delete { min-width:28px; padding:4px; }
+.mapping-actions { display:flex; align-items:center; gap:12px; margin-top:8px; }
+.mapping-actions :deep(.el-button) { margin-left:0; }
 .toast-wrap {
   position: fixed;
   top: 50%;
@@ -1194,4 +1248,11 @@ watch(mappingDraft, saveTableOutputConfig, { deep: true });
   align-items: center;
   justify-content: center;
 }
+.sub-page { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.section-heading { font-size: 16px; font-weight: 500; line-height: 22px; }
+.group-label, .c-label { margin-bottom: 8px; font-size: 14px; font-weight: 500; line-height: 20px; }
+.source-mode-radio, .radio-block { display: flex; flex-wrap: wrap; gap: 16px; }
+.source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
+.custom-radio-group { gap: 8px; }
+.sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
 </style>

@@ -1747,11 +1747,6 @@ watch(
           <el-form-item>
             <div slot="label" class="c-label">
               作者主页链接所在字段
-              <!-- <el-tooltip effect="dark" placement="top">
-                <template #content>仅支持博主主页链接，<br />不支持其他链接</template>
-                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
-                  class="help-icon" />
-              </el-tooltip> -->
             </div>
             <el-select
               v-model="formData.profileLinkFieldId"
@@ -1808,11 +1803,6 @@ watch(
           <el-form-item>
             <div slot="label" class="c-label">
               作者主页链接
-              <el-tooltip effect="dark" placement="top">
-                <template #content>仅支持博主主页链接，<br />不支持其他链接</template>
-                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
-                  class="help-icon" />
-              </el-tooltip>
             </div>
             <el-input v-model="formData.manualUrls" type="textarea" :rows="4" class="c-input" placeholder="请输入作者主页链接，支持批量输入（多个链接请换行或用逗号分隔）" />
           </el-form-item>
@@ -3362,4 +3352,11 @@ watch(
     margin-left: 0;
   }
 }
+.sub-page { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.section-heading { font-size: 16px; font-weight: 500; line-height: 22px; }
+.group-label, .c-label { margin-bottom: 8px; font-size: 14px; font-weight: 500; line-height: 20px; }
+.source-mode-radio, .radio-block { display: flex; flex-wrap: wrap; gap: 16px; }
+.source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
+.custom-radio-group { gap: 8px; }
+.sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
 </style>

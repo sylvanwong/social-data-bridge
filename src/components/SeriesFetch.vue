@@ -67,9 +67,9 @@ watch(seriesPageCount, (count) => {
 });
 
 const scopeOptions = [
-  { value: 'all', label: '执行所有行' },
-  { value: 'selected', label: '执行选中行' },
-  { value: 'n', label: '执行前N行' },
+  { value: 'all', label: '所有行' },
+  { value: 'selected', label: '选中行' },
+  { value: 'n', label: '前N行' },
 ];
 const writeModeOptions = [
   { value: 'upsert', label: '更新或新增' },
@@ -747,7 +747,7 @@ const getProfileUrlsByFieldId = async (recordIdList, fieldId) => {
 
 const submitSeriesUrls = async (urlList, targetTableId = "") => {
   if (urlList.length === 0) {
-    showErrorMsg("请至少输入一个有效的博主主页链接");
+    showErrorMsg("请至少输入一个有效的作者主页链接");
     return;
   }
 
@@ -802,13 +802,13 @@ const commit = async () => {
   let urlList = [];
   if (mode === 'manual') {
     if (!manualUrls || !manualUrls.trim()) {
-      showErrorMsg("请输入博主主页链接");
+      showErrorMsg("请输入作者主页链接");
       return;
     }
     urlList = parseManualUrls(manualUrls);
   } else {
     if (!profileLinkFieldId) {
-      showErrorMsg("请选择博主主页链接字段");
+      showErrorMsg("请选择作者主页链接字段");
       return;
     }
     if (profileLinkFieldId === 'nodata') {
@@ -872,11 +872,7 @@ watch(selectedFieldKeys, (keys) => {
         <template v-if="formData.mode === 'table'">
           <el-form-item>
             <div class="c-label">
-              博主主页链接所在字段
-              <el-tooltip effect="dark" placement="top">
-                <template #content>仅支持抖音博主主页链接，<br />不支持其他链接</template>
-                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
-              </el-tooltip>
+              作者主页链接所在字段
             </div>
             <el-select
               v-model="formData.profileLinkFieldId"
@@ -932,18 +928,14 @@ watch(selectedFieldKeys, (keys) => {
           <el-form-item>
             <div class="c-label">
               <span class="required">*</span>
-              博主主页链接
-              <el-tooltip effect="dark" placement="top">
-                <template #content>仅支持抖音博主主页链接，<br />不支持其他链接</template>
-                <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png" class="help-icon" />
-              </el-tooltip>
+              作者主页链接
             </div>
             <el-input
               v-model="formData.manualUrls"
               type="textarea"
               :rows="4"
               class="c-input"
-              placeholder="请输入正确的博主主页链接，支持批量添加，多个链接可换行或用逗号分隔"
+              placeholder="请输入作者主页链接，支持批量输入（多个链接请换行或用逗号分隔）"
             />
           </el-form-item>
         </template>
@@ -1550,6 +1542,7 @@ watch(selectedFieldKeys, (keys) => {
 .mapping-accordion-panel { padding: 0 0 12px; }
 .mapping-note, .mapping-empty { margin: 0 0 12px; color: #86909C; font-size: 12px; line-height: 18px; }
 .mapping-row { display: grid; grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr) auto; gap: 4px; align-items: center; min-height: 44px; border-top: 1px solid #F0F1F3; }
+.mapping-row :deep(.el-select__wrapper) { min-height: 36px; height: 36px; padding: 0 12px; border-radius: 6px; box-shadow: 0 0 0 1px #E5E6EB inset; }
 .mapping-arrow { color: #86909C; text-align: center; }
 .mapping-delete { min-width: 28px; padding: 4px; }
 .mapping-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
@@ -1605,4 +1598,11 @@ watch(selectedFieldKeys, (keys) => {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+.sub-page { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.section-heading { font-size: 16px; font-weight: 500; line-height: 22px; }
+.group-label, .c-label { margin-bottom: 8px; font-size: 14px; font-weight: 500; line-height: 20px; }
+.source-mode-radio, .radio-block { display: flex; flex-wrap: wrap; gap: 16px; }
+.source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
+.custom-radio-group { gap: 8px; }
+.sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
 </style>
