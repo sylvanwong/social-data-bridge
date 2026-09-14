@@ -41,6 +41,8 @@ const tableConfigApplying = ref(false);
 const tableConfigSaving = ref(false);
 const loading = ref(false);
 const isSubmitting = ref(false);
+const isCancelling = ref(false);
+const activeCommentTaskId = ref('');
 const profileProgress = ref({ text: "", done: false });
 let page = 1;
 const page_size = 20;
@@ -288,7 +290,8 @@ onMounted(async () => {
   await loadSelectedFieldKeys();
   await loadTableOutputConfigs();
   fieldSelectionReady.value = true;
-  await commentStreamTask.resume(() => {
+  await commentStreamTask.resume((task) => {
+    activeCommentTaskId.value = task.taskId;
     loading.value = true;
     showToast('正在恢复未完成的评论采集任务...', true);
   });
@@ -806,6 +809,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
 
 const commentStreamTask = useIncrementalTask({
   storageKey: STREAM_TASK_STORAGE_KEY,
+  isTerminal: (status) => [1, 2, 3].includes(Number(status.status)),
   getStatus: async (task) => (await request({ url: `/social/api/v1/feishu/comment/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', headers: { authorization: `Bearer ${props.api_key}` } })).data,
   getResults: async (task) => (await request({ url: '/social/api/v1/feishu/comment/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 20 } })).data,
   writeBatch: async (items, task) => {
@@ -819,6 +823,11 @@ const commentStreamTask = useIncrementalTask({
     task.targetTableId = result?.tableId || task.targetTableId;
   },
   onProgress: (status, task) => {
+    if (status.status_text === 'cancel_requested' || status.cancel_requested) {
+      isCancelling.value = true;
+      showToast(`正在停止任务，已写入 ${task.writtenCount || 0} 条评论`, true);
+      return;
+    }
     const processed = Number(status.processed) || 0;
     const totalCount = Number(status.total) || 0;
     showToast(`已处理 ${totalCount ? `${processed}/${totalCount}` : processed} 个作品，已写入 ${task.writtenCount || 0} 条评论`, true);
@@ -826,15 +835,49 @@ const commentStreamTask = useIncrementalTask({
   onWriting: (items) => showToast(`正在写入 ${items.length} 条评论...`, true),
   onFinish: async (status, task) => {
     loading.value = false;
+    isCancelling.value = false;
+    activeCommentTaskId.value = '';
+    if (Number(status.status) === 3) {
+      showCompletionToast(`任务已停止，已写入 ${task.writtenCount || 0} 条评论`);
+      return;
+    }
     showCompletionToast(Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条评论`);
     if (Number(status.status) === 2) showErrorMsg(status.reason || '获取数据失败，请稍后重试');
   },
   onError: async (error) => {
     loading.value = false;
+    isCancelling.value = false;
+    activeCommentTaskId.value = '';
     showCompletionToast(error.message || '任务长时间没有进度');
     showErrorMsg(error.message || '任务长时间没有进度');
   },
 });
+
+const cancelCommentTask = async () => {
+  const task = commentStreamTask.getActiveTask();
+  if (!task?.taskId || isCancelling.value) {
+    return;
+  }
+
+  isCancelling.value = true;
+  showToast(`正在停止任务，已写入 ${task.writtenCount || 0} 条评论`, true);
+  try {
+    const response = await request({
+      url: '/social/api/v1/feishu/comment/task/cancel',
+      method: 'post',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      data: { task_id: task.taskId },
+    });
+    const res = response.data;
+    if (res?.sta !== 0) {
+      throw new Error(res?.msg || '停止任务失败');
+    }
+  } catch (error) {
+    isCancelling.value = false;
+    console.error('停止评论采集任务失败:', error);
+    showErrorMsg(error.message || '停止任务失败，请稍后重试');
+  }
+};
 
 const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {}) => {
   await request({
@@ -852,6 +895,7 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
       let res = response.data;
       if (res.sta == 0) {
         const data = res.data;
+        activeCommentTaskId.value = data.task_id;
         commentStreamTask.start({
           taskId: data.task_id,
           targetTableId,
@@ -860,11 +904,13 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
         });
       } else {
         loading.value = false;
+        activeCommentTaskId.value = '';
         showErrorMsg(res.msg);
       }
     })
     .catch(function (error) {
       loading.value = false;
+      activeCommentTaskId.value = '';
       console.log(error);
       showErrorMsg(error.message || '请求失败');
     });
@@ -1246,7 +1292,10 @@ watch(selectedFieldKeys, (keys) => {
         </div>
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">提交</el-button>
+      <div class="task-actions">
+        <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">提交</el-button>
+        <el-button v-if="loading && activeCommentTaskId" class="cancel-btn" :loading="isCancelling" :disabled="isCancelling" @click="cancelCommentTask">停止任务</el-button>
+      </div>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">
@@ -1369,6 +1418,10 @@ watch(selectedFieldKeys, (keys) => {
 .form :deep(.el-form-item__content) {
   font-size: 14px;
 }
+.task-actions {
+  display: flex;
+  gap: 8px;
+}
 .commit-btn {
   background: #A8071A;
   width: 100%;
@@ -1388,6 +1441,16 @@ watch(selectedFieldKeys, (keys) => {
 }
 .commit-btn:hover { background: #C11126; }
 .commit-btn:active { background: #8A0515; }
+.task-actions .commit-btn {
+  flex: 1;
+}
+.cancel-btn {
+  width: 104px;
+  height: 40px;
+  margin: 0;
+  border-color: #d5495c;
+  color: #a8071a;
+}
 .toast-wrap { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.95); z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; }
 .toast-wrap.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 .toast { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; background: #FFFFFF; border: 1px solid #E5E6EB; border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); font-size: 14px; font-weight: 500; color: #1D2129; white-space: nowrap; }
