@@ -64,6 +64,7 @@ const TASK_PLUGIN_TYPE = 'video_copy_summary';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 const mappingStatus = computed(() => { const count = mappingDraft.value.filter(item => item?.source_key && item?.target_field_id).length; return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射'; });
+const mappingSourceFields = computed(() => FIELD_CONFIG.filter(field => selectedFieldKeys.value.includes(field.key)));
 let isUnmounted = false;
 
 const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
@@ -108,10 +109,56 @@ const loadTargetFieldOptions = async (tableId) => {
     targetFieldOptions.value = await table.getFieldMetaList();
   } catch (error) { targetFieldOptions.value = []; }
 };
+const loadCurrentTargetFieldOptions = async () => {
+  try {
+    const table = await bitable.base.getActiveTable();
+    targetFieldOptions.value = await table.getFieldMetaList();
+  } catch (error) {
+    targetFieldOptions.value = [];
+  }
+};
 const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
 const loadTableOutputConfigs = async () => { if (!props.api_key) return; try { const r = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } }); const d = r.data?.data || r.data; const list = Array.isArray(d) ? d : (d?.list || d?.items || []); tableOutputConfigs.value = Object.fromEntries(list.filter(i => i?.target_table_id).map(i => [i.target_table_id, i])); } catch (e) {} };
 const applyTableOutputConfig = async (id) => { tableConfigApplying.value = true; try { const c = tableOutputConfigs.value[id]; mappingDraft.value = Array.isArray(c?.field_mappings) ? c.field_mappings.map(i => ({ ...i })) : []; await loadTargetFieldOptions(id); } finally { tableConfigApplying.value = false; } };
-const saveTableOutputConfig = async () => { const id = formData.value.targetTableId; if (formData.value.targetType !== 'existing' || !id || !props.api_key || tableConfigApplying.value || tableConfigSaving.value) return; tableConfigSaving.value = true; try { const table = await bitable.base.getTableById(id); const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: id, target_table_name: await table.getName(), write_mode: 'append', field_mappings: mappingDraft.value.filter(i => i.source_key && i.target_field_id).map(i => ({ ...i, source_name: FIELD_CONFIG.find(f => f.key === i.source_key)?.name || '', target_field_name: targetFieldOptions.value.find(f => f.id === i.target_field_id)?.name || '' })) }; const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload }); tableOutputConfigs.value = { ...tableOutputConfigs.value, [id]: response.data?.data || response.data || payload }; } finally { tableConfigSaving.value = false; } };
+const loadCurrentTableOutputConfig = async () => {
+  try {
+    const table = await bitable.base.getActiveTable();
+    await applyTableOutputConfig(table.id);
+  } catch (error) {
+    mappingDraft.value = [];
+    targetFieldOptions.value = [];
+  }
+};
+const saveTableOutputConfig = async () => {
+  if (!props.api_key || tableConfigApplying.value || tableConfigSaving.value) return;
+
+  let id = formData.value.targetTableId;
+  if (formData.value.targetType === 'current') {
+    id = (await bitable.base.getActiveTable()).id;
+  }
+  if (!id) return;
+
+  tableConfigSaving.value = true;
+  try {
+    const table = await bitable.base.getTableById(id);
+    const payload = {
+      plugin_type: TASK_PLUGIN_TYPE,
+      base_id: await getBaseId(),
+      target_table_id: id,
+      target_table_name: await table.getName(),
+      write_mode: 'append',
+      field_mappings: mappingDraft.value.filter(i => i.source_key && i.target_field_id).map(i => ({
+        ...i,
+        source_name: FIELD_CONFIG.find(f => f.key === i.source_key)?.name || '',
+        target_field_name: targetFieldOptions.value.find(f => f.id === i.target_field_id)?.name || '',
+      })),
+    };
+    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    tableOutputConfigs.value = { ...tableOutputConfigs.value, [id]: response.data?.data || response.data || payload };
+  } finally {
+    tableConfigSaving.value = false;
+  }
+};
 const resolveFieldId = (config, fieldNameToId) => {
   const mapping = mappingDraft.value.find(item => item?.source_key === config.key && item?.target_field_id);
   return mapping?.target_field_id || fieldNameToId[config.name];
@@ -833,10 +880,11 @@ const hideToast = () => {
   toastVisible.value = false;
 };
 
-onMounted(() => {
-  loadTableOutputConfigs();
+onMounted(async () => {
+  await loadTableOutputConfigs();
   if (formData.value.mode === "table") {
     loadFieldOptions({ silent: true });
+    loadCurrentTableOutputConfig();
   }
 
   Promise.all([
@@ -864,6 +912,7 @@ watch(
     if (mode === "table") {
       formData.value.targetType = "current";
       loadFieldOptions({ silent: false });
+      loadCurrentTableOutputConfig();
     }
 
     if (mode === "manual" && formData.value.targetType === "current") {
@@ -898,7 +947,7 @@ watch(() => formData.value.targetTableId, (id) => loadTargetFieldOptions(id));
 watch(() => formData.value.targetTableId, async id => { if (id && tableOutputConfigs.value[id]) await applyTableOutputConfig(id); else mappingDraft.value = []; });
 watch(mappingDraft, saveTableOutputConfig, { deep: true });
 watch(() => formData.value.targetType, async (type) => {
-  if (type === 'current') { try { const table = await bitable.base.getActiveTable(); targetFieldOptions.value = await table.getFieldMetaList(); } catch (error) { targetFieldOptions.value = []; } }
+  if (type === 'current') await loadCurrentTargetFieldOptions();
 });
 </script>
 
@@ -1027,12 +1076,12 @@ watch(() => formData.value.targetType, async (type) => {
             </el-checkbox>
           </el-checkbox-group>
         </el-form-item>
-        <div v-if="formData.targetType === 'existing'" class="mapping-accordion">
+        <div v-if="formData.mode === 'table' || formData.targetType === 'existing'" class="mapping-accordion">
           <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded"><span class="mapping-accordion-label">字段映射 <span class="mapping-optional">（可选）</span><span class="mapping-status">{{ mappingStatus }}</span></span><span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span></button>
           <div v-show="mappingExpanded" class="mapping-accordion-panel">
             <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
             <div v-for="(mapping, index) in mappingDraft" :key="index" class="mapping-row">
-              <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in FIELD_CONFIG" :key="field.key" :label="field.name" :value="field.key" /></el-select>
+              <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in mappingSourceFields" :key="field.key" :label="field.name" :value="field.key" /></el-select>
               <span class="mapping-arrow">→</span>
               <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in targetFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select>
               <el-button link type="danger" @click="mappingDraft.splice(index, 1)">删除</el-button>
@@ -1329,8 +1378,11 @@ watch(() => formData.value.targetType, async (type) => {
 .mapping-accordion-panel { padding:0 0 12px; }
 .mapping-note { margin:0 0 12px; line-height:18px; }
 .mapping-row { display:grid; grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr) auto; gap:4px; align-items:center; min-height:44px; border-top:1px solid #F0F1F3; }
+.mapping-row :deep(.el-select__wrapper) { min-height:36px; height:36px; padding:0 12px; border-radius:6px; box-shadow:0 0 0 1px #E5E6EB inset; }
 .mapping-arrow { color:#86909C; text-align:center; }
-.mapping-actions { display:flex; align-items:center; margin-top:8px; }
+.mapping-delete { min-width:28px; padding:4px; }
+.mapping-actions { display:flex; align-items:center; gap:12px; margin-top:8px; }
+.mapping-actions :deep(.el-button) { margin-left:0; }
 
 .field-checkbox-group :deep(.el-checkbox) {
   margin-right: 0;
@@ -1466,4 +1518,11 @@ watch(() => formData.value.targetType, async (type) => {
     transform: rotate(360deg);
   }
 }
+.sub-page { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.section-heading { font-size: 16px; font-weight: 500; line-height: 22px; }
+.group-label, .c-label { margin-bottom: 8px; font-size: 14px; font-weight: 500; line-height: 20px; }
+.source-mode-radio, .radio-block { display: flex; flex-wrap: wrap; gap: 16px; }
+.source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
+.custom-radio-group { gap: 8px; }
+.sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
 </style>

@@ -174,7 +174,7 @@ watch(replyPageCount, (count) => {
 });
 
 const scopeOptions = [
-  { value: 'all', label: '全部行' },
+  { value: 'all', label: '所有行' },
   { value: 'selected', label: '选中行' },
   { value: 'n', label: '前N行' },
 ];
@@ -1466,6 +1466,7 @@ watch(selectedFieldKeys, (keys) => {
 .mapping-accordion-panel { padding: 0 0 12px; }
 .mapping-note, .mapping-empty { margin: 0 0 12px; color: #86909C; font-size: 12px; line-height: 18px; }
 .mapping-row { display: grid; grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr) auto; gap: 4px; align-items: center; min-height: 44px; border-top: 1px solid #F0F1F3; }
+.mapping-row :deep(.el-select__wrapper) { min-height: 36px; height: 36px; padding: 0 12px; border-radius: 6px; box-shadow: 0 0 0 1px #E5E6EB inset; }
 .mapping-arrow { color: #86909C; text-align: center; }
 .mapping-delete { min-width: 28px; padding: 4px; }
 .mapping-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
@@ -1635,4 +1636,11 @@ watch(selectedFieldKeys, (keys) => {
 .field-checkbox-group :deep(.el-checkbox__input.is-checked + .el-checkbox__label) {
   color: #1D2129;
 }
+.sub-page { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.section-heading { font-size: 16px; font-weight: 500; line-height: 22px; }
+.group-label, .c-label { margin-bottom: 8px; font-size: 14px; font-weight: 500; line-height: 20px; }
+.source-mode-radio, .radio-block { display: flex; flex-wrap: wrap; gap: 16px; }
+.source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
+.custom-radio-group { gap: 8px; }
+.sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
 </style>

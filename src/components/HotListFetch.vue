@@ -518,7 +518,7 @@ watch(selectedFieldKeys, (keys) => {
         <div v-if="formData.radio === 2" class="mapping-accordion">
           <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded"><span class="mapping-accordion-label">字段映射 <span class="mapping-optional">（可选）</span><span class="mapping-status">{{ mappingStatus }}</span></span><span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span></button>
           <div v-show="mappingExpanded" class="mapping-accordion-panel"><p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
-            <div v-for="(mapping,index) in mappingDraft" :key="index" class="mapping-row"><el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in FIELD_MAPPING" :key="field.key" :label="field.name" :value="field.key" /></el-select><span class="mapping-arrow">→</span><el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in targetFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select><el-button link type="danger" @click="mappingDraft.splice(index,1)">删除</el-button></div>
+            <div v-for="(mapping,index) in mappingDraft" :key="index" class="mapping-row"><el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in FIELD_MAPPING" :key="field.key" :label="field.name" :value="field.key" /></el-select><span class="mapping-arrow">→</span><el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in targetFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select><el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index,1)">删除</el-button></div>
             <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({source_key:'',target_field_id:''})">+ 添加字段映射</el-button></div>
           </div>
         </div>
@@ -662,8 +662,11 @@ watch(selectedFieldKeys, (keys) => {
 .mapping-accordion-panel { padding:0 0 12px; }
 .mapping-note { margin:0 0 12px; line-height:18px; }
 .mapping-row { display:grid; grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr) auto; gap:4px; align-items:center; min-height:44px; border-top:1px solid #F0F1F3; }
+.mapping-row :deep(.el-select__wrapper) { min-height:36px; height:36px; padding:0 12px; border-radius:6px; box-shadow:0 0 0 1px #E5E6EB inset; }
 .mapping-arrow { color:#86909C; text-align:center; }
-.mapping-actions { display:flex; align-items:center; margin-top:8px; }
+.mapping-delete { min-width:28px; padding:4px; }
+.mapping-actions { display:flex; align-items:center; gap:12px; margin-top:8px; }
+.mapping-actions :deep(.el-button) { margin-left:0; }
 
 .field-checkbox-group :deep(.el-checkbox) {
   margin-right: 0;
@@ -770,4 +773,11 @@ watch(selectedFieldKeys, (keys) => {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+.sub-page { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.section-heading { font-size: 16px; font-weight: 500; line-height: 22px; }
+.group-label, .c-label { margin-bottom: 8px; font-size: 14px; font-weight: 500; line-height: 20px; }
+.source-mode-radio, .radio-block { display: flex; flex-wrap: wrap; gap: 16px; }
+.source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
+.custom-radio-group { gap: 8px; }
+.sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
 </style>

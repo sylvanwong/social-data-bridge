@@ -1991,9 +1991,9 @@ watch(
                 <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
                   <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
                 </el-select>
-                <el-button link type="danger" @click="mappingDraft.splice(index, 1)">删除</el-button>
+                <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
               </div>
-              <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
+              <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
             </template>
           </div>
         </div>
@@ -2342,9 +2342,9 @@ watch(
                   <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
                     <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
                   </el-select>
-                  <el-button link type="danger" @click="taskMappingDraft.splice(index, 1)">删除</el-button>
+                  <el-button link type="danger" class="mapping-delete" @click="taskMappingDraft.splice(index, 1)">删除</el-button>
                 </div>
-                <el-button link type="primary" @click="taskMappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
+                <div class="mapping-actions"><el-button link type="primary" @click="taskMappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
               </div>
             </div>
           </el-form>
@@ -2911,12 +2911,23 @@ watch(
 .mapping-note { margin: 0 0 12px; line-height: 18px; }
 .mapping-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr) auto;
   align-items: center;
   gap: 4px;
-  margin-bottom: 8px;
+  min-height: 44px;
+  border-top: 1px solid #F0F1F3;
+}
+.mapping-row :deep(.el-select__wrapper) {
+  min-height: 36px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px #E5E6EB inset;
 }
 .mapping-arrow { color: #86909C; }
+.mapping-delete { min-width: 28px; padding: 4px; }
+.mapping-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.mapping-actions :deep(.el-button) { margin-left: 0; }
 
 .stepper-buttons {
   display: flex;
@@ -3368,4 +3379,11 @@ watch(
     flex-direction: column;
   }
 }
+.sub-page { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+.section-heading { font-size: 16px; font-weight: 500; line-height: 22px; }
+.group-label, .c-label { margin-bottom: 8px; font-size: 14px; font-weight: 500; line-height: 20px; }
+.source-mode-radio, .radio-block { display: flex; flex-wrap: wrap; gap: 16px; }
+.source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
+.custom-radio-group { gap: 8px; }
+.sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
 </style>

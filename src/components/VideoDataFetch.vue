@@ -2153,11 +2153,13 @@ watch(
     </div>
     <div class="form-card">
       <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
-      <div class="group-label">作品链接来源</div>
-      <el-radio-group v-model="formData.mode" class="source-mode-radio">
-        <el-radio value="table">从表格选取</el-radio>
-        <el-radio value="manual">手动输入</el-radio>
-      </el-radio-group>
+      <div class="choice-group">
+        <div class="choice-label">作品链接来源</div>
+        <el-radio-group v-model="formData.mode" class="choice-radio-group">
+          <el-radio value="table">从表格选取</el-radio>
+          <el-radio value="manual">手动输入</el-radio>
+        </el-radio-group>
+      </div>
       <el-form ref="form" class="form" :model="formData" label-position="top">
         <template v-if="formData.mode === 'table'">
         <el-form-item label="">
@@ -2228,9 +2230,9 @@ watch(
         </template>
 
         <div class="section-heading output-heading"><span class="section-step">2</span><span>输出设置</span></div>
-        <el-form-item v-if="formData.mode === 'manual'" label="" style="margin-top: 12px">
-          <div class="c-label">输出到表格</div>
-          <el-radio-group v-model="formData.targetType" class="radio-block">
+        <el-form-item v-if="formData.mode === 'manual'" label="" class="choice-form-item">
+          <div class="choice-label">输出到表格</div>
+          <el-radio-group v-model="formData.targetType" class="choice-radio-group">
             <el-radio value="new">新建表格</el-radio>
             <el-radio value="existing">使用现有表格</el-radio>
           </el-radio-group>
@@ -2241,9 +2243,9 @@ watch(
             <el-option v-for="table in tableOptions" :key="table.id" :label="table.name" :value="table.id" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="formData.mode === 'manual' && formData.targetType === 'existing'" label="" style="margin-top: 12px">
-          <div class="c-label">数据写入方式</div>
-          <el-radio-group v-model="formData.writeMode" class="radio-block">
+        <el-form-item v-if="formData.mode === 'manual' && formData.targetType === 'existing'" label="" class="choice-form-item">
+          <div class="choice-label">数据写入方式</div>
+          <el-radio-group v-model="formData.writeMode" class="choice-radio-group">
             <el-radio value="upsert">更新或新增</el-radio>
             <el-radio value="append">始终新增</el-radio>
           </el-radio-group>
@@ -2287,9 +2289,9 @@ watch(
           </div>
         </div>
 
-        <el-form-item label="" style="margin-top: 12px">
-          <div class="c-label">执行方式</div>
-          <el-radio-group v-model="formData.executionMode" class="radio-block">
+        <el-form-item label="" class="choice-form-item">
+          <div class="choice-label">执行方式</div>
+          <el-radio-group v-model="formData.executionMode" class="choice-radio-group">
             <el-radio value="immediate">立即执行</el-radio>
             <el-radio value="schedule">定时任务</el-radio>
           </el-radio-group>
@@ -2495,7 +2497,7 @@ watch(
           <div class="group-label">作品链接来源</div>
           <el-radio-group
             v-model="taskDialogForm.mode"
-            class="source-mode-radio dialog-source-mode-radio"
+            class="radio-block dialog-source-mode-radio"
             @change="(mode) => {
               if (mode === 'table') {
                 taskDialogForm.targetType = 'current';
@@ -2789,6 +2791,7 @@ watch(
   border: 1px solid #E5E6EB;
   border-radius: 8px;
   box-sizing: border-box;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 .mode-switch {
   display: flex;
@@ -2799,15 +2802,68 @@ watch(
   padding: 4px;
   border: 1px solid #E5E6EB;
 }
-.source-mode-radio {
+.choice-group {
+  margin-bottom: 12px;
+}
+.group-label {
+  margin-bottom: 8px;
+  color: #4E5969;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+.choice-label {
+  margin-bottom: 8px;
+  color: #1D2129;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+.choice-form-item :deep(.el-form-item__content) {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.choice-radio-group {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 16px;
-  margin: 0 0 12px;
+  width: 100%;
 }
-.source-mode-radio :deep(.el-radio) { margin-right: 0; }
-.source-mode-radio :deep(.el-radio__label) { padding-left: 8px; color: #1D2129; font-size: 14px; }
-.group-label { margin-bottom: 8px; color: #4E5969; font-size: 14px; line-height: 20px; }
+.choice-radio-group :deep(.el-radio) {
+  margin-right: 0;
+  min-height: 28px;
+}
+.choice-radio-group :deep(.el-radio__input) {
+  margin-right: 8px;
+}
+.choice-radio-group :deep(.el-radio__inner) {
+  width: 16px;
+  height: 16px;
+  border-color: #E5E6EB;
+  background: #FFFFFF;
+}
+.choice-radio-group :deep(.el-radio:hover .el-radio__inner) {
+  border-color: #86909C;
+}
+.choice-radio-group :deep(.el-radio__input.is-checked .el-radio__inner) {
+  border-color: #A8071A;
+  background: #FFFFFF;
+  border-width: 4px;
+}
+.choice-radio-group :deep(.el-radio__inner::after) {
+  display: none;
+}
+.choice-radio-group :deep(.el-radio__label) {
+  padding-left: 0;
+  color: #1D2129;
+  font-size: 14px;
+  font-family: inherit;
+  font-weight: 400;
+  line-height: 20px;
+}
 .section-heading {
   display: flex;
   align-items: center;
@@ -2914,7 +2970,11 @@ watch(
 .c-label {
   display: flex;
   align-items: center;
+  margin-bottom: 8px;
   color: #1D2129;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
 }
 
 .label-help-link {
@@ -2959,7 +3019,7 @@ watch(
 .custom-radio-group {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   width: 100%;
 }
 
@@ -3000,8 +3060,10 @@ watch(
 
 .custom-radio-group :deep(.el-radio__label) {
   font-size: 14px;
+  font-family: inherit;
+  font-weight: 400;
   color: #1D2129;
-  line-height: 22px;
+  line-height: 20px;
   padding-left: 0;
   display: flex;
   align-items: center;
@@ -3020,6 +3082,9 @@ watch(
   margin-left: 8px;
   color: #4E5969;
   font-size: 14px;
+  font-family: inherit;
+  font-weight: 400;
+  line-height: 20px;
   white-space: nowrap;
 }
 
@@ -3052,12 +3117,13 @@ watch(
   width: 44px;
   padding: 0 8px;
   font-size: 14px;
+  font-family: inherit;
+  font-weight: 400;
   color: #1D2129;
   border: none;
   outline: none;
   background: transparent;
   text-align: center;
-  font-family: inherit;
   line-height: 30px;
   -moz-appearance: textfield;
 }
@@ -3105,6 +3171,9 @@ watch(
 .field-checkbox-group :deep(.el-checkbox__label) {
   padding-left: 8px;
   color: #1D2129;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 400;
   line-height: 22px;
 }
 
@@ -3193,6 +3262,14 @@ watch(
   align-items: center;
   min-height: 44px;
   border-top: 1px solid #F0F1F3;
+}
+
+.mapping-row :deep(.el-select__wrapper) {
+  min-height: 36px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px #E5E6EB inset;
 }
 
 .mapping-arrow {
@@ -3512,10 +3589,10 @@ watch(
 }
 
 .task-dialog-title {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 500;
   color: #1D2129;
-  line-height: 24px;
+  line-height: 20px;
   margin-bottom: 12px;
 }
 
