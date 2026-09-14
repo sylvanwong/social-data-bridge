@@ -42,6 +42,7 @@ const mappingExpanded = ref(false);
 const tableConfigLoading = ref(false);
 const tableConfigApplying = ref(false);
 const tableConfigSaving = ref(false);
+const isSubmitting = ref(false);
 const TASK_PLUGIN_TYPE = 'series_fetch';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
@@ -788,50 +789,60 @@ onMounted(async () => {
 });
 
 const commit = async () => {
-  if (!props.api_key) {
-    showErrorMsg("请输入API key");
+  if (isSubmitting.value || loading.value) {
     return;
   }
 
-  const { radio, table_id, mode, profileLinkFieldId, scope, rowCount, manualUrls } = formData.value;
-  if (radio === 2 && !table_id) {
-    showErrorMsg("请选择现有表格");
-    return;
-  }
+  isSubmitting.value = true;
+  try {
+    if (!props.api_key) {
+      showErrorMsg("请输入API key");
+      return;
+    }
+    const { radio, table_id, mode, profileLinkFieldId, scope, rowCount, manualUrls } = formData.value;
+    if (radio === 2 && !table_id) {
+      showErrorMsg("请选择现有表格");
+      return;
+    }
 
-  let urlList = [];
-  if (mode === 'manual') {
-    if (!manualUrls || !manualUrls.trim()) {
-      showErrorMsg("请输入作者主页链接");
-      return;
+    let urlList = [];
+    if (mode === 'manual') {
+      if (!manualUrls || !manualUrls.trim()) {
+        showErrorMsg("请输入作者主页链接");
+        return;
+      }
+      urlList = parseManualUrls(manualUrls);
+    } else {
+      if (!profileLinkFieldId) {
+        showErrorMsg("请选择作者主页链接字段");
+        return;
+      }
+      if (profileLinkFieldId === 'nodata') {
+        showErrorMsg("未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。");
+        return;
+      }
+      const recordIdList = await getRecordIdListByScope(scope, rowCount);
+      if (!recordIdList) {
+        return;
+      }
+      urlList = await getProfileUrlsByFieldId(recordIdList, profileLinkFieldId);
     }
-    urlList = parseManualUrls(manualUrls);
-  } else {
-    if (!profileLinkFieldId) {
-      showErrorMsg("请选择作者主页链接字段");
-      return;
-    }
-    if (profileLinkFieldId === 'nodata') {
-      showErrorMsg("未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。");
-      return;
-    }
-    const recordIdList = await getRecordIdListByScope(scope, rowCount);
-    if (!recordIdList) {
-      return;
-    }
-    urlList = await getProfileUrlsByFieldId(recordIdList, profileLinkFieldId);
-  }
 
-  if (radio === 2) {
-    validateTableFields(table_id).then(async isValid => {
+    if (radio === 2) {
+      const isValid = await validateTableFields(table_id);
       if (isValid) {
         await submitSeriesUrls(urlList, table_id);
       }
-    });
-    return;
-  }
+      return;
+    }
 
-  await submitSeriesUrls(urlList, "");
+    await submitSeriesUrls(urlList, "");
+  } catch (error) {
+    console.error('提交博主短剧任务失败:', error);
+    showErrorMsg(error.message || '提交失败，请稍后重试');
+  } finally {
+    isSubmitting.value = false;
+  }
 };
 
 watch(selectedFieldKeys, (keys) => {
@@ -1069,7 +1080,7 @@ watch(selectedFieldKeys, (keys) => {
         </div>
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="commit">提交</el-button>
+      <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">提交</el-button>
       <div v-if="profileProgress.text" class="profile-progress" :class="{ 'profile-progress--done': profileProgress.done }">
         <span v-if="profileProgress.done" class="profile-progress-check">✓</span>
         {{ profileProgress.text }}

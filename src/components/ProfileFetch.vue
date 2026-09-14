@@ -139,6 +139,7 @@ const taskDialogForm = ref(getDefaultTaskDialogForm());
 const taskList = ref([]);
 const taskListLoading = ref(false);
 const taskManagerExpanded = ref(false);
+const isSubmitting = ref(false);
 
 const pages_options = Array.from({ length: 50 }, (_, index) => ({ value: index + 1, label: `前 ${index + 1} 页` }));
 const workRangeTypes = [
@@ -1202,40 +1203,48 @@ const submitProfileUrls = async (urlList, targetTableId = "") => {
 };
 
 const handleImmediateSubmit = async () => {
-  if (!validateBaseForm({
-    ...formData.value,
-    selectedFieldKeys: selectedFieldKeys.value,
-  })) {
+  if (isSubmitting.value || loading.value) {
     return;
   }
 
-  let urlList = [];
-  if (formData.value.mode === 'manual') {
-    urlList = parseManualUrls(formData.value.manualUrls);
-  } else {
-    const recordIdList = await getRecordIdListByScope(formData.value.scope, formData.value.rowCount);
-    if (!recordIdList) {
+  isSubmitting.value = true;
+  try {
+    if (!validateBaseForm({
+      ...formData.value,
+      selectedFieldKeys: selectedFieldKeys.value,
+    })) {
       return;
     }
-    urlList = await getProfileUrlsByFieldId(recordIdList, formData.value.profileLinkFieldId);
-  }
 
-  if (normalizeTargetType(formData.value.targetType) === 'existing') {
-    validateTableFields(formData.value.targetTableId, selectedFieldKeys.value, {
-      fieldMappings: cloneFieldMappings(mappingDraft.value),
-      writeMode: formData.value.writeMode,
-    }).then(async isValid => {
+    let urlList = [];
+    if (formData.value.mode === 'manual') {
+      urlList = parseManualUrls(formData.value.manualUrls);
+    } else {
+      const recordIdList = await getRecordIdListByScope(formData.value.scope, formData.value.rowCount);
+      if (!recordIdList) {
+        return;
+      }
+      urlList = await getProfileUrlsByFieldId(recordIdList, formData.value.profileLinkFieldId);
+    }
+
+    if (normalizeTargetType(formData.value.targetType) === 'existing') {
+      const isValid = await validateTableFields(formData.value.targetTableId, selectedFieldKeys.value, {
+        fieldMappings: cloneFieldMappings(mappingDraft.value),
+        writeMode: formData.value.writeMode,
+      });
       if (isValid) {
         await submitProfileUrls(urlList, formData.value.targetTableId);
       }
-    }).catch(error => {
-      console.error('验证表格字段时出错:', error);
-      showErrorMsg('验证表格字段失败，请稍后重试');
-    });
-    return;
-  }
+      return;
+    }
 
-  await submitProfileUrls(urlList, '');
+    await submitProfileUrls(urlList, '');
+  } catch (error) {
+    console.error('提交博主作品采集任务失败:', error);
+    showErrorMsg(error.message || '提交失败，请稍后重试');
+  } finally {
+    isSubmitting.value = false;
+  }
 };
 
 const getTaskDisplayName = (task) => {
@@ -1936,7 +1945,7 @@ watch(
       </el-form>
 
       <div v-if="formData.executionMode === 'immediate'" class="action-group">
-        <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleImmediateSubmit">立即执行</el-button>
+        <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="handleImmediateSubmit">立即执行</el-button>
       </div>
 
       <div v-else class="schedule-inline-panel">

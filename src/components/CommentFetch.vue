@@ -40,6 +40,7 @@ const tableConfigLoading = ref(false);
 const tableConfigApplying = ref(false);
 const tableConfigSaving = ref(false);
 const loading = ref(false);
+const isSubmitting = ref(false);
 const profileProgress = ref({ text: "", done: false });
 let page = 1;
 const page_size = 20;
@@ -858,52 +859,60 @@ const validateTableFields = async (tableId) => {
 };
 
 const commit = async () => {
-  if (loading.value) return;
-  if (!props.api_key) {
-    showErrorMsg("请输入API key");
-    return;
-  }
-  const { radio, table_id, mode, manualUrls, noteLinkFieldId, scope, rowCount } = formData.value;
-  if (radio === 2 && !table_id) {
-    showErrorMsg("请选择现有表格");
+  if (isSubmitting.value || loading.value) {
     return;
   }
 
-  let urlList = [];
-  if (mode === 'manual') {
-    if (!manualUrls || !manualUrls.trim()) {
-      showErrorMsg("请输入帖子链接");
+  isSubmitting.value = true;
+  try {
+    if (!props.api_key) {
+      showErrorMsg("请输入API key");
       return;
     }
-    urlList = parseManualUrls(manualUrls);
-  } else {
-    if (!noteLinkFieldId) {
-      showErrorMsg("请选择帖子链接字段");
+    const { radio, table_id, mode, manualUrls, noteLinkFieldId, scope, rowCount } = formData.value;
+    if (radio === 2 && !table_id) {
+      showErrorMsg("请选择现有表格");
       return;
     }
-    if (noteLinkFieldId === 'nodata') {
-      showErrorMsg("未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。");
-      return;
-    }
-    const recordIdList = await getRecordIdListByScope(scope, rowCount);
-    if (!recordIdList) {
-      return;
-    }
-    urlList = await getNoteUrlsByFieldId(recordIdList, noteLinkFieldId);
-  }
 
-  if (radio === 2) {
-    validateTableFields(table_id).then(async isValid => {
+    let urlList = [];
+    if (mode === 'manual') {
+      if (!manualUrls || !manualUrls.trim()) {
+        showErrorMsg("请输入帖子链接");
+        return;
+      }
+      urlList = parseManualUrls(manualUrls);
+    } else {
+      if (!noteLinkFieldId) {
+        showErrorMsg("请选择帖子链接字段");
+        return;
+      }
+      if (noteLinkFieldId === 'nodata') {
+        showErrorMsg("未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。");
+        return;
+      }
+      const recordIdList = await getRecordIdListByScope(scope, rowCount);
+      if (!recordIdList) {
+        return;
+      }
+      urlList = await getNoteUrlsByFieldId(recordIdList, noteLinkFieldId);
+    }
+
+    if (radio === 2) {
+      const isValid = await validateTableFields(table_id);
       if (isValid) {
         await getNoteData(table_id, urlList);
       }
-    }).catch(error => {
-      console.error("验证表格字段时出错:", error);
-      showErrorMsg("验证表格字段失败，请稍后重试");
-    });
-    return;
+      return;
+    }
+
+    await getNoteData("", urlList);
+  } catch (error) {
+    console.error("提交评论采集任务失败:", error);
+    showErrorMsg(error.message || "提交失败，请稍后重试");
+  } finally {
+    isSubmitting.value = false;
   }
-  await getNoteData("", urlList);
 };
 
 watch(selectedFieldKeys, (keys) => {
@@ -1191,7 +1200,7 @@ watch(selectedFieldKeys, (keys) => {
         </div>
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="commit">提交</el-button>
+      <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">提交</el-button>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">
