@@ -222,7 +222,30 @@ const getActiveFieldConfigs = () => {
   return FIELD_CONFIG.filter(field => field.required || selectedKeySet.has(field.key));
 };
 
-const mappingSourceFields = computed(() => FIELD_CONFIG.filter(field => selectedFieldKeys.value.includes(field.key)));
+const getMappingSourceFields = (index) => {
+  const usedSourceKeys = new Set(
+    mappingDraft.value
+      .filter((item, itemIndex) => itemIndex !== index && item?.source_key)
+      .map(item => item.source_key)
+  );
+
+  return FIELD_CONFIG
+    .filter(field => selectedFieldKeys.value.includes(field.key))
+    .map(field => ({ ...field, disabled: usedSourceKeys.has(field.key) }));
+};
+
+const getMappingTargetFields = (index) => {
+  const usedTargetFieldIds = new Set(
+    mappingDraft.value
+      .filter((item, itemIndex) => itemIndex !== index && item?.target_field_id)
+      .map(item => item.target_field_id)
+  );
+
+  return tableFieldOptions.value.map(field => ({
+    ...field,
+    disabled: usedTargetFieldIds.has(field.id),
+  }));
+};
 const mappingStatus = computed(() => {
   if (!formData.value.table_id) return '选择目标表格后可设置';
   const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
@@ -1275,11 +1298,11 @@ watch(selectedFieldKeys, (keys) => {
               <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
               <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
                 <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
-                  <el-option v-for="field in mappingSourceFields" :key="field.key" :label="field.name" :value="field.key" />
+                  <el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                 </el-select>
                 <span class="mapping-arrow">→</span>
                 <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
-                  <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+                  <el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                 </el-select>
                 <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
               </div>
@@ -1293,7 +1316,7 @@ watch(selectedFieldKeys, (keys) => {
       </el-form>
 
       <div class="task-actions">
-        <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">提交</el-button>
+        <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">立即执行</el-button>
         <el-button v-if="loading && activeCommentTaskId" class="cancel-btn" :loading="isCancelling" :disabled="isCancelling" @click="cancelCommentTask">停止任务</el-button>
       </div>
     </div>

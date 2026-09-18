@@ -1692,7 +1692,42 @@ onMounted(() => {
   });
 });
 
-const mappingSourceFields = () => FIELD_CONFIG.filter(field => selectedFieldKeys.value.includes(field.key));
+const getMappingSourceFields = (mappings, index, selectedKeys) => {
+  const usedSourceKeys = new Set(
+    mappings
+      .filter((item, itemIndex) => itemIndex !== index && item?.source_key)
+      .map(item => item.source_key)
+  );
+
+  return FIELD_CONFIG
+    .filter(field => selectedKeys.includes(field.key))
+    .map(field => ({ ...field, disabled: usedSourceKeys.has(field.key) }));
+};
+
+const getMappingTargetFields = (mappings, index) => {
+  const usedTargetFieldIds = new Set(
+    mappings
+      .filter((item, itemIndex) => itemIndex !== index && item?.target_field_id)
+      .map(item => item.target_field_id)
+  );
+
+  return tableFieldOptions.value.map(field => ({
+    ...field,
+    disabled: usedTargetFieldIds.has(field.id),
+  }));
+};
+
+const mappingSourceFields = (index) => getMappingSourceFields(
+  mappingDraft.value,
+  index,
+  selectedFieldKeys.value
+);
+
+const taskMappingSourceFields = (index) => getMappingSourceFields(
+  taskMappingDraft.value,
+  index,
+  taskDialogForm.value.selectedFieldKeys
+);
 const allFieldKeys = FIELD_CONFIG.map(field => field.key);
 const isAllFieldsSelected = computed(() => allFieldKeys.every(key => selectedFieldKeys.value.includes(key)));
 const isFieldsPartiallySelected = computed(() =>
@@ -1985,11 +2020,11 @@ watch(
               <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
               <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
                 <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
-                  <el-option v-for="field in mappingSourceFields()" :key="field.key" :label="field.name" :value="field.key" />
+                  <el-option v-for="field in mappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                 </el-select>
                 <span class="mapping-arrow">→</span>
                 <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
-                  <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+                  <el-option v-for="field in getMappingTargetFields(mappingDraft, index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                 </el-select>
                 <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
               </div>
@@ -2336,11 +2371,11 @@ watch(
                 <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
                 <div v-for="(mapping, index) in taskMappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
                   <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
-                    <el-option v-for="field in FIELD_CONFIG.filter(field => taskDialogForm.selectedFieldKeys.includes(field.key))" :key="field.key" :label="field.name" :value="field.key" />
+                    <el-option v-for="field in taskMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                   </el-select>
                   <span class="mapping-arrow">→</span>
                   <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
-                    <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+                    <el-option v-for="field in getMappingTargetFields(taskMappingDraft, index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                   </el-select>
                   <el-button link type="danger" class="mapping-delete" @click="taskMappingDraft.splice(index, 1)">删除</el-button>
                 </div>

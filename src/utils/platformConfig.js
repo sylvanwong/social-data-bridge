@@ -11,7 +11,8 @@ export const PLATFORM_LABELS = {
   zhihu: '知乎',
   instagram: 'Instagram',
   youtube: 'YouTube',
-  x: 'X'
+  x: 'X',
+  toutiao: '今日头条'
 };
 
 export const mapPlatformOptions = (platforms = []) =>

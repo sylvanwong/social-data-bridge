@@ -464,7 +464,42 @@ const syncMainFormToTaskForm = () => {
 };
 
 const cloneFieldMappings = (mappings = []) => mappings.map(item => ({ ...item }));
-const mappingSourceFields = computed(() => FIELD_CONFIG.filter(field => selectedFieldKeys.value.includes(field.key)));
+const getMappingSourceFields = (mappings, index, selectedKeys) => {
+  const usedSourceKeys = new Set(
+    mappings
+      .filter((item, itemIndex) => itemIndex !== index && item?.source_key)
+      .map(item => item.source_key)
+  );
+
+  return FIELD_CONFIG
+    .filter(field => selectedKeys.includes(field.key))
+    .map(field => ({ ...field, disabled: usedSourceKeys.has(field.key) }));
+};
+
+const getMappingTargetFields = (mappings, index) => {
+  const usedTargetFieldIds = new Set(
+    mappings
+      .filter((item, itemIndex) => itemIndex !== index && item?.target_field_id)
+      .map(item => item.target_field_id)
+  );
+
+  return tableFieldOptions.value.map(field => ({
+    ...field,
+    disabled: usedTargetFieldIds.has(field.id),
+  }));
+};
+
+const mappingSourceFields = (index) => getMappingSourceFields(
+  mappingDraft.value,
+  index,
+  selectedFieldKeys.value
+);
+
+const taskMappingSourceFields = (index) => getMappingSourceFields(
+  taskDialogForm.value.fieldMappings,
+  index,
+  taskDialogForm.value.selectedFieldKeys
+);
 const mappingStatus = computed(() => {
   if (formData.value.mode === 'table') {
     const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
@@ -2279,9 +2314,9 @@ watch(
             <template v-else>
               <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
               <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
-                <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in mappingSourceFields" :key="field.key" :label="field.name" :value="field.key" /></el-select>
+                <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in mappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" /></el-select>
                 <span class="mapping-arrow">→</span>
-                <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select>
+                <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in getMappingTargetFields(mappingDraft, index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" /></el-select>
                 <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
               </div>
               <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
@@ -2612,9 +2647,9 @@ watch(
               <div v-show="mappingExpanded" class="mapping-accordion-panel">
                 <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。</p>
                 <div v-for="(mapping, index) in taskDialogForm.fieldMappings" :key="`${mapping.source_key}-${index}`" class="mapping-row">
-                  <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in FIELD_CONFIG.filter(field => taskDialogForm.selectedFieldKeys.includes(field.key))" :key="field.key" :label="field.name" :value="field.key" /></el-select>
+                  <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in taskMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" /></el-select>
                   <span class="mapping-arrow">→</span>
-                  <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select>
+                  <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in getMappingTargetFields(taskDialogForm.fieldMappings, index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" /></el-select>
                   <el-button link type="danger" class="mapping-delete" @click="taskDialogForm.fieldMappings.splice(index, 1)">删除</el-button>
                 </div>
                 <div class="mapping-actions"><el-button link type="primary" @click="taskDialogForm.fieldMappings.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
