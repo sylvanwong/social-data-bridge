@@ -64,7 +64,30 @@ const TASK_PLUGIN_TYPE = 'video_copy_summary';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 const mappingStatus = computed(() => { const count = mappingDraft.value.filter(item => item?.source_key && item?.target_field_id).length; return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射'; });
-const mappingSourceFields = computed(() => FIELD_CONFIG.filter(field => selectedFieldKeys.value.includes(field.key)));
+const getMappingSourceFields = (index) => {
+  const usedSourceKeys = new Set(
+    mappingDraft.value
+      .filter((item, itemIndex) => itemIndex !== index && item?.source_key)
+      .map(item => item.source_key)
+  );
+
+  return FIELD_CONFIG
+    .filter(field => selectedFieldKeys.value.includes(field.key))
+    .map(field => ({ ...field, disabled: usedSourceKeys.has(field.key) }));
+};
+
+const getMappingTargetFields = (index) => {
+  const usedTargetFieldIds = new Set(
+    mappingDraft.value
+      .filter((item, itemIndex) => itemIndex !== index && item?.target_field_id)
+      .map(item => item.target_field_id)
+  );
+
+  return targetFieldOptions.value.map(field => ({
+    ...field,
+    disabled: usedTargetFieldIds.has(field.id),
+  }));
+};
 let isUnmounted = false;
 
 const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
@@ -1081,9 +1104,9 @@ watch(() => formData.value.targetType, async (type) => {
           <div v-show="mappingExpanded" class="mapping-accordion-panel">
             <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
             <div v-for="(mapping, index) in mappingDraft" :key="index" class="mapping-row">
-              <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in mappingSourceFields" :key="field.key" :label="field.name" :value="field.key" /></el-select>
+              <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" /></el-select>
               <span class="mapping-arrow">→</span>
-              <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in targetFieldOptions" :key="field.id" :label="field.name" :value="field.id" /></el-select>
+              <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" /></el-select>
               <el-button link type="danger" @click="mappingDraft.splice(index, 1)">删除</el-button>
             </div>
             <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
@@ -1091,7 +1114,7 @@ watch(() => formData.value.targetType, async (type) => {
         </div>
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleSubmit">提交</el-button>
+      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleSubmit">立即执行</el-button>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">

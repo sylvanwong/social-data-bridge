@@ -440,9 +440,32 @@ const isAllFieldsSelected = computed(() => allFieldKeys.every(key => selectedFie
 const isFieldsPartiallySelected = computed(() =>
   !isAllFieldsSelected.value && selectedFieldKeys.value.some(key => allFieldKeys.includes(key))
 );
-const mappingSourceFields = computed(() =>
-  PROFILE_FIELD_MAPPING.filter(field => selectedFieldKeys.value.includes(field.key))
-);
+const getMappingSourceFields = (index, selectedKeys) => {
+  const usedSourceKeys = new Set(
+    mappingDraft.value
+      .filter((item, itemIndex) => itemIndex !== index && item?.source_key)
+      .map(item => item.source_key)
+  );
+
+  return PROFILE_FIELD_MAPPING
+    .filter(field => selectedKeys.includes(field.key))
+    .map(field => ({ ...field, disabled: usedSourceKeys.has(field.key) }));
+};
+
+const getMappingTargetFields = (index) => {
+  const usedTargetFieldIds = new Set(
+    mappingDraft.value
+      .filter((item, itemIndex) => itemIndex !== index && item?.target_field_id)
+      .map(item => item.target_field_id)
+  );
+
+  return tableFieldOptions.value.map(field => ({
+    ...field,
+    disabled: usedTargetFieldIds.has(field.id),
+  }));
+};
+
+const mappingSourceFields = (index) => getMappingSourceFields(index, selectedFieldKeys.value);
 const mappingStatus = computed(() => {
   if (!formData.value.targetTableId) return '选择目标表格后可设置';
   const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
@@ -455,9 +478,7 @@ const isTaskAllFieldsSelected = computed(() =>
 const isTaskFieldsPartiallySelected = computed(() =>
   !isTaskAllFieldsSelected.value && taskDialogForm.value.selectedFieldKeys.some(key => allFieldKeys.includes(key))
 );
-const taskMappingSourceFields = computed(() =>
-  PROFILE_FIELD_MAPPING.filter(field => taskDialogForm.value.selectedFieldKeys.includes(field.key))
-);
+const taskMappingSourceFields = (index) => getMappingSourceFields(index, taskDialogForm.value.selectedFieldKeys);
 const taskMappingStatus = computed(() => {
   if (!taskDialogForm.value.targetTableId) return '选择目标表格后可设置';
   const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
@@ -1968,11 +1989,11 @@ watch(
               <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
               <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
                 <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
-                  <el-option v-for="field in mappingSourceFields" :key="field.key" :label="field.name" :value="field.key" />
+                  <el-option v-for="field in mappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                 </el-select>
                 <span class="mapping-arrow">→</span>
                 <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
-                  <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+                  <el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                 </el-select>
                 <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
               </div>
@@ -2341,11 +2362,11 @@ watch(
                   <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
                   <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
                     <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
-                      <el-option v-for="field in taskMappingSourceFields" :key="field.key" :label="field.name" :value="field.key" />
+                      <el-option v-for="field in taskMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                     </el-select>
                     <span class="mapping-arrow">→</span>
                     <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
-                      <el-option v-for="field in tableFieldOptions" :key="field.id" :label="field.name" :value="field.id" />
+                      <el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                     </el-select>
                     <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
                   </div>

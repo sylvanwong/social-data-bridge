@@ -39,6 +39,7 @@ const TYPE_OPTIONS = [
   { value: "instagram", label: "Instagram" },
   { value: "youtube", label: "YouTube" },
   { value: "x", label: "X" },
+  { value: "toutiao", label: "今日头条" },
 ]
 const social_type_options = ref([...TYPE_OPTIONS]);
 
