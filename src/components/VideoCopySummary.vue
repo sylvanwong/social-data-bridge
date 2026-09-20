@@ -49,6 +49,7 @@ const isFieldTypeCompatible = (fieldType, config) => {
 const fieldOptions = ref([]);
 const tableOptions = ref([]);
 const loading = ref(false);
+const stopRequested = ref(false);
 const toastVisible = ref(false);
 const toastText = ref("");
 const toastLoading = ref(false);
@@ -696,14 +697,17 @@ const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
   return null;
 };
 
-const fetchSummaryByEntries = async (recordEntries) => {
+const fetchSummaryByEntries = async (recordEntries, { onSuccess = null } = {}) => {
   let successCount = 0;
   let failCount = 0;
-  const successList = [];
 
   showToast(`准备处理 ${recordEntries.length} 条数据...`, true);
 
   for (let i = 0; i < recordEntries.length; i++) {
+    if (stopRequested.value) {
+      break;
+    }
+
     const { url, recordId } = recordEntries[i];
 
     try {
@@ -713,7 +717,11 @@ const fetchSummaryByEntries = async (recordEntries) => {
       showToast(`第 ${i + 1}/${recordEntries.length} 条任务处理中...`, true);
       const result = await pollMediaTask(task.task_id, task.next_poll_after_seconds);
 
-      successList.push({ ...result, __recordId: recordId });
+      const item = { ...result, __recordId: recordId };
+      if (onSuccess) {
+        showToast(`正在写入第 ${i + 1}/${recordEntries.length} 条结果...`, true);
+        await onSuccess(item, i);
+      }
       successCount++;
     } catch (error) {
       if (error?.code === "INVALID_API_KEY") {
@@ -724,7 +732,13 @@ const fetchSummaryByEntries = async (recordEntries) => {
     }
   }
 
-  return { successList, successCount, failCount };
+  return { successCount, failCount, stopped: stopRequested.value };
+};
+
+const requestStop = () => {
+  if (!loading.value || stopRequested.value) return;
+  stopRequested.value = true;
+  showToast("正在停止，等待当前视频处理完成...", true);
 };
 
 const handleTableModeSubmit = async () => {
@@ -758,6 +772,7 @@ const handleTableModeSubmit = async () => {
     return;
   }
 
+  stopRequested.value = false;
   loading.value = true;
 
   try {
@@ -782,21 +797,20 @@ const handleTableModeSubmit = async () => {
         return;
       }
 
-      const { successList, successCount, failCount } = await fetchSummaryByEntries(recordEntries);
-      for (const item of successList) {
-        await writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs);
-      }
+      const { successCount, failCount, stopped } = await fetchSummaryByEntries(recordEntries, {
+        onSuccess: (item) => writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs),
+      });
 
-      showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+      showToast(
+        stopped
+          ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+        false
+      );
       setTimeout(() => {
         hideToast();
       }, 3000);
       return;
-    }
-
-    const { successList, successCount, failCount } = await fetchSummaryByEntries(recordEntries);
-    if (successList.length === 0) {
-      throw new Error("未获取到有效的视频文案结果");
     }
 
     const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
@@ -804,9 +818,16 @@ const handleTableModeSubmit = async () => {
       return;
     }
 
-    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+    const { successCount, failCount, stopped } = await fetchSummaryByEntries(recordEntries, {
+      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
+    });
 
-    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    showToast(
+      stopped
+        ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+      false
+    );
     setTimeout(() => {
       hideToast();
     }, 3000);
@@ -817,6 +838,7 @@ const handleTableModeSubmit = async () => {
     ElNotification({ message: errorMessage, type: "error", duration: 0 });
   } finally {
     loading.value = false;
+    stopRequested.value = false;
   }
 };
 
@@ -848,23 +870,26 @@ const handleManualModeSubmit = async () => {
     return;
   }
 
+  stopRequested.value = false;
   loading.value = true;
 
   try {
-    const recordEntries = urls.map((url) => ({ url }));
-    const { successList, successCount, failCount } = await fetchSummaryByEntries(recordEntries);
-    if (successList.length === 0) {
-      throw new Error("未获取到有效的视频文案结果");
-    }
-
     const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
     if (!targetTableId) {
       return;
     }
 
-    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+    const recordEntries = urls.map((url) => ({ url }));
+    const { successCount, failCount, stopped } = await fetchSummaryByEntries(recordEntries, {
+      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
+    });
 
-    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    showToast(
+      stopped
+        ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+      false
+    );
     setTimeout(() => {
       hideToast();
     }, 3000);
@@ -875,10 +900,12 @@ const handleManualModeSubmit = async () => {
     ElNotification({ message: errorMessage, type: "error", duration: 0 });
   } finally {
     loading.value = false;
+    stopRequested.value = false;
   }
 };
 
 const handleSubmit = async () => {
+  stopRequested.value = false;
   if (formData.value.mode === "manual") {
     await handleManualModeSubmit();
     return;
@@ -1114,7 +1141,10 @@ watch(() => formData.value.targetType, async (type) => {
         </div>
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleSubmit">立即执行</el-button>
+      <div class="task-actions">
+        <el-button color="#a8071a" class="commit-btn" :loading="loading" :disabled="loading" @click="handleSubmit">立即执行</el-button>
+        <el-button v-if="loading" class="cancel-btn" :disabled="stopRequested" @click="requestStop">{{ stopRequested ? '正在停止' : '停止任务' }}</el-button>
+      </div>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">
@@ -1255,6 +1285,20 @@ watch(() => formData.value.targetType, async (type) => {
 }
 .commit-btn:active {
   background: #8a0515;
+}
+.task-actions {
+  display: flex;
+  gap: 8px;
+}
+.task-actions .commit-btn {
+  flex: 1;
+}
+.cancel-btn {
+  width: 104px;
+  height: 40px;
+  margin: 0;
+  border-color: #d5495c;
+  color: #a8071a;
 }
 .c-label {
   display: flex;

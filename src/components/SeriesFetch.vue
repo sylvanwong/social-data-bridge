@@ -1,7 +1,7 @@
 <script setup>
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
-import { computed, ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import request from '@/utils/request'
 
 const props = defineProps({
@@ -26,6 +26,9 @@ const seriesPagesType = ref(formData.value.pages === 0 ? 'all' : 'pages');
 const table_options = ref([]);
 const fieldOptions = ref([]);
 const loading = ref(false);
+const isCancelling = ref(false);
+const activeSeriesTaskId = ref('');
+let activeSeriesTask = null;
 const profileProgress = ref({ text: "", done: false });
 const timer = ref(null);
 const listPageSize = 20;
@@ -224,24 +227,14 @@ const showErrorMsg = (message) => {
 
 const closeInterval = () => {
   if (timer.value) {
-    clearInterval(timer.value);
+    clearTimeout(timer.value);
     timer.value = null;
   }
 };
 
-const pollTaskStatus = (task_id, checkFn, onSuccess) => {
-  let time = 0;
+const scheduleTaskPoll = (task, delay = 2000) => {
   closeInterval();
-  timer.value = setInterval(() => {
-    time += 3;
-    if (time >= 600) {
-      closeInterval();
-      showErrorMsg("获取数据超时，请稍后重试");
-      loading.value = false;
-    } else {
-      checkFn(task_id, onSuccess);
-    }
-  }, 2000);
+  timer.value = setTimeout(() => pollSeriesTask(task), delay);
 };
 
 const getFieldMetaMap = async (table) => {
@@ -443,100 +436,134 @@ const writeDataToTable = async (table, list, isExistingTable = false, offset = 0
   }
 };
 
-const getSeriesTask = async (task_id, onSuccess) => {
-  await request({
-    url: "/social/api/v1/feishu/series/list?task_id=" + task_id,
-    method: "get",
-    headers: { 'authorization': `Bearer ${props.api_key}` },
-  })
-    .then(function (response) {
-      const res = response.data;
-      if (res.sta === 0) {
-        const { status, current_page } = res.data;
-        if (status === 1) {
-          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取完成', done: true };
-          closeInterval();
-          onSuccess();
-        } else if (status === 2) {
-          closeInterval();
-          showErrorMsg("获取数据失败，请稍后重试");
-          loading.value = false;
-        } else {
-          profileProgress.value = { text: current_page ? `已获取第${current_page}页` : '获取中', done: false };
-        }
-      }
-    })
-    .catch(function (error) {
-      console.log(error);
-    });
-};
-
-const getList = async (task_id, targetTableId = "", page = 1, writeTableId = "") => {
-  await request({
-    url: "/social/api/v1/feishu/post/list",
-    method: "post",
-    headers: { 'authorization': `Bearer ${props.api_key}` },
-    data: { task_id, page, page_size: listPageSize },
-  })
-    .then(async function (response) {
-      const res = response.data;
-      if (res.sta === 0) {
-        const { count, data } = res.data;
-        if (!data || data.length === 0) {
-          if (page === 1) {
-            showErrorMsg("获取数据异常，请稍后重试");
-            resetParams();
-          }
-          return;
-        }
-
-        const totalCount = Number(count) || data.length;
-        let currentTableId = writeTableId || targetTableId;
-
-        if (!currentTableId) {
-          const tableName = '博主短剧获取';
-          const { tableId } = await createSequentialTable(tableName);
-          await setupTableFields(tableId, true);
-          await bitable.ui.switchToTable(tableId);
-          currentTableId = tableId;
-        }
-
-        const table = await bitable.base.getTableById(currentTableId);
-        if (page === 1) {
-          showToast(`准备处理 ${totalCount} 条数据...`, true);
-        }
-        await writeDataToTable(table, data, Boolean(targetTableId), (page - 1) * listPageSize, totalCount);
-
-        if (page * listPageSize < totalCount) {
-          await getList(task_id, targetTableId, page + 1, currentTableId);
-          return;
-        }
-
-        showToast(`处理完成：成功 ${totalCount} 条，失败 0 条`, false);
-        setTimeout(() => {
-          hideToast();
-        }, 3000);
-        resetParams();
-      } else {
-        loading.value = false;
-        showErrorMsg(res.msg);
-      }
-    })
-    .catch(function (error) {
-      loading.value = false;
-      console.log(error);
-      showErrorMsg(error.message || '请求失败');
-    });
-};
-
-const getSeriesTaskInterval = (task_id, targetTableId = "") => {
-  pollTaskStatus(task_id, getSeriesTask, () => {
-    getList(task_id, targetTableId);
+const getSeriesTask = async (taskId) => {
+  const response = await request({
+    url: `/social/api/v1/feishu/series/list?task_id=${encodeURIComponent(taskId)}`,
+    method: 'get',
+    headers: { authorization: `Bearer ${props.api_key}` },
   });
+  const res = response.data || {};
+  if (Number(res.sta) !== 0) throw new Error(res.msg || '查询任务状态失败');
+  let data = res.data || {};
+  while (data && data.data && typeof data.data === 'object' && data.status === undefined && data.task_id === undefined) {
+    data = data.data;
+  }
+  return data;
+};
+
+const getSeriesResults = async (task) => {
+  const response = await request({
+    url: '/social/api/v1/feishu/post/list',
+    method: 'post',
+    headers: { authorization: `Bearer ${props.api_key}` },
+    data: {
+      task_id: task.taskId,
+      after_id: task.afterId || '',
+      limit: listPageSize,
+    },
+  });
+  const res = response.data || {};
+  if (Number(res.sta) !== 0) throw new Error(res.msg || '读取短剧结果失败');
+  let result = res.data || {};
+  while (result && result.data && !Array.isArray(result.data) && typeof result.data === 'object') {
+    result = result.data;
+  }
+  const items = Array.isArray(result.data) ? result.data : (Array.isArray(result.items) ? result.items : []);
+  return {
+    items,
+    nextCursor: result.next_cursor || '',
+    hasMore: Boolean(result.has_more),
+  };
+};
+
+const finishSeriesTask = (task, status) => {
+  closeInterval();
+  loading.value = false;
+  isCancelling.value = false;
+  activeSeriesTaskId.value = '';
+  activeSeriesTask = null;
+  const statusCode = Number(status.status);
+  const text = statusCode === 3
+    ? `任务已停止：已写入 ${task.writtenCount} 条短剧`
+    : statusCode === 2
+      ? `任务失败：已写入 ${task.writtenCount} 条短剧`
+      : `处理完成：成功 ${task.writtenCount} 条，失败 0 条`;
+  showToast(text, false);
+  setTimeout(hideToast, 3000);
+};
+
+const drainSeriesResults = async (task) => {
+  let wroteData = false;
+
+  while (activeSeriesTask === task) {
+    const result = await getSeriesResults(task);
+    if (result.items.length === 0) {
+      return wroteData;
+    }
+    if (!result.nextCursor || result.nextCursor === task.afterId) {
+      throw new Error('短剧结果接口未返回有效的 next_cursor');
+    }
+
+    let tableId = task.targetTableId;
+    if (!tableId) {
+      const created = await createSequentialTable('博主短剧获取');
+      tableId = created.tableId;
+      await setupTableFields(tableId, true);
+      await bitable.ui.switchToTable(tableId);
+      task.targetTableId = tableId;
+    }
+
+    const table = await bitable.base.getTableById(tableId);
+    await writeDataToTable(table, result.items, Boolean(task.initialTargetTableId), task.writtenCount, task.writtenCount + result.items.length);
+    task.writtenCount += result.items.length;
+    task.afterId = result.nextCursor;
+    wroteData = true;
+
+    if (!result.hasMore) {
+      return wroteData;
+    }
+  }
+
+  return wroteData;
+};
+
+const pollSeriesTask = async (task) => {
+  if (activeSeriesTask !== task) return;
+  try {
+    console.log('[series] 查询任务状态:', task.taskId);
+    const status = await getSeriesTask(task.taskId);
+    console.log('[series] 任务状态:', status);
+    const statusCode = Number(status.status);
+    if (status.status_text === 'cancel_requested' || status.cancel_requested) {
+      isCancelling.value = true;
+      showToast(`正在停止，已写入 ${task.writtenCount} 条短剧`, true);
+    } else {
+      profileProgress.value = { text: status.current_page ? `已获取第${status.current_page}页` : '获取中', done: false };
+    }
+
+    const wrote = await drainSeriesResults(task);
+    console.log('[series] 读取结果完成:', { wrote, writtenCount: task.writtenCount, afterId: task.afterId });
+    if (wrote) {
+      showToast(`${isCancelling.value ? '正在停止' : '正在处理'}，已写入 ${task.writtenCount} 条短剧`, true);
+    }
+
+    if ([1, 2, 3].includes(statusCode) && !wrote) {
+      finishSeriesTask(task, status);
+      return;
+    }
+    scheduleTaskPoll(task, wrote ? 500 : 2000);
+  } catch (error) {
+    console.error('轮询博主短剧任务失败:', error);
+    if (activeSeriesTask === task) {
+      showToast(`任务连接异常，正在重试，已写入 ${task.writtenCount} 条短剧`, true);
+      scheduleTaskPoll(task, 3000);
+    }
+  }
 };
 
 const postSeriesTask = async (targetTableId = "", profileUrlText = "") => {
-  await request({
+  try {
+    const response = await request({
     url: "/social/api/v1/feishu/series/list",
     method: "post",
     headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -544,21 +571,50 @@ const postSeriesTask = async (targetTableId = "", profileUrlText = "") => {
       profile_url: profileUrlText,
       pages: Number(formData.value.pages),
     },
-  })
-    .then(function (response) {
-      const res = response.data;
-      if (res.sta === 0) {
-        getSeriesTaskInterval(res.data.task_id, targetTableId);
-      } else {
-        loading.value = false;
-        ElNotification({ title: '错误', message: res.msg, type: 'error', duration: 0 });
-      }
-    })
-    .catch(function (error) {
-      loading.value = false;
-      console.log(error);
-      showErrorMsg(error.message || '请求失败');
     });
+    const res = response.data || {};
+    console.log('[series] 创建任务响应:', res);
+    if (Number(res.sta) !== 0) {
+      throw new Error(res.msg || '创建短剧任务失败');
+    }
+    const taskId = res.data?.task_id || res.data?.data?.task_id || res.task_id;
+    if (!taskId) {
+      throw new Error('创建短剧任务成功但未返回任务 ID');
+    }
+    const task = {
+      taskId,
+      afterId: '',
+      targetTableId,
+      initialTargetTableId: targetTableId,
+      writtenCount: 0,
+    };
+    activeSeriesTask = task;
+    activeSeriesTaskId.value = task.taskId;
+    await pollSeriesTask(task);
+  } catch (error) {
+    loading.value = false;
+    activeSeriesTaskId.value = '';
+    console.error('创建博主短剧任务失败:', error);
+    showErrorMsg(error.message || '请求失败');
+  }
+};
+
+const cancelSeriesTask = async () => {
+  if (!activeSeriesTaskId.value || isCancelling.value) return;
+  isCancelling.value = true;
+  showToast(`正在停止，已写入 ${activeSeriesTask?.writtenCount || 0} 条短剧`, true);
+  try {
+    const response = await request({
+      url: '/social/api/v1/feishu/series/list/cancel',
+      method: 'post',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      data: { task_id: activeSeriesTaskId.value },
+    });
+    if (Number(response.data?.sta) !== 0) throw new Error(response.data?.msg || '停止任务失败');
+  } catch (error) {
+    isCancelling.value = false;
+    showErrorMsg(error.message || '停止任务失败');
+  }
 };
 
 const loadTableOptions = async () => {
@@ -809,6 +865,10 @@ onMounted(async () => {
   await loadSelectedFieldKeys();
   await loadTableOutputConfigs();
   fieldSelectionReady.value = true;
+});
+
+onUnmounted(() => {
+  closeInterval();
 });
 
 const commit = async () => {
@@ -1103,7 +1163,10 @@ watch(selectedFieldKeys, (keys) => {
         </div>
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">立即执行</el-button>
+      <div class="task-actions">
+        <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">立即执行</el-button>
+        <el-button v-if="loading && activeSeriesTaskId" class="cancel-btn" :loading="isCancelling" :disabled="isCancelling" @click="cancelSeriesTask">停止任务</el-button>
+      </div>
       <div v-if="profileProgress.text" class="profile-progress" :class="{ 'profile-progress--done': profileProgress.done }">
         <span v-if="profileProgress.done" class="profile-progress-check">✓</span>
         {{ profileProgress.text }}
@@ -1270,6 +1333,21 @@ watch(selectedFieldKeys, (keys) => {
 }
 .commit-btn:hover { background: #C11126; }
 .commit-btn:active { background: #8A0515; }
+.task-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.task-actions .commit-btn {
+  flex: 1;
+}
+.cancel-btn {
+  width: 104px;
+  height: 40px;
+  margin: 0;
+  border-color: #d5495c;
+  color: #a8071a;
+}
 .profile-progress {
   text-align: center;
   font-size: 14px;

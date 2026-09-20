@@ -106,6 +106,7 @@ const downloadAttachmentAsFile = async (url, finalName, fieldName, item) => {
 const fieldOptions = ref([]);
 const tableOptions = ref([]);
 const loading = ref(false);
+const stopRequested = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
@@ -716,6 +717,10 @@ const fetchXhsByRows = async (rowList, { onSuccess = null } = {}) => {
   showToast(`准备处理 ${rowList.length} 条数据...`, true);
 
   for (let i = 0; i < rowList.length; i++) {
+    if (stopRequested.value) {
+      break;
+    }
+
     const { url, recordId } = rowList[i];
 
     try {
@@ -752,7 +757,16 @@ const fetchXhsByRows = async (rowList, { onSuccess = null } = {}) => {
     }
   }
 
-  return { successList, successCount, failCount };
+  return { successList, successCount, failCount, stopped: stopRequested.value };
+};
+
+const requestStop = () => {
+  if (!loading.value) {
+    return;
+  }
+
+  stopRequested.value = true;
+  showToast('正在停止，等待当前请求完成...', true);
 };
 
 const handleTableModeSubmit = async () => {
@@ -777,6 +791,7 @@ const handleTableModeSubmit = async () => {
     return;
   }
 
+  stopRequested.value = false;
   loading.value = true;
 
   try {
@@ -799,11 +814,16 @@ const handleTableModeSubmit = async () => {
     }
 
     const rowList = await getCellValuesByFieldId(recordIdList, formData.value.xhsLinkFieldId);
-    const { successCount, failCount } = await fetchXhsByRows(rowList, {
+    const { successCount, failCount, stopped } = await fetchXhsByRows(rowList, {
       onSuccess: (item) => writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs),
     });
 
-    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    showToast(
+      stopped
+        ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+      false
+    );
 
     setTimeout(() => {
       hideToast();
@@ -816,6 +836,7 @@ const handleTableModeSubmit = async () => {
     ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
+    stopRequested.value = false;
   }
 };
 
@@ -847,12 +868,18 @@ const handleManualModeSubmit = async () => {
     return;
   }
 
+  stopRequested.value = false;
   loading.value = true;
 
   try {
     const rowList = urls.map(url => ({ url }));
-    const { successList, successCount, failCount } = await fetchXhsByRows(rowList);
+    const { successList, successCount, failCount, stopped } = await fetchXhsByRows(rowList);
     if (successList.length === 0) {
+      if (stopped) {
+        showToast('任务已停止：成功 0 条，失败 0 条', false);
+        setTimeout(() => hideToast(), 3000);
+        return;
+      }
       throw new Error('未获取到有效的小红书内容');
     }
 
@@ -863,7 +890,12 @@ const handleManualModeSubmit = async () => {
 
     await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
 
-    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    showToast(
+      stopped
+        ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+      false
+    );
     setTimeout(() => {
       hideToast();
     }, 3000);
@@ -874,10 +906,12 @@ const handleManualModeSubmit = async () => {
     ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
+    stopRequested.value = false;
   }
 };
 
 const handleSubmit = async () => {
+  stopRequested.value = false;
   if (formData.value.mode === 'manual') {
     await handleManualModeSubmit();
     return;
@@ -1108,7 +1142,10 @@ watch(
         </div>
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleSubmit">立即执行</el-button>
+      <div class="task-actions">
+        <el-button color="#a8071a" class="commit-btn" :loading="loading" :disabled="loading" @click="handleSubmit">立即执行</el-button>
+        <el-button v-if="loading" class="cancel-btn" :disabled="stopRequested" @click="requestStop">{{ stopRequested ? '正在停止' : '停止任务' }}</el-button>
+      </div>
     </div>
 
     <!-- Toast 提示 -->
@@ -1239,6 +1276,21 @@ watch(
 }
 .commit-btn:hover { background: #C11126; }
 .commit-btn:active { background: #8A0515; }
+.task-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.task-actions .commit-btn {
+  flex: 1;
+}
+.cancel-btn {
+  width: 104px;
+  height: 40px;
+  margin: 0;
+  border-color: #d5495c;
+  color: #a8071a;
+}
 .c-label {
   display: flex;
   align-items: center;

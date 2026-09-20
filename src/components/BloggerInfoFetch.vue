@@ -155,6 +155,7 @@ const formData = ref({
 const fieldOptions = ref([]);
 const tableOptions = ref([]);
 const loading = ref(false);
+const stopRequested = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
@@ -892,6 +893,10 @@ const fetchBloggerInfoByRows = async (rowList, { onSuccess = null } = {}) => {
   showToast(`准备处理 ${rowList.length} 条数据...`, true);
 
   for (let i = 0; i < rowList.length; i++) {
+    if (stopRequested.value) {
+      break;
+    }
+
     const { url, recordId } = rowList[i];
 
     try {
@@ -925,7 +930,16 @@ const fetchBloggerInfoByRows = async (rowList, { onSuccess = null } = {}) => {
     }
   }
 
-  return { successCount, failCount };
+  return { successCount, failCount, stopped: stopRequested.value };
+};
+
+const requestStop = () => {
+  if (!loading.value) {
+    return;
+  }
+
+  stopRequested.value = true;
+  showToast('正在停止，等待当前请求完成...', true);
 };
 
 const extractProfileLink = (value) => {
@@ -1554,6 +1568,7 @@ const handleTableModeSubmit = async () => {
     return;
   }
 
+  stopRequested.value = false;
   loading.value = true;
 
   try {
@@ -1573,11 +1588,16 @@ const handleTableModeSubmit = async () => {
       const activeTable = await bitable.base.getActiveTable();
       const fieldNameToId = await validateAndAddFields(activeTable.id, activeFieldConfigs);
       if (!fieldNameToId) return;
-      const { successCount, failCount } = await fetchBloggerInfoByRows(rowList, {
+      const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
         onSuccess: (item) => writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs, mappingDraft.value),
       });
 
-      showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+      showToast(
+        stopped
+          ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+        false
+      );
       setTimeout(() => {
         hideToast();
       }, 3000);
@@ -1589,14 +1609,19 @@ const handleTableModeSubmit = async () => {
       return;
     }
 
-    const { successCount, failCount } = await fetchBloggerInfoByRows(rowList, {
+    const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, {
         writeMode: writeMode.value,
         fieldMappings: mappingDraft.value,
       }),
     });
 
-    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    showToast(
+      stopped
+        ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+      false
+    );
     setTimeout(() => {
       hideToast();
     }, 3000);
@@ -1607,6 +1632,7 @@ const handleTableModeSubmit = async () => {
     ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
+    stopRequested.value = false;
   }
 };
 
@@ -1620,6 +1646,7 @@ const handleManualModeSubmit = async () => {
 
   const urls = parseManualUrls(formData.value.manualUrls);
   const activeFieldConfigs = getWriteFieldConfigs();
+  stopRequested.value = false;
   loading.value = true;
 
   try {
@@ -1629,14 +1656,19 @@ const handleManualModeSubmit = async () => {
       return;
     }
 
-    const { successCount, failCount } = await fetchBloggerInfoByRows(rowList, {
+    const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, {
         writeMode: writeMode.value,
         fieldMappings: mappingDraft.value,
       }),
     });
 
-    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    showToast(
+      stopped
+        ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+      false
+    );
     setTimeout(() => {
       hideToast();
     }, 3000);
@@ -1647,10 +1679,12 @@ const handleManualModeSubmit = async () => {
     ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
+    stopRequested.value = false;
   }
 };
 
 const handleSubmit = async () => {
+  stopRequested.value = false;
   if (formData.value.mode === 'manual') {
     await handleManualModeSubmit();
     return;
@@ -2059,7 +2093,10 @@ watch(
       </el-form>
 
       <div v-if="formData.executionMode === 'immediate'" class="action-group">
-        <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleSubmit">立即执行</el-button>
+        <div class="task-actions">
+          <el-button color="#a8071a" class="commit-btn" :loading="loading" :disabled="loading" @click="handleSubmit">立即执行</el-button>
+          <el-button v-if="loading" class="cancel-btn" :disabled="stopRequested" @click="requestStop">{{ stopRequested ? '正在停止' : '停止任务' }}</el-button>
+        </div>
       </div>
 
       <div v-else class="schedule-inline-panel">
@@ -2633,9 +2670,12 @@ watch(
 }
 
 .action-group {
-  display: flex;
-  gap: 12px;
   margin-top: 8px;
+}
+
+.task-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .schedule-inline-panel {
@@ -2679,6 +2719,16 @@ watch(
   background: #A8071A;
   color: #fff;
   border: none;
+}
+.task-actions .commit-btn {
+  flex: 1;
+}
+.cancel-btn {
+  width: 104px;
+  height: 36px;
+  margin: 0;
+  border-color: #d5495c;
+  color: #a8071a;
 }
 
 .commit-btn:hover { background: #C11126; }
