@@ -38,6 +38,7 @@ const FIELD_TYPE_NAME = {
 const fieldOptions = ref([]);
 const tableOptions = ref([]);
 const loading = ref(false);
+const stopRequested = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
@@ -451,14 +452,17 @@ const appendRecordsToTable = async (tableId, rows) => {
     throw new Error('目标表缺少附件字段');
   }
 
-  const records = [];
+  let writtenCount = 0;
   for (const { urls } of rows) {
-    records.push([await createAttachmentCell(table, attachmentFieldId, urls)]);
+    if (stopRequested.value) break;
+
+    const record = [await createAttachmentCell(table, attachmentFieldId, urls)];
+    await table.addRecords([record]);
+    writtenCount += 1;
+    showToast(`正在处理第 ${writtenCount}/${rows.length} 条...`, true);
   }
 
-  if (records.length > 0) {
-    await table.addRecords(records);
-  }
+  return { writtenCount, stopped: stopRequested.value };
 };
 
 const extractUrlsFromText = (text) => {
@@ -558,6 +562,12 @@ const stepNumber = (delta) => {
   formData.value.rowCount = nextValue;
 };
 
+const requestStop = () => {
+  if (!loading.value || stopRequested.value) return;
+  stopRequested.value = true;
+  showToast('正在停止，等待当前记录处理完成...', true);
+};
+
 const handleTableModeSubmit = async () => {
   if (!props.api_key) {
     ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
@@ -574,6 +584,7 @@ const handleTableModeSubmit = async () => {
     return;
   }
 
+  stopRequested.value = false;
   loading.value = true;
 
   try {
@@ -596,6 +607,8 @@ const handleTableModeSubmit = async () => {
     showToast(`准备处理 ${rowList.length} 条数据...`, true);
 
     for (let i = 0; i < rowList.length; i += 1) {
+      if (stopRequested.value) break;
+
       const { urls, recordId } = rowList[i];
       try {
         showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
@@ -607,12 +620,18 @@ const handleTableModeSubmit = async () => {
       }
     }
 
-    showToast(`处理完成：成功 ${successCount} 条，失败 ${failCount} 条`, false);
+    showToast(
+      stopRequested.value
+        ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+      false
+    );
     setTimeout(() => hideToast(), 3000);
   } catch (error) {
     ElNotification({ message: error.message || '获取数据失败', type: 'error', duration: 0 });
   } finally {
     loading.value = false;
+    stopRequested.value = false;
   }
 };
 
@@ -638,6 +657,7 @@ const handleManualModeSubmit = async () => {
     return;
   }
 
+  stopRequested.value = false;
   loading.value = true;
 
   try {
@@ -648,17 +668,24 @@ const handleManualModeSubmit = async () => {
 
     const rows = urls.map((url) => ({ urls: [url] }));
     showToast(`准备处理 ${rows.length} 条数据...`, true);
-    await appendRecordsToTable(targetTableId, rows);
-    showToast(`处理完成：成功 ${rows.length} 条，失败 0 条`, false);
+    const { writtenCount, stopped } = await appendRecordsToTable(targetTableId, rows);
+    showToast(
+      stopped
+        ? `任务已停止：成功 ${writtenCount} 条，失败 0 条`
+        : `处理完成：成功 ${writtenCount} 条，失败 0 条`,
+      false
+    );
     setTimeout(() => hideToast(), 3000);
   } catch (error) {
     ElNotification({ message: error.message || '获取数据失败', type: 'error', duration: 0 });
   } finally {
     loading.value = false;
+    stopRequested.value = false;
   }
 };
 
 const handleSubmit = async () => {
+  stopRequested.value = false;
   if (formData.value.mode === 'manual') {
     await handleManualModeSubmit();
     return;
@@ -838,7 +865,10 @@ watch(() => formData.value.targetType, async (type) => {
 
       </el-form>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="handleSubmit">立即执行</el-button>
+      <div class="task-actions">
+        <el-button color="#a8071a" class="commit-btn" :loading="loading" :disabled="loading" @click="handleSubmit">立即执行</el-button>
+        <el-button v-if="loading" class="cancel-btn" :disabled="stopRequested" @click="requestStop">{{ stopRequested ? '正在停止' : '停止任务' }}</el-button>
+      </div>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">
@@ -963,6 +993,20 @@ watch(() => formData.value.targetType, async (type) => {
   margin-top: 0;
   cursor: pointer;
   border: none;
+}
+.task-actions {
+  display: flex;
+  gap: 8px;
+}
+.task-actions .commit-btn {
+  flex: 1;
+}
+.cancel-btn {
+  width: 104px;
+  height: 40px;
+  margin: 0;
+  border-color: #d5495c;
+  color: #a8071a;
 }
 .c-label {
   display: flex;
