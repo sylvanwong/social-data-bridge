@@ -36,10 +36,10 @@ const TYPE_OPTIONS = [
   { value: "wechat", label: "微信" },
   { value: "bilibili", label: "哔哩哔哩" },
   { value: "zhihu", label: "知乎" },
+  { value: "toutiao", label: "今日头条" },
   { value: "instagram", label: "Instagram" },
   { value: "youtube", label: "YouTube" },
   { value: "x", label: "X" },
-  { value: "toutiao", label: "今日头条" },
 ]
 const social_type_options = ref([...TYPE_OPTIONS]);
 

@@ -9,10 +9,10 @@ export const PLATFORM_LABELS = {
   wechat: '微信',
   bilibili: '哔哩哔哩',
   zhihu: '知乎',
+  toutiao: '今日头条',
   instagram: 'Instagram',
   youtube: 'YouTube',
   x: 'X',
-  toutiao: '今日头条'
 };
 
 export const mapPlatformOptions = (platforms = []) =>
