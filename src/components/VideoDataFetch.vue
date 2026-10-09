@@ -124,6 +124,9 @@ const getCurrentTime = () => {
 };
 
 const getAllowedFieldTypes = (config) => {
+  if (config.type === FieldType.Number) {
+    return [FieldType.Number, FieldType.Text];
+  }
   if (config.name === '作者名称' || config.name === '平台') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
@@ -226,6 +229,10 @@ const normalizeTagTextValue = (value, fieldType) => {
 };
 
 const normalizeFieldValue = (value, config, fieldType) => {
+  if (config.type === FieldType.Number && fieldType === FieldType.Text) {
+    return String(value ?? '');
+  }
+
   if ((config.name === '作者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect) {
     return value ? value : null;
   }
@@ -924,11 +931,11 @@ const validateAndAddFields = async (tableId, activeFieldConfigs, fieldMappings =
 
     const field = await table.getFieldById(fieldId);
 
-    if (fieldConfig.formatter) {
+    if (fieldConfig.formatter && field.type === FieldType.Number) {
       await field.setFormatter(fieldConfig.formatter);
     }
 
-    if (fieldConfig.dateFormat) {
+    if (fieldConfig.dateFormat && field.type === FieldType.DateTime) {
       await field.setDateFormat(fieldConfig.dateFormat);
     }
   };
@@ -1036,10 +1043,10 @@ const setupNewTableFields = async (tableId, activeFieldConfigs) => {
     if (!config) {
       continue;
     }
-    if (config.formatter) {
+    if (config.formatter && field.type === FieldType.Number) {
       await field.setFormatter(config.formatter);
     }
-    if (config.dateFormat) {
+    if (config.dateFormat && field.type === FieldType.DateTime) {
       await field.setDateFormat(config.dateFormat);
     }
   }
