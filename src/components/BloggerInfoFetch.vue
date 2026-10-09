@@ -212,6 +212,9 @@ const getWriteFieldConfigs = (keys = selectedFieldKeys.value, mode = writeMode.v
 };
 
 const getAllowedFieldTypes = (config) => {
+  if (config.type === FieldType.Number) {
+    return [FieldType.Number, FieldType.Text];
+  }
   if (config.name === '平台' || config.name === '作者名称') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
@@ -220,6 +223,18 @@ const getAllowedFieldTypes = (config) => {
 
 const isFieldTypeCompatible = (fieldType, config) => {
   return getAllowedFieldTypes(config).includes(fieldType);
+};
+
+const normalizeFieldValue = (value, config, fieldType) => {
+  if (config.type === FieldType.Number && fieldType === FieldType.Text) {
+    return String(value ?? '');
+  }
+
+  if ((config.name === '平台' || config.name === '作者名称') && fieldType === FieldType.SingleSelect) {
+    return value || null;
+  }
+
+  return value;
 };
 
 const ensureOption = (optionsRef, option) => {
@@ -563,10 +578,10 @@ const setupNewTableFields = async (tableId, activeFieldConfigs) => {
     if (!config) {
       continue;
     }
-    if (config.formatter) {
+    if (config.formatter && field.type === FieldType.Number) {
       await field.setFormatter(config.formatter);
     }
-    if (config.dateFormat) {
+    if (config.dateFormat && field.type === FieldType.DateTime) {
       await field.setDateFormat(config.dateFormat);
     }
   }
@@ -694,10 +709,10 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
     const ensureFieldDisplayConfig = async (fieldId, fieldConfig) => {
       if (!fieldId) return;
       const field = await table.getFieldById(fieldId);
-      if (fieldConfig.formatter) {
+      if (fieldConfig.formatter && field.type === FieldType.Number) {
         await field.setFormatter(fieldConfig.formatter);
       }
-      if (fieldConfig.dateFormat) {
+      if (fieldConfig.dateFormat && field.type === FieldType.DateTime) {
         await field.setDateFormat(fieldConfig.dateFormat);
       }
     };
@@ -773,9 +788,7 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
       try {
         const field = await table.getFieldById(fieldId);
         const fieldType = await field.getType();
-        const value = (config.name === '平台' || config.name === '作者名称') && fieldType === FieldType.SingleSelect
-          ? (config.getValue(item) || null)
-          : config.getValue(item);
+        const value = normalizeFieldValue(config.getValue(item), config, fieldType);
         const cell = await field.createCell(value);
         fields[fieldId] = await cell.getValue();
       } catch (e) {
@@ -795,9 +808,7 @@ const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfi
 const createCellValue = async (table, fieldId, item, config) => {
   const field = await table.getFieldById(fieldId);
   const fieldType = await field.getType();
-  const value = (config.name === '平台' || config.name === '作者名称') && fieldType === FieldType.SingleSelect
-    ? (config.getValue(item) || null)
-    : config.getValue(item);
+  const value = normalizeFieldValue(config.getValue(item), config, fieldType);
   return await field.createCell(value);
 };
 

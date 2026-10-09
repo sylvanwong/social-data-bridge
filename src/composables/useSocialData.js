@@ -87,6 +87,9 @@ export const FIELD_TYPE_NAME = {
 };
 
 const getAllowedFieldTypes = (config) => {
+  if (config.type === FieldType.Number) {
+    return [FieldType.Number, FieldType.Text];
+  }
   if (config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
@@ -275,14 +278,19 @@ const normalizeCellValue = async (table, field, value, config, fieldType, extra 
     return normalizeTagsCompatibleValue(nextValue, fieldType, extra.tagOptionIdMap);
   }
 
+  if (config.type === FieldType.Number && fieldType === FieldType.Text) {
+    return String(nextValue ?? '');
+  }
+
   return normalizeTextCompatibleValue(nextValue);
 };
 
 const applyFieldDisplayConfig = async (field, config) => {
-  if (config.formatter) {
+  const fieldType = await field.getType();
+  if (config.formatter && fieldType === FieldType.Number) {
     await field.setFormatter(config.formatter);
   }
-  if (config.dateFormat) {
+  if (config.dateFormat && fieldType === FieldType.DateTime) {
     await field.setDateFormat(config.dateFormat);
   }
 };

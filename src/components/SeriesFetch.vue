@@ -145,6 +145,9 @@ const FIELD_TYPE_NAME = {
 };
 
 const getAllowedFieldTypes = (config) => {
+  if (config.type === FieldType.Number) {
+    return [FieldType.Number, FieldType.Text];
+  }
   if (config.key === 'nickname' || config.key === 'social_type') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
@@ -302,10 +305,10 @@ const setupTableFields = async (tableId, isNewTable = false) => {
     if (!fieldId) continue;
     try {
       const field = await table.getFieldById(fieldId);
-      if (config.formatter) {
+      if (config.formatter && field.type === FieldType.Number) {
         await field.setFormatter(config.formatter);
       }
-      if (config.dateFormat) {
+      if (config.dateFormat && field.type === FieldType.DateTime) {
         await field.setDateFormat(config.dateFormat);
       }
     } catch (error) {
@@ -362,6 +365,9 @@ const normalizeValue = (value, config, fieldType) => {
   if (value === undefined || value === null) {
     return null;
   }
+  if (config.type === FieldType.Number && fieldType === FieldType.Text) {
+    return String(value);
+  }
   return value;
 };
 
@@ -388,7 +394,7 @@ const writeDataToTable = async (table, list, isExistingTable = false, offset = 0
       : fieldMetaMap.get(config.name);
     if (!fieldMeta?.id) continue;
     const field = await table.getFieldById(fieldMeta.id);
-    if (config.formatter && !isExistingTable) {
+    if (config.formatter && !isExistingTable && field.type === FieldType.Number) {
       await field.setFormatter(config.formatter);
     }
     fieldList.push({ field, config });

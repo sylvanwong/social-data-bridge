@@ -98,6 +98,9 @@ const FIELD_TYPE_NAME = {
 };
 
 const getAllowedFieldTypes = (config) => {
+  if (config.type === FieldType.Number) {
+    return [FieldType.Number, FieldType.Text];
+  }
   if (config.name === '评论者名称' || config.name === '平台') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
@@ -106,6 +109,18 @@ const getAllowedFieldTypes = (config) => {
 
 const isFieldTypeCompatible = (fieldType, config) => {
   return getAllowedFieldTypes(config).includes(fieldType);
+};
+
+const normalizeFieldValue = (value, config, fieldType) => {
+  if (config.type === FieldType.Number && fieldType === FieldType.Text) {
+    return String(value ?? '');
+  }
+
+  if ((config.name === '评论者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect) {
+    return value || null;
+  }
+
+  return value;
 };
 
 const buildFieldPayload = (config) => {
@@ -654,10 +669,11 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
     const activeFieldConfigs = getActiveFieldConfigs();
     const fields = activeFieldConfigs.map(buildFieldPayload);
     const ensureFieldDisplayConfig = async (field, config) => {
-      if (config.formatter) {
+      const fieldType = await field.getType();
+      if (config.formatter && fieldType === FieldType.Number) {
         await field.setFormatter(config.formatter);
       }
-      if (config.dateFormat) {
+      if (config.dateFormat && fieldType === FieldType.DateTime) {
         await field.setDateFormat(config.dateFormat);
       }
     };
@@ -728,9 +744,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
             throw new Error(`字段 ${config.name} 映射目标不存在`);
           }
           const fieldType = await field.getType();
-          const value = (config.name === '评论者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect
-            ? (config.getValue(item) || null)
-            : config.getValue(item);
+          const value = normalizeFieldValue(config.getValue(item), config, fieldType);
           const cell = await field.createCell(value);
           record.push(cell);
           fieldsById[field.id] = await cell.getValue();
@@ -811,9 +825,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
       for (let i = 0; i < fields.length; i++) {
         const mapping = activeFieldConfigs[i];
         const fieldType = await fieldList[i].getType();
-        const value = (mapping.name === '评论者名称' || mapping.name === '平台') && fieldType === FieldType.SingleSelect
-          ? (mapping.getValue(item) || null)
-          : mapping.getValue(item);
+        const value = normalizeFieldValue(mapping.getValue(item), mapping, fieldType);
         record.push(await fieldList[i].createCell(value));
       }
       records.push(record);
