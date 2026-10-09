@@ -37,6 +37,7 @@ const TYPE_OPTIONS = [
   { value: "bilibili", label: "哔哩哔哩" },
   { value: "zhihu", label: "知乎" },
   { value: "toutiao", label: "今日头条" },
+  { value: "tieba", label: "百度贴吧" },
   { value: "instagram", label: "Instagram" },
   { value: "youtube", label: "YouTube" },
   { value: "x", label: "X" },
