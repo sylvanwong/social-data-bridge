@@ -10,6 +10,7 @@ export const PLATFORM_LABELS = {
   bilibili: '哔哩哔哩',
   zhihu: '知乎',
   toutiao: '今日头条',
+  tieba: '百度贴吧',
   instagram: 'Instagram',
   youtube: 'YouTube',
   x: 'X',
