@@ -419,6 +419,9 @@ const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
 const getDefaultTaskDialogForm = () => ({
   personalBaseToken: '',
   enabled: true,
+  updateConditionEnabled: false,
+  updateConditionGroups: [],
+  updateConditionError: false,
   triggerDate: getTodayDate(),
   triggerTime: getCurrentTime(),
   repeatType: 'none',
@@ -1782,10 +1785,55 @@ const openEditTaskDialog = async (task) => {
   taskDialogVisible.value = true;
 };
 
+const UPDATE_CONDITION_FIELDS = ['平台', '作品类型', '作者名称', '作品ID', '作品链接', '发布时间'];
+const UPDATE_CONDITION_OPERATORS = ['等于', '不等于', '包含', '不包含', '为空', '不为空'];
+
+const createUpdateConditionRow = () => ({ field: '', operator: '等于', value: '', invalid: false });
+
+const onUpdateConditionToggle = (on) => {
+  taskDialogForm.value.updateConditionError = false;
+  if (on && taskDialogForm.value.updateConditionGroups.length === 0) {
+    taskDialogForm.value.updateConditionGroups = [[createUpdateConditionRow()]];
+  }
+};
+
+const addUpdateConditionRow = (groupIndex) => {
+  taskDialogForm.value.updateConditionGroups[groupIndex].push(createUpdateConditionRow());
+};
+
+const addUpdateConditionGroup = () => {
+  taskDialogForm.value.updateConditionGroups.push([createUpdateConditionRow()]);
+};
+
+const removeUpdateConditionRow = (groupIndex, rowIndex) => {
+  const groups = taskDialogForm.value.updateConditionGroups;
+  groups[groupIndex].splice(rowIndex, 1);
+  if (groups[groupIndex].length === 0) groups.splice(groupIndex, 1);
+  taskDialogForm.value.updateConditionError = false;
+};
+
+const validateUpdateConditions = () => {
+  if (!taskDialogForm.value.updateConditionEnabled) return true;
+  let valid = true;
+  taskDialogForm.value.updateConditionGroups.forEach((group) => {
+    group.forEach((row) => {
+      const needValue = row.operator !== '为空' && row.operator !== '不为空';
+      row.invalid = !row.field || (needValue && !String(row.value || '').trim());
+      if (row.invalid) valid = false;
+    });
+  });
+  taskDialogForm.value.updateConditionError = !valid;
+  return valid;
+};
+
 const saveTask = async () => {
   taskDialogLoading.value = true;
 
   try {
+    if (!validateUpdateConditions()) {
+      ElNotification({ message: '请补全或删除未完成的条件', type: 'warning', duration: 0 });
+      return;
+    }
     const isConfiguredTarget = taskDialogForm.value.targetType === 'current'
       || (taskDialogForm.value.targetType === 'existing' && taskDialogForm.value.targetTableId);
     if (isConfiguredTarget) {
@@ -2479,9 +2527,57 @@ watch(
             </div>
           </template>
 
-          <el-form-item class="status-switch-item">
+          <el-form-item class="update-condition-item">
+            <div class="update-condition-block">
+              <div class="update-condition-head">
+                <div class="c-label">更新条件 <span class="update-condition-optional">（可选）</span></div>
+                <el-switch v-model="taskDialogForm.updateConditionEnabled" @change="onUpdateConditionToggle" />
+              </div>
+              <template v-if="taskDialogForm.updateConditionEnabled">
+                <p class="update-condition-hint">满足条件的才会更新，不满足条件的自动跳过，不消耗积分。</p>
+                <template v-for="(group, groupIndex) in taskDialogForm.updateConditionGroups" :key="groupIndex">
+                  <p v-if="groupIndex > 0" class="update-condition-or-label">或者</p>
+                  <div class="update-condition-group">
+                    <div
+                      v-for="(row, rowIndex) in group"
+                      :key="rowIndex"
+                      class="update-condition-row"
+                      :class="{ 'is-invalid': row.invalid }"
+                    >
+                      <el-select v-model="row.field" placeholder="选择字段" @change="row.invalid = false">
+                        <el-option v-for="field in UPDATE_CONDITION_FIELDS" :key="field" :label="field" :value="field" />
+                      </el-select>
+                      <el-select v-model="row.operator" @change="row.invalid = false">
+                        <el-option v-for="operator in UPDATE_CONDITION_OPERATORS" :key="operator" :label="operator" :value="operator" />
+                      </el-select>
+                      <el-input
+                        v-model="row.value"
+                        :placeholder="row.operator === '为空' || row.operator === '不为空' ? '无需填写' : '请输入'"
+                        :disabled="row.operator === '为空' || row.operator === '不为空'"
+                        @change="row.invalid = false"
+                        @input="row.invalid = false"
+                      />
+                      <button class="update-condition-remove" type="button" aria-label="删除该条件" @click="removeUpdateConditionRow(groupIndex, rowIndex)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                      </button>
+                    </div>
+                    <button class="update-condition-add" type="button" @click="addUpdateConditionRow(groupIndex)">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                      并且
+                    </button>
+                  </div>
+                </template>
+                <button class="update-condition-add update-condition-add-or" type="button" @click="addUpdateConditionGroup">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                  或者
+                </button>
+                <p v-if="taskDialogForm.updateConditionError" class="update-condition-error">请补全或删除未完成的条件</p>
+              </template>
+            </div>
+          </el-form-item>
+                    <el-form-item class="status-switch-item">
             <div class="c-label">任务状态</div>
-            <el-switch v-model="taskDialogForm.enabled" active-text="开启" inactive-text="" />
+            <el-switch v-model="taskDialogForm.enabled" />
           </el-form-item>
         </el-form>
 
@@ -2800,9 +2896,57 @@ watch(
               </div>
             </template>
 
-            <el-form-item class="status-switch-item">
+            <el-form-item class="update-condition-item">
+              <div class="update-condition-block">
+                <div class="update-condition-head">
+                  <div class="c-label">更新条件 <span class="update-condition-optional">（可选）</span></div>
+                  <el-switch v-model="taskDialogForm.updateConditionEnabled" @change="onUpdateConditionToggle" />
+                </div>
+                <template v-if="taskDialogForm.updateConditionEnabled">
+                  <p class="update-condition-hint">满足条件的才会更新，不满足条件的自动跳过，不消耗积分。</p>
+                  <template v-for="(group, groupIndex) in taskDialogForm.updateConditionGroups" :key="groupIndex">
+                    <p v-if="groupIndex > 0" class="update-condition-or-label">或者</p>
+                    <div class="update-condition-group">
+                      <div
+                        v-for="(row, rowIndex) in group"
+                        :key="rowIndex"
+                        class="update-condition-row"
+                        :class="{ 'is-invalid': row.invalid }"
+                      >
+                        <el-select v-model="row.field" placeholder="选择字段" @change="row.invalid = false">
+                          <el-option v-for="field in UPDATE_CONDITION_FIELDS" :key="field" :label="field" :value="field" />
+                        </el-select>
+                        <el-select v-model="row.operator" @change="row.invalid = false">
+                          <el-option v-for="operator in UPDATE_CONDITION_OPERATORS" :key="operator" :label="operator" :value="operator" />
+                        </el-select>
+                        <el-input
+                          v-model="row.value"
+                          :placeholder="row.operator === '为空' || row.operator === '不为空' ? '无需填写' : '请输入'"
+                          :disabled="row.operator === '为空' || row.operator === '不为空'"
+                          @change="row.invalid = false"
+                          @input="row.invalid = false"
+                        />
+                        <button class="update-condition-remove" type="button" aria-label="删除该条件" @click="removeUpdateConditionRow(groupIndex, rowIndex)">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                        </button>
+                      </div>
+                      <button class="update-condition-add" type="button" @click="addUpdateConditionRow(groupIndex)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                        并且
+                      </button>
+                    </div>
+                  </template>
+                  <button class="update-condition-add update-condition-add-or" type="button" @click="addUpdateConditionGroup">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    或者
+                  </button>
+                  <p v-if="taskDialogForm.updateConditionError" class="update-condition-error">请补全或删除未完成的条件</p>
+                </template>
+              </div>
+            </el-form-item>
+                        <el-form-item class="status-switch-item">
               <div class="c-label">任务状态</div>
-              <el-switch v-model="taskDialogForm.enabled" active-text="开启" inactive-text="" />
+              <el-switch v-model="taskDialogForm.enabled" />
             </el-form-item>
           </el-form>
         </div>
@@ -3840,5 +3984,142 @@ watch(
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ---------- 更新条件（可选） ---------- */
+.update-condition-item :deep(.el-form-item__content) {
+  display: block;
+  width: 100%;
+}
+
+.update-condition-block {
+  width: 100%;
+}
+
+.update-condition-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.update-condition-head .c-label {
+  margin-bottom: 0;
+}
+
+.update-condition-optional {
+  color: #86909C;
+  font-weight: 400;
+}
+
+.update-condition-hint {
+  margin: 8px 0 12px;
+  color: #86909C;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.update-condition-group {
+  padding: 12px;
+  background: #F7F8FA;
+  border-radius: 8px;
+}
+
+.update-condition-or-label {
+  margin: 8px 2px;
+  color: #4E5969;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.update-condition-row {
+  display: grid;
+  grid-template-columns: 136px 88px minmax(0, 1fr) 24px;
+  gap: 8px;
+  align-items: center;
+}
+
+.update-condition-row + .update-condition-row {
+  margin-top: 8px;
+}
+
+.update-condition-row .el-select {
+  width: 100%;
+}
+
+.update-condition-row :deep(.el-input__wrapper),
+.update-condition-row :deep(.el-select .el-input__wrapper) {
+  box-shadow: 0 0 0 1px #E5E6EB inset;
+}
+
+.update-condition-row.is-invalid :deep(.el-input__wrapper) {
+  box-shadow: 0 0 0 1px #A8071A inset;
+}
+
+.update-condition-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #86909C;
+  cursor: pointer;
+}
+
+.update-condition-remove:hover {
+  color: #A8071A;
+  background: #F2F3F5;
+}
+
+.update-condition-remove svg {
+  width: 14px;
+  height: 14px;
+}
+
+.update-condition-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #4E5969;
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.update-condition-add:hover {
+  color: #A8071A;
+}
+
+.update-condition-add svg {
+  width: 14px;
+  height: 14px;
+}
+
+.update-condition-add.update-condition-add-or {
+  margin-top: 12px;
+  padding: 4px 12px;
+  background: #FFFFFF;
+  border: 1px solid #E5E6EB;
+  border-radius: 4px;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.update-condition-add.update-condition-add-or:hover {
+  border-color: #A8071A;
+  color: #A8071A;
+}
+
+.update-condition-error {
+  margin-top: 8px;
+  color: #A8071A;
+  font-size: 12px;
+  line-height: 18px;
 }
 </style>
