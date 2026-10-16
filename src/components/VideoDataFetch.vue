@@ -11,6 +11,7 @@ const props = defineProps({
 })
 
 const TASK_PLUGIN_TYPE = 'video_data';
+const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
 const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
@@ -292,11 +293,15 @@ const normalizeFinalFileName = (url, finalName, blob, config, item) => {
   return `${getFileBaseName(finalName)}${ext}`;
 };
 
-const buildProxyDownloadUrl = (url, fileName) => {
+const isXhsCover = (item, config) => config.key === 'origin_cover_attachment'
+  && String(item?.social_type || '').trim().toLowerCase() === 'xhs';
+
+const buildProxyDownloadUrl = (url, fileName, xhsCover = false) => {
   const params = new URLSearchParams({
     url,
     file_name: fileName,
   });
+  if (xhsCover) params.set('image_mode', 'xhs_cover');
   return buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`);
 };
 
@@ -305,7 +310,7 @@ const shouldUseProxyFirst = (item, config) => {
     return false;
   }
 
-  return String(item?.social_type || '').trim().toLowerCase() === 'instagram';
+  return isXhsCover(item, config) || String(item?.social_type || '').trim().toLowerCase() === 'instagram';
 };
 
 const fetchAttachmentResponse = async (requestUrl, useProxy, signal) => {
@@ -321,7 +326,7 @@ const fetchAttachmentResponse = async (requestUrl, useProxy, signal) => {
 };
 
 const downloadAttachmentAsFile = async (url, finalName, config, item) => {
-  const proxyUrl = buildProxyDownloadUrl(url, finalName);
+  const proxyUrl = buildProxyDownloadUrl(url, finalName, isXhsCover(item, config));
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
 
@@ -1004,7 +1009,7 @@ const validateAndAddFields = async (tableId, activeFieldConfigs, fieldMappings =
   console.log('字段名到ID的映射:', fieldNameToId);
 
   if (missingFields.length > 0) {
-    ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+    ElNotification({ message: `已自动添加 ${missingFields.length} 个字段，${TASK_TOAST_SUFFIX}`, type: 'success' });
   }
 
   return fieldNameToId;
@@ -1217,7 +1222,7 @@ const fetchVideoDataByRows = async (rowList, {
   let successCount = 0;
   let failCount = 0;
 
-  showToast(`准备处理 ${rowList.length} 条数据...`, true);
+  showToast(`准备处理 ${rowList.length} 条数据...${TASK_TOAST_SUFFIX}`, true);
 
   for (let index = 0; index < rowList.length; index++) {
     if (stopRequested.value) {
@@ -1227,7 +1232,7 @@ const fetchVideoDataByRows = async (rowList, {
     const { url, recordId, rawValue } = rowList[index];
 
     try {
-      showToast(`正在处理 ${Math.min(index + 1, rowList.length)}/${rowList.length} 条...`, true);
+      showToast(`正在处理 ${Math.min(index + 1, rowList.length)}/${rowList.length} 条...${TASK_TOAST_SUFFIX}`, true);
       console.log(`正在处理第 ${index + 1}/${rowList.length} 条:`, { url, rawValue });
 
       const response = await request({
@@ -1948,7 +1953,7 @@ const handleTableModeSubmit = async () => {
       showToast(
         stopped
           ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条，${TASK_TOAST_SUFFIX}`,
         false
       );
       setTimeout(() => {
@@ -1969,7 +1974,7 @@ const handleTableModeSubmit = async () => {
     showToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条，${TASK_TOAST_SUFFIX}`,
       false
     );
     setTimeout(() => {
@@ -2017,7 +2022,7 @@ const handleManualModeSubmit = async () => {
     showToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条，${TASK_TOAST_SUFFIX}`,
       false
     );
     setTimeout(() => {
@@ -3792,6 +3797,8 @@ watch(
 
 /* Toast 样式 */
 .toast-wrap {
+  width: max-content;
+  max-width: calc(100vw - 32px);
   position: fixed;
   top: 50%;
   left: 50%;
@@ -3819,7 +3826,11 @@ watch(
   font-size: 14px;
   font-weight: 500;
   color: #1D2129;
-  white-space: nowrap;
+  line-height: 22px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .toast-icon {

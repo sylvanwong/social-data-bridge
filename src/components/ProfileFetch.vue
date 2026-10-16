@@ -15,7 +15,8 @@ const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 const MANUAL_TABLE_BASE_NAME = '社媒数据助手';
 const STREAM_TASK_STORAGE_KEY = 'profile_fetch_stream_task_v1';
-const STREAM_RESULT_LIMIT = 20;
+const STREAM_RESULT_LIMIT = 40;
+const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
 const STREAM_ACTIVE_INTERVAL = 2000;
 const STREAM_MAX_INTERVAL = 30000;
 const STREAM_STALL_TIMEOUT = 10 * 60 * 1000;
@@ -585,7 +586,7 @@ const getStreamProgressText = (taskStatus, streamTask) => {
   const processed = Number(taskStatus.processed) || 0;
   const total = Number(taskStatus.total) || 0;
   const progress = total > 0 ? `${processed}/${total}` : `${processed}`;
-  return `已处理 ${progress} 个主页，已写入 ${streamTask.writtenCount || 0} 条作品`;
+  return `已处理 ${progress} 个主页，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`;
 };
 
 const getProfileTaskStatus = async (taskId) => {
@@ -629,7 +630,7 @@ const drainAvailablePosts = async (streamTask) => {
       throw new Error('结果接口未返回有效的 next_cursor');
     }
 
-    showToast(`正在写入 ${items.length} 条作品...`, true);
+    showToast(`正在写入 ${items.length} 条作品，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true);
     const result = await createAndWriteData(
       items,
       streamTask.targetTableId ? 'stream' : '',
@@ -638,6 +639,8 @@ const drainAvailablePosts = async (streamTask) => {
       streamTask.selectedFieldKeys,
       {
         stopAfterCurrentBatch: true,
+        attachmentPipeline: true,
+        uploadBatchSize: 5,
         fieldMappings: streamTask.fieldMappings,
         writeMode: streamTask.writeMode,
         upsertCacheKey: streamTask.taskId,
@@ -681,7 +684,7 @@ const finishStreamTask = async (streamTask, taskStatus) => {
     return;
   }
 
-  showCompletionToast(`处理完成，已写入 ${streamTask.writtenCount || 0} 条作品`);
+  showCompletionToast(`处理完成，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`);
 };
 
 const scheduleStreamPoll = (streamTask, delay) => {
@@ -818,7 +821,7 @@ const resumeSavedStreamTask = async () => {
     };
     activeProfileTaskId.value = activeStreamTask.taskId;
     loading.value = true;
-    showToast('正在恢复未完成的博主作品采集任务...', true);
+    showToast(`正在恢复未完成的博主作品采集任务...${TASK_TOAST_SUFFIX}`, true);
     await pollStreamTask(activeStreamTask);
   } catch (error) {
     console.error('恢复博主作品采集任务失败:', error);
@@ -1299,6 +1302,7 @@ const handleImmediateSubmit = async () => {
 
     if (normalizeTargetType(formData.value.targetType) === 'existing') {
       const isValid = await validateTableFields(formData.value.targetTableId, selectedFieldKeys.value, {
+        successMessageSuffix: `，${TASK_TOAST_SUFFIX}`,
         fieldMappings: cloneFieldMappings(mappingDraft.value),
         writeMode: formData.value.writeMode,
       });
@@ -3384,6 +3388,8 @@ watch(
 }
 
 .toast-wrap {
+  width: max-content;
+  max-width: calc(100vw - 32px);
   position: fixed;
   top: 50%;
   left: 50%;
@@ -3409,9 +3415,13 @@ watch(
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   font-size: 14px;
+  line-height: 22px;
   font-weight: 500;
   color: #1D2129;
-  white-space: nowrap;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .toast-icon {

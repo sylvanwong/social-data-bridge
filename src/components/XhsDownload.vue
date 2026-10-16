@@ -21,6 +21,22 @@ const formData = ref({
 });
 const MANUAL_TABLE_BASE_NAME = '小红书下载';
 const ATTACHMENT_DOWNLOAD_TIMEOUT = 60000;
+const ATTACHMENT_DOWNLOAD_CONCURRENCY = 3;
+let activeAttachmentDownloads = 0;
+const attachmentDownloadWaiters = [];
+
+const withAttachmentDownloadSlot = async (download) => {
+  while (activeAttachmentDownloads >= ATTACHMENT_DOWNLOAD_CONCURRENCY) {
+    await new Promise(resolve => attachmentDownloadWaiters.push(resolve));
+  }
+  activeAttachmentDownloads += 1;
+  try {
+    return await download();
+  } finally {
+    activeAttachmentDownloads -= 1;
+    attachmentDownloadWaiters.shift()?.();
+  }
+};
 
 const httpToHttps = (url) => {
   if (typeof url === 'string') {
@@ -66,21 +82,23 @@ const isFieldTypeCompatible = (fieldType, config) => {
   return getAllowedFieldTypes(config).includes(fieldType);
 };
 
-const buildProxyDownloadUrl = (url, fileName) => {
+const buildProxyDownloadUrl = (url, fileName, xhsCover = false) => {
   const params = new URLSearchParams({
     url,
     file_name: fileName
   });
+  if (xhsCover) params.set('image_mode', 'xhs_cover');
   return buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`);
 };
 
 const shouldProxyAttachmentDownload = (item, fieldName) => {
-  return fieldName === '下载附件' && item?.note_type === '视频';
+  return fieldName === '封面附件' || (fieldName === '下载附件' && item?.note_type === '视频');
 };
 
-const downloadAttachmentAsFile = async (url, finalName, fieldName, item) => {
+const downloadAttachmentAsFile = async (url, finalName, fieldName, item) => withAttachmentDownloadSlot(async () => {
+  const xhsCover = fieldName === '封面附件';
   const shouldUseProxy = shouldProxyAttachmentDownload(item, fieldName);
-  const requestUrl = shouldUseProxy ? buildProxyDownloadUrl(url, finalName) : url;
+  const requestUrl = shouldUseProxy ? buildProxyDownloadUrl(url, finalName, xhsCover) : url;
   const headers = shouldUseProxy ? { authorization: `Bearer ${props.api_key}` } : undefined;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
@@ -92,7 +110,8 @@ const downloadAttachmentAsFile = async (url, finalName, fieldName, item) => {
     }
 
     const blob = await response.blob();
-    return new File([blob], finalName, { type: blob.type || 'application/octet-stream' });
+    const normalizedName = xhsCover ? finalName.replace(/\.[a-zA-Z0-9]{2,5}$/, '.jpg') : finalName;
+    return new File([blob], normalizedName, { type: blob.type || 'application/octet-stream' });
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error(`附件下载超时（${ATTACHMENT_DOWNLOAD_TIMEOUT / 1000} 秒）`);
@@ -101,7 +120,7 @@ const downloadAttachmentAsFile = async (url, finalName, fieldName, item) => {
   } finally {
     clearTimeout(timeoutId);
   }
-};
+});
 
 const fieldOptions = ref([]);
 const tableOptions = ref([]);

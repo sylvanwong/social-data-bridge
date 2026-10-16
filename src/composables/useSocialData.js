@@ -192,6 +192,25 @@ const normalizeTagsCompatibleValue = (value, fieldType, tagOptionIdMap = null) =
 };
 
 const ATTACHMENT_DOWNLOAD_TIMEOUT = 30000;
+const ATTACHMENT_DOWNLOAD_CONCURRENCY = 3;
+let activeAttachmentDownloads = 0;
+const attachmentDownloadWaiters = [];
+
+const withAttachmentDownloadSlot = async (download) => {
+  while (activeAttachmentDownloads >= ATTACHMENT_DOWNLOAD_CONCURRENCY) {
+    await new Promise(resolve => attachmentDownloadWaiters.push(resolve));
+  }
+  activeAttachmentDownloads += 1;
+  try {
+    return await download();
+  } finally {
+    activeAttachmentDownloads -= 1;
+    const next = attachmentDownloadWaiters.shift();
+    next?.();
+  }
+};
+
+const isXhsCover = (config, item) => config.key === 'cover_attachment' && item?.social_type === 'xhs';
 
 const httpToHttps = (url) => typeof url === 'string' ? url.replace(/^http:\/\//i, 'https://') : url;
 
@@ -218,10 +237,12 @@ const getBlobExtension = (blob) => ({
   'image/heif': 'heic',
 }[String(blob.type || '').split(';')[0].trim().toLowerCase()]);
 
-const downloadAttachmentAsFile = async (url, fileName, apiKey) => {
+const downloadAttachmentAsFile = async (url, fileName, apiKey, xhsCover = false) => withAttachmentDownloadSlot(async () => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
-  const proxyUrl = buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${new URLSearchParams({ url, file_name: fileName }).toString()}`);
+  const proxyParams = new URLSearchParams({ url, file_name: fileName });
+  if (xhsCover) proxyParams.set('image_mode', 'xhs_cover');
+  const proxyUrl = buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${proxyParams.toString()}`);
   const download = async (requestUrl, useProxy = false) => {
     const response = await fetch(requestUrl, {
       signal: controller.signal,
@@ -235,6 +256,7 @@ const downloadAttachmentAsFile = async (url, fileName, apiKey) => {
   };
 
   try {
+    if (xhsCover) return await download(proxyUrl, true);
     try {
       return await download(url);
     } catch (error) {
@@ -244,24 +266,115 @@ const downloadAttachmentAsFile = async (url, fileName, apiKey) => {
   } finally {
     clearTimeout(timeoutId);
   }
-};
+});
 
-const createAttachmentFiles = async (config, item, apiKey) => {
+const createAttachmentFiles = async (config, item, apiKey, onDownloadFailure) => {
   const urls = getAttachmentUrls(config, item);
   const results = await Promise.allSettled(urls.map((url, index) =>
-    downloadAttachmentAsFile(url, getAttachmentFileName(url, config.getFileName?.(item), index, urls.length), apiKey)
+    downloadAttachmentAsFile(url, getAttachmentFileName(url, config.getFileName?.(item), index, urls.length), apiKey, isXhsCover(config, item))
   ));
 
   return results.flatMap(result => {
     if (result.status === 'fulfilled') return [result.value];
+    onDownloadFailure?.(result.reason);
     console.warn('附件下载失败，跳过附件写入:', result.reason);
     return [];
   });
 };
 
+const uploadAttachmentFilesInBatch = async (entries) => {
+  const files = entries.flatMap(entry => entry.files);
+  if (!files.length) {
+    return;
+  }
+
+  const tokens = await bitable.base.batchUploadFile(files);
+  if (!Array.isArray(tokens) || tokens.length !== files.length) {
+    throw new Error('附件批量上传返回的 token 数量不匹配');
+  }
+
+  let offset = 0;
+  for (const entry of entries) {
+    const uploadedFiles = entry.files.map((file, index) => ({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      token: tokens[offset + index],
+      timeStamp: file.lastModified || Date.now(),
+    }));
+    entry.target.set(entry.item, uploadedFiles);
+    offset += entry.files.length;
+  }
+};
+
+// Download the page continuously; upload groups as they become ready.
+// Only one SDK upload is in flight, while downloads keep their three-slot limit.
+const prepareAttachmentPipeline = async (entries, apiKey, metrics = null, uploadBatchSize = 10) => {
+  const startedAt = performance.now();
+  let uploadMs = 0;
+  let attachmentCount = 0;
+  let attachmentBytes = 0;
+  let downloadRetryCount = 0;
+  const downloads = entries.map(async (entry) => {
+    const expected = getAttachmentUrls(entry.config, entry.item).length;
+    let files = [];
+    let failureReason = '';
+    // CDN/proxy requests can fail transiently. The benchmark retries a
+    // failed item twice, while still rejecting permanent partial downloads.
+    for (let attempt = 0; attempt < 3 && files.length !== expected; attempt += 1) {
+      if (attempt > 0) downloadRetryCount += 1;
+      files = await createAttachmentFiles(entry.config, entry.item, apiKey, error => {
+        failureReason = error?.name === 'AbortError' ? '下载超时' : (error?.message || '网络请求失败');
+      });
+      if (files.length !== expected && attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+      }
+    }
+    if (metrics && files.length !== expected) {
+      const workId = entry.item?.aweme_id || entry.item?._id || entry.item?.id || 'unknown';
+      throw new Error(`测试图片下载不完整：作品 ${workId}，期望 ${expected} 张，成功 ${files.length} 张，已尝试 3 次；${failureReason}`);
+    }
+    attachmentCount += files.length;
+    attachmentBytes += files.reduce((sum, file) => sum + file.size, 0);
+    return { ...entry, files };
+  });
+  // Attach rejection handlers to every group immediately, even when an earlier
+  // group is still uploading. Wait for all downloads before propagating errors.
+  const groups = [];
+  for (let offset = 0; offset < downloads.length; offset += uploadBatchSize) {
+    groups.push(Promise.all(downloads.slice(offset, offset + uploadBatchSize)).then(
+      value => ({ value }), error => ({ error })
+    ));
+  }
+  let downloadMs = 0;
+  const downloadDone = Promise.allSettled(downloads).then(() => {
+    downloadMs = performance.now() - startedAt;
+  });
+  const uploadDone = (async () => {
+    for (const group of groups) {
+      const { value, error } = await group;
+      if (error) throw error;
+      const uploadStartedAt = performance.now();
+      await uploadAttachmentFilesInBatch(value);
+      uploadMs += performance.now() - uploadStartedAt;
+    }
+  })();
+  const results = await Promise.allSettled([downloadDone, uploadDone]);
+  if (results[1].status === 'rejected') throw results[1].reason;
+  if (metrics) Object.assign(metrics, {
+    downloadMs, uploadMs, attachmentCount, attachmentBytes,
+    attachmentPipelineMs: performance.now() - startedAt,
+    uploadBatchSize,
+    attachmentMode: 'pipeline',
+    downloadRetryCount,
+  });
+};
+
 const normalizeCellValue = async (table, field, value, config, fieldType, extra = {}, item, apiKey) => {
   if (config.type === FieldType.Attachment) {
-    const files = await createAttachmentFiles(config, item, apiKey);
+    const files = extra.preloadedFiles?.has(item)
+      ? extra.preloadedFiles.get(item)
+      : await createAttachmentFiles(config, item, apiKey);
     return files.length === 1 ? files[0] : files;
   }
 
@@ -468,7 +581,7 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
     }
 
     if (missingFields.length > 0) {
-      ElNotification({ title: '成功', message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+      ElNotification({ title: '成功', message: `已自动添加 ${missingFields.length} 个字段${options.successMessageSuffix || ''}`, type: 'success' });
     }
 
     const refreshedFieldMetaList = await activeTable.getFieldMetaList();
@@ -580,6 +693,16 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
   };
 
   const createAndWriteData = async (list, type, task_id, targetTableId = "", selectedFieldKeys = [], options = {}) => {
+    const metrics = options.measurePerformance ? {
+      records: list?.length || 0,
+      downloadMs: 0,
+      uploadMs: 0,
+      writeMs: 0,
+      attachmentCount: 0,
+      attachmentBytes: 0,
+      totalMs: 0,
+    } : null;
+    const startedAt = metrics ? performance.now() : 0;
     if (!list || list.length == 0) {
       ElMessage({ message: "获取数据异常，请稍后重试", type: "warning", plain: true });
       resetParams();
@@ -683,6 +806,36 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         }
       }
 
+      const attachmentEntries = [];
+      for (const fieldItem of availableFieldList) {
+        if (fieldItem.config.type !== FieldType.Attachment) continue;
+        const xhsItems = list.filter(item => isXhsCover(fieldItem.config, item));
+        if (!xhsItems.length) continue;
+        fieldItem.extra.preloadedFiles = new Map();
+        for (const item of xhsItems) {
+          attachmentEntries.push({ item, config: fieldItem.config, target: fieldItem.extra.preloadedFiles });
+        }
+      }
+      if (options.attachmentPipeline) {
+        await prepareAttachmentPipeline(attachmentEntries, api_key, metrics, options.uploadBatchSize || 10);
+      } else {
+        const downloadStartedAt = metrics ? performance.now() : 0;
+        const downloaded = await Promise.all(attachmentEntries.map(async entry => ({
+          ...entry, files: await createAttachmentFiles(entry.config, entry.item, api_key),
+        })));
+        if (metrics) {
+          metrics.downloadMs = performance.now() - downloadStartedAt;
+          const files = downloaded.flatMap(entry => entry.files);
+          metrics.attachmentCount = files.length;
+          metrics.attachmentBytes = files.reduce((sum, file) => sum + file.size, 0);
+          const expected = downloaded.reduce((sum, entry) => sum + getAttachmentUrls(entry.config, entry.item).length, 0);
+          if (metrics.attachmentCount !== expected) throw new Error('测试图片下载不完整');
+        }
+        const uploadStartedAt = metrics ? performance.now() : 0;
+        await uploadAttachmentFilesInBatch(downloaded);
+        if (metrics) metrics.uploadMs = performance.now() - uploadStartedAt;
+      }
+
       let records = [];
       let normalizedRecords = [];
       for (const item of list) {
@@ -701,6 +854,12 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         normalizedRecords.push(normalizedRecord);
       }
       let recordIds = [];
+      const writeBatch = async (write) => {
+        const start = metrics ? performance.now() : 0;
+        const result = await write();
+        if (metrics) metrics.writeMs += performance.now() - start;
+        return result;
+      };
       if (options.writeMode === 'upsert') {
         const keyFields = keyConfigs.map(config => availableFieldList.find(item => item.config.key === config.key)?.field);
         if (!keyFields.every(Boolean)) {
@@ -750,20 +909,21 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         });
 
         for (const updates of chunkRecords(pendingUpdates)) {
-          const updated = await activeTable.setRecords(updates);
+          const updated = await writeBatch(() => activeTable.setRecords(updates));
           recordIds = recordIds.concat(updated.map(record => record.recordId));
         }
         for (const creates of chunkRecords(pendingCreates)) {
-          const created = await activeTable.addRecords(creates.map(item => item.record));
+          const created = await writeBatch(() => activeTable.addRecords(creates.map(item => item.record)));
           recordIds = recordIds.concat(created.map(record => record.recordId));
           created.forEach((record, index) => existingByKey.set(creates[index].key, record.recordId));
         }
       } else {
-        recordIds = await activeTable.addRecords(records);
+        recordIds = await writeBatch(() => activeTable.addRecords(records));
       }
 
       if (options.stopAfterCurrentBatch) {
-        return { tableId: activeTable.id, recordIds };
+        if (metrics) metrics.totalMs = performance.now() - startedAt;
+        return { tableId: activeTable.id, recordIds, ...(metrics ? { metrics } : {}) };
       }
 
       if (total > page) {
@@ -774,6 +934,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         resetParams();
       }
     } catch (error) {
+      if (options.measurePerformance) throw error;
       console.error("🚀 ~ createAndWriteData ~ error:", error)
       try {
         const tableName = getTableName(list);

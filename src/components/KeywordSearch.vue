@@ -6,6 +6,8 @@ import request from '@/utils/request'
 import { useSocialData, showErrorMsg, KEYWORD_SEARCH_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
 
+const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
+
 const props = defineProps({
   api_key: String,
   social_type_options: Array,
@@ -334,10 +336,12 @@ const keywordStreamTask = useIncrementalTask({
   storageKey: STREAM_TASK_STORAGE_KEY,
   isTerminal: (status) => [1, 2, 3].includes(Number(status.status)),
   getStatus: async (task) => (await request({ url: `/social/api/v1/feishu/keyword/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', headers: { authorization: `Bearer ${props.api_key}` } })).data,
-  getResults: async (task) => (await request({ url: '/social/api/v1/feishu/post/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 20 } })).data,
+  getResults: async (task) => (await request({ url: '/social/api/v1/feishu/post/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 } })).data,
   writeBatch: async (items, task) => {
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', task.selectedFieldKeys, {
       stopAfterCurrentBatch: true,
+      attachmentPipeline: true,
+      uploadBatchSize: 5,
       writeMode: task.writeMode || 'upsert',
       upsertCacheKey: task.taskId,
       fieldMappings: task.fieldMappings || [],
@@ -354,11 +358,11 @@ const keywordStreamTask = useIncrementalTask({
     showToast(
       status.status_text === 'cancel_requested' || status.cancel_requested
         ? `正在停止任务，已写入 ${task.writtenCount || 0} 条作品`
-        : `已处理 ${total ? `${processed}/${total}` : processed} 个搜索页，已写入 ${task.writtenCount || 0} 条作品`,
+        : `已处理 ${total ? `${processed}/${total}` : processed} 个搜索页，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`,
       true
     );
   },
-  onWriting: (items) => showToast(`正在写入 ${items.length} 条作品...`, true),
+  onWriting: (items, task) => showToast(`正在写入 ${items.length} 条作品，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true),
   onFinish: async (status, task) => {
     loading.value = false;
     isCancelling.value = false;
@@ -367,7 +371,7 @@ const keywordStreamTask = useIncrementalTask({
       showCompletionToast(`任务已停止，已写入 ${task.writtenCount || 0} 条作品`);
       return;
     }
-    showCompletionToast(Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条作品`);
+    showCompletionToast(Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`);
     if (Number(status.status) === 2) showErrorMsg(status.reason || '获取数据失败，请稍后重试');
   },
   onError: async (error) => {
@@ -616,7 +620,7 @@ onMounted(async () => {
   await keywordStreamTask.resume((task) => {
     activeKeywordTaskId.value = task.taskId;
     loading.value = true;
-    showToast('正在恢复未完成的关键词采集任务...', true);
+    showToast(`正在恢复未完成的关键词采集任务...${TASK_TOAST_SUFFIX}`, true);
   });
 });
 
@@ -664,6 +668,7 @@ const commit = async () => {
 
     if (radio === 2) {
       const isValid = await validateTableFields(table_id, selectedFieldKeys.value, {
+        successMessageSuffix: `，${TASK_TOAST_SUFFIX}`,
         writeMode: formData1.value.writeMode,
         fieldMappings: mappingDraft.value,
       });
@@ -1213,9 +1218,9 @@ watch(selectedFieldKeys, (keys) => {
   border-color: #d5495c;
   color: #a8071a;
 }
-.toast-wrap { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.95); z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; }
+.toast-wrap { width: max-content; max-width: calc(100vw - 32px); position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.95); z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; }
 .toast-wrap.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-.toast { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; background: #FFFFFF; border: 1px solid #E5E6EB; border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); font-size: 14px; font-weight: 500; color: #1D2129; white-space: nowrap; }
+.toast { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; background: #FFFFFF; border: 1px solid #E5E6EB; border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); font-size: 14px; font-weight: 500; color: #1D2129; line-height: 22px; max-width: calc(100vw - 32px); box-sizing: border-box; white-space: normal; overflow-wrap: anywhere; }
 .toast-icon { width: 18px; height: 18px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
 .toast-icon svg { width: 100%; height: 100%; }
 .toast-loading .toast-icon { animation: spin 0.8s linear infinite; color: #A8071A; }
