@@ -11,6 +11,7 @@ const props = defineProps({
 })
 
 const TASK_PLUGIN_TYPE = 'video_data';
+const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
 const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
@@ -292,11 +293,15 @@ const normalizeFinalFileName = (url, finalName, blob, config, item) => {
   return `${getFileBaseName(finalName)}${ext}`;
 };
 
-const buildProxyDownloadUrl = (url, fileName) => {
+const isXhsCover = (item, config) => config.key === 'origin_cover_attachment'
+  && String(item?.social_type || '').trim().toLowerCase() === 'xhs';
+
+const buildProxyDownloadUrl = (url, fileName, xhsCover = false) => {
   const params = new URLSearchParams({
     url,
     file_name: fileName,
   });
+  if (xhsCover) params.set('image_mode', 'xhs_cover');
   return buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`);
 };
 
@@ -305,7 +310,7 @@ const shouldUseProxyFirst = (item, config) => {
     return false;
   }
 
-  return String(item?.social_type || '').trim().toLowerCase() === 'instagram';
+  return isXhsCover(item, config) || String(item?.social_type || '').trim().toLowerCase() === 'instagram';
 };
 
 const fetchAttachmentResponse = async (requestUrl, useProxy, signal) => {
@@ -321,7 +326,7 @@ const fetchAttachmentResponse = async (requestUrl, useProxy, signal) => {
 };
 
 const downloadAttachmentAsFile = async (url, finalName, config, item) => {
-  const proxyUrl = buildProxyDownloadUrl(url, finalName);
+  const proxyUrl = buildProxyDownloadUrl(url, finalName, isXhsCover(item, config));
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
 
@@ -640,24 +645,30 @@ const saveSelectedFieldKeys = async (keys) => {
 const getFieldListByType = async ({ silent = false } = {}) => {
   try {
     const table = await bitable.base.getActiveTable();
-    const fieldList = await table.getFieldList();
+    const view = await table.getActiveView();
+    // 视图字段元数据按列顺序返回，数据表字段列表不保证与视图顺序一致。
+    const fieldList = await view.getFieldMetaList();
 
     const urlFieldList = fieldList.filter(item =>
       item.type === FieldType.Url || item.type === FieldType.Text
     );
 
-    fieldOptions.value = await Promise.all(
-      urlFieldList.map(async field => ({
-        id: field.id,
-        name: await field.getName()
-      }))
-    );
+    fieldOptions.value = urlFieldList.map(field => ({
+      id: field.id,
+      name: field.name
+    }));
   } catch (error) {
     console.error('获取字段列表失败:', error);
     fieldOptions.value = [{ id: 'nodata', name: '获取字段列表失败' }];
     if (!silent) {
       ElNotification({ message: '当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
     }
+  }
+};
+
+const handleLinkFieldDropdownVisibleChange = (visible) => {
+  if (visible) {
+    getFieldListByType({ silent: true });
   }
 };
 
@@ -1004,7 +1015,7 @@ const validateAndAddFields = async (tableId, activeFieldConfigs, fieldMappings =
   console.log('字段名到ID的映射:', fieldNameToId);
 
   if (missingFields.length > 0) {
-    ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+    ElNotification({ message: `已自动添加 ${missingFields.length} 个字段，${TASK_TOAST_SUFFIX}`, type: 'success' });
   }
 
   return fieldNameToId;
@@ -1217,7 +1228,7 @@ const fetchVideoDataByRows = async (rowList, {
   let successCount = 0;
   let failCount = 0;
 
-  showToast(`准备处理 ${rowList.length} 条数据...`, true);
+  showToast(`准备处理 ${rowList.length} 条数据...${TASK_TOAST_SUFFIX}`, true);
 
   for (let index = 0; index < rowList.length; index++) {
     if (stopRequested.value) {
@@ -1227,7 +1238,7 @@ const fetchVideoDataByRows = async (rowList, {
     const { url, recordId, rawValue } = rowList[index];
 
     try {
-      showToast(`正在处理 ${Math.min(index + 1, rowList.length)}/${rowList.length} 条...`, true);
+      showToast(`正在处理 ${Math.min(index + 1, rowList.length)}/${rowList.length} 条...${TASK_TOAST_SUFFIX}`, true);
       console.log(`正在处理第 ${index + 1}/${rowList.length} 条:`, { url, rawValue });
 
       const response = await request({
@@ -1948,7 +1959,7 @@ const handleTableModeSubmit = async () => {
       showToast(
         stopped
           ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条，${TASK_TOAST_SUFFIX}`,
         false
       );
       setTimeout(() => {
@@ -1969,7 +1980,7 @@ const handleTableModeSubmit = async () => {
     showToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条，${TASK_TOAST_SUFFIX}`,
       false
     );
     setTimeout(() => {
@@ -2017,7 +2028,7 @@ const handleManualModeSubmit = async () => {
     showToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条，${TASK_TOAST_SUFFIX}`,
       false
     );
     setTimeout(() => {
@@ -2045,6 +2056,15 @@ const handleSubmit = async () => {
   }
 
   await handleTableModeSubmit();
+};
+
+const handleTaskAction = () => {
+  if (stopRequested.value) return;
+  if (loading.value) {
+    requestStop();
+    return;
+  }
+  return handleSubmit();
 };
 
 const stepNumber = (delta) => {
@@ -2244,8 +2264,11 @@ watch(
           </div>
           <el-select
             v-model="formData.videoLinkFieldId"
-            placeholder="选择字段"
+            filterable
+            placeholder="输入字段名称搜索或选择"
+            no-match-text="未找到匹配字段"
             style="width: 100%"
+            @visible-change="handleLinkFieldDropdownVisibleChange"
           >
             <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
           </el-select>
@@ -2375,10 +2398,13 @@ watch(
       </el-form>
 
       <div v-if="formData.executionMode === 'immediate'" class="action-group">
-        <div class="task-actions">
-          <el-button color="#a8071a" class="commit-btn" :loading="loading" :disabled="loading" @click="handleSubmit">立即执行</el-button>
-          <el-button v-if="loading" class="cancel-btn" :disabled="stopRequested" @click="requestStop">{{ stopRequested ? '正在停止' : '停止任务' }}</el-button>
-        </div>
+        <el-button
+          class="commit-btn"
+          :class="{ 'is-running': loading }"
+          :loading="stopRequested"
+          :disabled="stopRequested"
+          @click="handleTaskAction"
+        >{{ stopRequested ? '正在停止…' : loading ? '停止任务' : '立即执行' }}</el-button>
       </div>
 
       <div v-else class="schedule-inline-panel">
@@ -2593,7 +2619,14 @@ watch(
             <template v-if="taskDialogForm.mode === 'table'">
               <el-form-item>
                 <div class="c-label">作品链接所在字段</div>
-                <el-select v-model="taskDialogForm.videoLinkFieldId" placeholder="请选择字段" style="width: 100%">
+                <el-select
+                  v-model="taskDialogForm.videoLinkFieldId"
+                  filterable
+                  placeholder="输入字段名称搜索或选择"
+                  no-match-text="未找到匹配字段"
+                  style="width: 100%"
+                  @visible-change="handleLinkFieldDropdownVisibleChange"
+                >
                   <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
                 </el-select>
                 <div class="sub-hint">定时执行时会使用当前页面所属表和视图。编辑前请先打开对应数据表。</div>
@@ -3003,11 +3036,6 @@ watch(
   margin-top: 8px;
 }
 
-.task-actions {
-  display: flex;
-  gap: 8px;
-}
-
 .schedule-inline-panel {
   margin-top: 16px;
   padding: 16px;
@@ -3049,15 +3077,18 @@ watch(
 }
 .commit-btn:hover { background: #C11126; }
 .commit-btn:active { background: #8A0515; }
-.task-actions .commit-btn {
-  flex: 1;
-}
-.cancel-btn {
-  width: 104px;
-  height: 36px;
-  margin: 0;
-  border-color: #d5495c;
+.commit-btn.is-running {
+  background: #fff;
+  border: 1px solid #d5495c;
   color: #a8071a;
+}
+.commit-btn.is-running:hover { background: #fff1f2; }
+.commit-btn.is-running:active { background: #ffe4e6; }
+.commit-btn.is-running.is-disabled {
+  background: #fafafa;
+  border-color: #e5e6eb;
+  color: #86909c;
+  cursor: not-allowed;
 }
 .c-label {
   display: flex;
@@ -3792,6 +3823,8 @@ watch(
 
 /* Toast 样式 */
 .toast-wrap {
+  width: max-content;
+  max-width: calc(100vw - 32px);
   position: fixed;
   top: 50%;
   left: 50%;
@@ -3819,7 +3852,11 @@ watch(
   font-size: 14px;
   font-weight: 500;
   color: #1D2129;
-  white-space: nowrap;
+  line-height: 22px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .toast-icon {

@@ -12,15 +12,11 @@ import XhsDownload from './XhsDownload.vue'
 import UrlToAttachment from './UrlToAttachment.vue'
 import SeriesFetch from './SeriesFetch.vue'
 import HotListFetch from './HotListFetch.vue'
-import BaseIdDebug from './BaseIdDebug.vue'
-import WritePerformanceTest from './WritePerformanceTest.vue'
-import SentryTest from './SentryTest.vue'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
 const api_key = ref("");
 const api_key_disabled = ref(true);
 const currentPage = ref("home");
-// const isSentryTestEnabled = import.meta.env.DEV || new URLSearchParams(window.location.search).has('sentry-test');
 
 const PLATFORM_CONFIG_NAMES = {
   search: 'feishu_social_type',
@@ -33,7 +29,8 @@ const TYPE_OPTIONS = [
   { value: "tiktok", label: "TikTok" },
   { value: "kuaishou", label: "快手" },
   { value: "weibo", label: "微博" },
-  { value: "wechat", label: "微信" },
+  { value: "wechat", label: "视频号" },
+  { value: "wechat_mp", label: "公众号" },
   { value: "bilibili", label: "哔哩哔哩" },
   { value: "zhihu", label: "知乎" },
   { value: "toutiao", label: "今日头条" },
@@ -239,37 +236,6 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           </div>
           <span class="func-name">链接转附件</span>
         </div>
-        <!-- <div class="arco-card" @click="currentPage = 'writePerformanceTest'">
-          <div class="func-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
-              <path d="M4 19V5"></path>
-              <path d="M4 19h16"></path>
-              <path d="m7 15 4-4 3 2 4-6"></path>
-            </svg>
-          </div>
-          <span class="func-name">写入性能测试</span>
-        </div> -->
-        <!-- <div class="arco-card" @click="currentPage = 'baseIdDebug'">
-          <div class="func-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
-              <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-              <path d="M7 8h10"></path>
-              <path d="M7 12h6"></path>
-              <path d="M7 16h8"></path>
-            </svg>
-          </div>
-          <span class="func-name">BaseId 调试</span>
-        </div> -->
-        <!-- <div v-if="isSentryTestEnabled" class="arco-card" @click="currentPage = 'sentryTest'">
-          <div class="func-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
-              <path d="M12 9v4"></path>
-              <path d="M12 17h.01"></path>
-              <path d="M10.3 3.5 2.8 16.1A2 2 0 0 0 4.5 19h15a2 2 0 0 0 1.7-2.9L13.7 3.5a2 2 0 0 0-3.4 0Z"></path>
-            </svg>
-          </div>
-          <span class="func-name">Sentry 测试</span>
-        </div> -->
       </div>
     </div>
   </div>
@@ -309,13 +275,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   <!-- 二级页面：链接转附件 -->
   <UrlToAttachment v-if="currentPage === 'urlToAttachment'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：写入性能测试 -->
-  <!-- <WritePerformanceTest v-if="currentPage === 'writePerformanceTest'" @back="currentPage = 'home'" /> -->
 
-  <!-- 二级页面：BaseId 调试 -->
-  <!-- <BaseIdDebug v-if="currentPage === 'baseIdDebug'" @back="currentPage = 'home'" /> -->
-
-  <!-- <SentryTest v-if="currentPage === 'sentryTest'" @back="currentPage = 'home'" /> -->
 </template>
 
 <style scoped>

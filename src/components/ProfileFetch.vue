@@ -15,7 +15,8 @@ const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 const MANUAL_TABLE_BASE_NAME = '社媒数据助手';
 const STREAM_TASK_STORAGE_KEY = 'profile_fetch_stream_task_v1';
-const STREAM_RESULT_LIMIT = 20;
+const STREAM_RESULT_LIMIT = 40;
+const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
 const STREAM_ACTIVE_INTERVAL = 2000;
 const STREAM_MAX_INTERVAL = 30000;
 const STREAM_STALL_TIMEOUT = 10 * 60 * 1000;
@@ -585,7 +586,7 @@ const getStreamProgressText = (taskStatus, streamTask) => {
   const processed = Number(taskStatus.processed) || 0;
   const total = Number(taskStatus.total) || 0;
   const progress = total > 0 ? `${processed}/${total}` : `${processed}`;
-  return `已处理 ${progress} 个主页，已写入 ${streamTask.writtenCount || 0} 条作品`;
+  return `已处理 ${progress} 个主页，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`;
 };
 
 const getProfileTaskStatus = async (taskId) => {
@@ -629,7 +630,7 @@ const drainAvailablePosts = async (streamTask) => {
       throw new Error('结果接口未返回有效的 next_cursor');
     }
 
-    showToast(`正在写入 ${items.length} 条作品...`, true);
+    showToast(`正在写入 ${items.length} 条作品，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true);
     const result = await createAndWriteData(
       items,
       streamTask.targetTableId ? 'stream' : '',
@@ -638,6 +639,8 @@ const drainAvailablePosts = async (streamTask) => {
       streamTask.selectedFieldKeys,
       {
         stopAfterCurrentBatch: true,
+        attachmentPipeline: true,
+        uploadBatchSize: 5,
         fieldMappings: streamTask.fieldMappings,
         writeMode: streamTask.writeMode,
         upsertCacheKey: streamTask.taskId,
@@ -681,7 +684,7 @@ const finishStreamTask = async (streamTask, taskStatus) => {
     return;
   }
 
-  showCompletionToast(`处理完成，已写入 ${streamTask.writtenCount || 0} 条作品`);
+  showCompletionToast(`处理完成，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`);
 };
 
 const scheduleStreamPoll = (streamTask, delay) => {
@@ -818,7 +821,7 @@ const resumeSavedStreamTask = async () => {
     };
     activeProfileTaskId.value = activeStreamTask.taskId;
     loading.value = true;
-    showToast('正在恢复未完成的博主作品采集任务...', true);
+    showToast(`正在恢复未完成的博主作品采集任务...${TASK_TOAST_SUFFIX}`, true);
     await pollStreamTask(activeStreamTask);
   } catch (error) {
     console.error('恢复博主作品采集任务失败:', error);
@@ -892,23 +895,29 @@ const loadTableOptions = async () => {
 const loadFieldOptions = async ({ silent = false } = {}) => {
   try {
     const table = await bitable.base.getActiveTable();
-    const fieldList = await table.getFieldList();
+    const view = await table.getActiveView();
+    // 视图字段元数据按列顺序返回，数据表字段列表不保证与视图顺序一致。
+    const fieldList = await view.getFieldMetaList();
     const urlFieldList = fieldList.filter(item =>
       item.type === FieldType.Url || item.type === FieldType.Text
     );
 
-    fieldOptions.value = await Promise.all(
-      urlFieldList.map(async (field) => ({
-        id: field.id,
-        name: await field.getName(),
-      }))
-    );
+    fieldOptions.value = urlFieldList.map(field => ({
+      id: field.id,
+      name: field.name,
+    }));
   } catch (error) {
     console.error('获取字段列表失败:', error);
     fieldOptions.value = [{ id: 'nodata', name: '获取字段列表失败' }];
     if (!silent) {
       showErrorMsg('当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。');
     }
+  }
+};
+
+const handleLinkFieldDropdownVisibleChange = (visible) => {
+  if (visible) {
+    loadFieldOptions({ silent: true });
   }
 };
 
@@ -1299,6 +1308,7 @@ const handleImmediateSubmit = async () => {
 
     if (normalizeTargetType(formData.value.targetType) === 'existing') {
       const isValid = await validateTableFields(formData.value.targetTableId, selectedFieldKeys.value, {
+        successMessageSuffix: `，${TASK_TOAST_SUFFIX}`,
         fieldMappings: cloneFieldMappings(mappingDraft.value),
         writeMode: formData.value.writeMode,
       });
@@ -1314,6 +1324,22 @@ const handleImmediateSubmit = async () => {
     showErrorMsg(error.message || '提交失败，请稍后重试');
   } finally {
     isSubmitting.value = false;
+  }
+};
+
+const taskActionState = computed(() => {
+  if (isCancelling.value) return 'stopping';
+  if (loading.value && activeProfileTaskId.value) return 'running';
+  if (loading.value || isSubmitting.value) return 'submitting';
+  return 'idle';
+});
+
+const handleTaskAction = () => {
+  if (taskActionState.value === 'running') {
+    return cancelProfileTask();
+  }
+  if (taskActionState.value === 'idle') {
+    return handleImmediateSubmit();
   }
 };
 
@@ -1829,8 +1855,11 @@ watch(
             </div>
             <el-select
               v-model="formData.profileLinkFieldId"
-              placeholder="选择字段"
+              filterable
+              placeholder="输入字段名称搜索或选择"
+              no-match-text="未找到匹配字段"
               style="width: 100%"
+              @visible-change="handleLinkFieldDropdownVisibleChange"
             >
               <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
             </el-select>
@@ -2015,10 +2044,13 @@ watch(
       </el-form>
 
       <div v-if="formData.executionMode === 'immediate'" class="action-group">
-        <div class="task-actions">
-          <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="handleImmediateSubmit">立即执行</el-button>
-          <el-button v-if="loading && activeProfileTaskId" class="cancel-btn" :loading="isCancelling" :disabled="isCancelling" @click="cancelProfileTask">停止任务</el-button>
-        </div>
+        <el-button
+          class="commit-btn"
+          :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
+          :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
+          :disabled="taskActionState === 'submitting' || taskActionState === 'stopping'"
+          @click="handleTaskAction"
+        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : '立即执行' }}</el-button>
       </div>
 
       <div v-else class="schedule-inline-panel">
@@ -2208,7 +2240,14 @@ watch(
 
               <el-form-item>
                 <div class="c-label">作者主页链接所在字段</div>
-                <el-select v-model="taskDialogForm.profileLinkFieldId" placeholder="请选择字段" style="width: 100%">
+                <el-select
+                  v-model="taskDialogForm.profileLinkFieldId"
+                  filterable
+                  placeholder="输入字段名称搜索或选择"
+                  no-match-text="未找到匹配字段"
+                  style="width: 100%"
+                  @visible-change="handleLinkFieldDropdownVisibleChange"
+                >
                   <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
                 </el-select>
                 <div class="sub-hint">定时执行时会使用当前页面所属表和视图。编辑前请先打开对应数据表。</div>
@@ -2698,19 +2737,18 @@ watch(
 .action-group {
   margin-top: 8px;
 }
-.task-actions {
-  display: flex;
-  gap: 8px;
-}
-.task-actions .commit-btn {
-  flex: 1;
-}
-.cancel-btn {
-  width: 104px;
-  height: 36px;
-  margin: 0;
-  border-color: #d5495c;
+.commit-btn.is-running {
+  background: #fff;
+  border: 1px solid #d5495c;
   color: #a8071a;
+}
+.commit-btn.is-running:hover { background: #fff1f2; }
+.commit-btn.is-running:active { background: #ffe4e6; }
+.commit-btn.is-running.is-disabled {
+  background: #fafafa;
+  border-color: #e5e6eb;
+  color: #86909c;
+  cursor: not-allowed;
 }
 .profile-progress {
   text-align: center;
@@ -3384,6 +3422,8 @@ watch(
 }
 
 .toast-wrap {
+  width: max-content;
+  max-width: calc(100vw - 32px);
   position: fixed;
   top: 50%;
   left: 50%;
@@ -3409,9 +3449,13 @@ watch(
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
   font-size: 14px;
+  line-height: 22px;
   font-weight: 500;
   color: #1D2129;
-  white-space: nowrap;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .toast-icon {

@@ -235,18 +235,18 @@ function getSummary(item) {
 const getFieldListByType = async () => {
   try {
     const table = await bitable.base.getActiveTable();
-    const fieldList = await table.getFieldList();
+    const view = await table.getActiveView();
+    // 视图字段元数据按列顺序返回，数据表字段列表不保证与视图顺序一致。
+    const fieldList = await view.getFieldMetaList();
 
     const urlFieldList = fieldList.filter(
       (item) => item.type === FieldType.Url || item.type === FieldType.Text
     );
 
-    fieldOptions.value = await Promise.all(
-      urlFieldList.map(async (field) => ({
-        id: field.id,
-        name: await field.getName(),
-      }))
-    );
+    fieldOptions.value = urlFieldList.map(field => ({
+      id: field.id,
+      name: field.name,
+    }));
   } catch (error) {
     console.error("获取字段列表失败:", error);
     fieldOptions.value = [{ id: "nodata", name: "获取字段列表失败" }];
@@ -264,6 +264,12 @@ const loadFieldOptions = async ({ silent = false } = {}) => {
         duration: 0,
       });
     }
+  }
+};
+
+const handleLinkFieldDropdownVisibleChange = (visible) => {
+  if (visible) {
+    loadFieldOptions({ silent: true });
   }
 };
 
@@ -914,6 +920,15 @@ const handleSubmit = async () => {
   await handleTableModeSubmit();
 };
 
+const handleTaskAction = () => {
+  if (stopRequested.value) return;
+  if (loading.value) {
+    requestStop();
+    return;
+  }
+  return handleSubmit();
+};
+
 const stepNumber = (delta) => {
   let val = formData.value.rowCount || 5;
   val = Math.max(1, Math.min(100, val + delta));
@@ -1026,8 +1041,11 @@ watch(() => formData.value.targetType, async (type) => {
             </div>
             <el-select
               v-model="formData.videoLinkFieldId"
-              placeholder="选择字段"
+              filterable
+              placeholder="输入字段名称搜索或选择"
+              no-match-text="未找到匹配字段"
               style="width: 100%"
+              @visible-change="handleLinkFieldDropdownVisibleChange"
             >
               <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
             </el-select>
@@ -1141,10 +1159,13 @@ watch(() => formData.value.targetType, async (type) => {
         </div>
       </el-form>
 
-      <div class="task-actions">
-        <el-button color="#a8071a" class="commit-btn" :loading="loading" :disabled="loading" @click="handleSubmit">立即执行</el-button>
-        <el-button v-if="loading" class="cancel-btn" :disabled="stopRequested" @click="requestStop">{{ stopRequested ? '正在停止' : '停止任务' }}</el-button>
-      </div>
+      <el-button
+        class="commit-btn"
+        :class="{ 'is-running': loading }"
+        :loading="stopRequested"
+        :disabled="stopRequested"
+        @click="handleTaskAction"
+      >{{ stopRequested ? '正在停止…' : loading ? '停止任务' : '立即执行' }}</el-button>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">
@@ -1286,19 +1307,18 @@ watch(() => formData.value.targetType, async (type) => {
 .commit-btn:active {
   background: #8a0515;
 }
-.task-actions {
-  display: flex;
-  gap: 8px;
-}
-.task-actions .commit-btn {
-  flex: 1;
-}
-.cancel-btn {
-  width: 104px;
-  height: 40px;
-  margin: 0;
-  border-color: #d5495c;
+.commit-btn.is-running {
+  background: #fff;
+  border: 1px solid #d5495c;
   color: #a8071a;
+}
+.commit-btn.is-running:hover { background: #fff1f2; }
+.commit-btn.is-running:active { background: #ffe4e6; }
+.commit-btn.is-running.is-disabled {
+  background: #fafafa;
+  border-color: #e5e6eb;
+  color: #86909c;
+  cursor: not-allowed;
 }
 .c-label {
   display: flex;
