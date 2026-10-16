@@ -689,6 +689,22 @@ const commit = async () => {
   }
 };
 
+const taskActionState = computed(() => {
+  if (isCancelling.value) return 'stopping';
+  if (loading.value && activeKeywordTaskId.value) return 'running';
+  if (loading.value || isSubmitting.value) return 'submitting';
+  return 'idle';
+});
+
+const handleTaskAction = () => {
+  if (taskActionState.value === 'running') {
+    return cancelKeywordTask();
+  }
+  if (taskActionState.value === 'idle') {
+    return commit();
+  }
+};
+
 watch(selectedFieldKeys, (keys) => {
   if (!fieldSelectionReady.value) {
     return;
@@ -1050,10 +1066,13 @@ watch(selectedFieldKeys, (keys) => {
         </section>
       </el-form>
 
-      <div class="task-actions">
-        <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="loading || isSubmitting" @click="commit">立即执行</el-button>
-        <el-button v-if="loading && activeKeywordTaskId" class="cancel-btn" :loading="isCancelling" :disabled="isCancelling" @click="cancelKeywordTask">停止任务</el-button>
-      </div>
+      <el-button
+        class="commit-btn"
+        :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
+        :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
+        :disabled="taskActionState === 'submitting' || taskActionState === 'stopping'"
+        @click="handleTaskAction"
+      >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : '立即执行' }}</el-button>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">
@@ -1204,19 +1223,18 @@ watch(selectedFieldKeys, (keys) => {
 }
 .commit-btn:hover { background: #C11126; }
 .commit-btn:active { background: #8A0515; }
-.task-actions {
-  display: flex;
-  gap: 8px;
-}
-.task-actions .commit-btn {
-  flex: 1;
-}
-.cancel-btn {
-  width: 104px;
-  height: 40px;
-  margin: 0;
-  border-color: #d5495c;
+.commit-btn.is-running {
+  background: #fff;
+  border: 1px solid #d5495c;
   color: #a8071a;
+}
+.commit-btn.is-running:hover { background: #fff1f2; }
+.commit-btn.is-running:active { background: #ffe4e6; }
+.commit-btn.is-running.is-disabled {
+  background: #fafafa;
+  border-color: #e5e6eb;
+  color: #86909c;
+  cursor: not-allowed;
 }
 .toast-wrap { width: max-content; max-width: calc(100vw - 32px); position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.95); z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; }
 .toast-wrap.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
