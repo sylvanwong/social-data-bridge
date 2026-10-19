@@ -589,6 +589,15 @@ const getStreamProgressText = (taskStatus, streamTask) => {
   return `已处理 ${progress} 个主页，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`;
 };
 
+const getStoppingText = (streamTask) => {
+  const total = streamTask.totalPosts;
+  if (total === undefined || total === null) {
+    return '正在停止任务，等待剩余作品写入完成后停止，避免已获取数据丢失';
+  }
+  const remaining = Math.max(0, total - (streamTask.writtenCount || 0));
+  return `正在停止任务，剩余${remaining}条作品未写入，等待写入完成后停止，避免已获取数据丢失`;
+};
+
 const getProfileTaskStatus = async (taskId) => {
   const response = await request({
     url: `/social/api/v1/feishu/social/task?task_id=${encodeURIComponent(taskId)}`,
@@ -610,6 +619,12 @@ const readAvailablePosts = async (streamTask) => {
     },
   });
   const data = unwrapApiData(response.data);
+  if (data.count !== undefined && data.count !== null && data.count !== '') {
+    const total = Number(data.count);
+    if (Number.isSafeInteger(total) && total >= 0) {
+      streamTask.totalPosts = total;
+    }
+  }
   return {
     items: Array.isArray(data.data) ? data.data : (Array.isArray(data.items) ? data.items : []),
     nextCursor: data.next_cursor || streamTask.cursor || '',
@@ -630,7 +645,9 @@ const drainAvailablePosts = async (streamTask) => {
       throw new Error('结果接口未返回有效的 next_cursor');
     }
 
-    showToast(`正在写入 ${items.length} 条作品，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true);
+    showToast(isCancelling.value
+      ? getStoppingText(streamTask)
+      : `正在写入 ${items.length} 条作品，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true);
     const result = await createAndWriteData(
       items,
       streamTask.targetTableId ? 'stream' : '',
@@ -720,16 +737,14 @@ const pollStreamTask = async (streamTask) => {
 
     if (taskStatus.status_text === 'cancel_requested' || taskStatus.cancel_requested) {
       isCancelling.value = true;
-      showToast(`正在停止任务，已写入 ${streamTask.writtenCount || 0} 条作品`, true);
-    } else {
-      showToast(getStreamProgressText(taskStatus, streamTask), true);
     }
+    showToast(isCancelling.value ? getStoppingText(streamTask) : getStreamProgressText(taskStatus, streamTask), true);
     const wroteData = await drainAvailablePosts(streamTask);
     if (wroteData) {
       streamTask.pollInterval = STREAM_ACTIVE_INTERVAL;
       showToast(
-        taskStatus.status_text === 'cancel_requested' || taskStatus.cancel_requested
-          ? `正在停止任务，已写入 ${streamTask.writtenCount || 0} 条作品`
+        isCancelling.value
+          ? getStoppingText(streamTask)
           : getStreamProgressText(taskStatus, streamTask),
         true
       );
@@ -858,7 +873,7 @@ const cancelProfileTask = async () => {
   }
 
   isCancelling.value = true;
-  showToast(`正在停止任务，已写入 ${activeStreamTask.writtenCount || 0} 条作品`, true);
+  showToast(getStoppingText(activeStreamTask), true);
   try {
     const response = await request({
       url: '/social/api/v1/feishu/social/task/cancel',
