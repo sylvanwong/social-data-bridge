@@ -332,11 +332,30 @@ const saveSelectedFieldKeys = async (keys) => {
   }
 };
 
+const getStoppingText = (task) => {
+  if (task.totalPosts === undefined || task.totalPosts === null) {
+    return '正在停止任务，等待剩余作品写入完成后停止，避免已获取数据丢失';
+  }
+  const remaining = Math.max(0, task.totalPosts - (task.writtenCount || 0));
+  return `正在停止任务，剩余${remaining}条作品未写入，等待写入完成后停止，避免已获取数据丢失`;
+};
+
 const keywordStreamTask = useIncrementalTask({
   storageKey: STREAM_TASK_STORAGE_KEY,
   isTerminal: (status) => [1, 2, 3].includes(Number(status.status)),
   getStatus: async (task) => (await request({ url: `/social/api/v1/feishu/keyword/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', headers: { authorization: `Bearer ${props.api_key}` } })).data,
-  getResults: async (task) => (await request({ url: '/social/api/v1/feishu/post/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 } })).data,
+  getResults: async (task) => {
+    const response = await request({ url: '/social/api/v1/feishu/post/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 } });
+    const res = response.data;
+    const data = res?.sta !== undefined ? (res.sta === 0 ? res.data : null) : res;
+    if (data?.count !== undefined && data.count !== null && data.count !== '') {
+      const total = Number(data.count);
+      if (Number.isSafeInteger(total) && total >= 0) {
+        task.totalPosts = total;
+      }
+    }
+    return res;
+  },
   writeBatch: async (items, task) => {
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', task.selectedFieldKeys, {
       stopAfterCurrentBatch: true,
@@ -356,13 +375,15 @@ const keywordStreamTask = useIncrementalTask({
       isCancelling.value = true;
     }
     showToast(
-      status.status_text === 'cancel_requested' || status.cancel_requested
-        ? `正在停止任务，已写入 ${task.writtenCount || 0} 条作品`
+      isCancelling.value
+        ? getStoppingText(task)
         : `已处理 ${total ? `${processed}/${total}` : processed} 个搜索页，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`,
       true
     );
   },
-  onWriting: (items, task) => showToast(`正在写入 ${items.length} 条作品，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true),
+  onWriting: (items, task) => showToast(isCancelling.value
+    ? getStoppingText(task)
+    : `正在写入 ${items.length} 条作品，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true),
   onFinish: async (status, task) => {
     loading.value = false;
     isCancelling.value = false;
@@ -388,7 +409,7 @@ const cancelKeywordTask = async () => {
   if (!task?.taskId || isCancelling.value) return;
 
   isCancelling.value = true;
-  showToast(`正在停止任务，已写入 ${task.writtenCount || 0} 条作品`, true);
+  showToast(getStoppingText(task), true);
   try {
     const response = await request({
       url: '/social/api/v1/feishu/keyword/task/cancel',
