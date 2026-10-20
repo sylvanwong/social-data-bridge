@@ -12,6 +12,8 @@ import XhsDownload from './XhsDownload.vue'
 import UrlToAttachment from './UrlToAttachment.vue'
 import SeriesFetch from './SeriesFetch.vue'
 import HotListFetch from './HotListFetch.vue'
+import UserSearch from './UserSearch.vue'
+import SearchSuggestions from './SearchSuggestions.vue'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
 const api_key = ref("");
@@ -236,6 +238,30 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           </div>
           <span class="func-name">链接转附件</span>
         </div>
+        <!-- 作者搜索（新增） -->
+        <div class="arco-card" @click="currentPage = 'userSearch'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <circle cx="9" cy="7" r="4"></circle>
+              <path d="M2 21v-2a4 4 0 0 1 4-4h6a4 4 0 0 1 2.44.83"></path>
+              <circle cx="17" cy="17" r="3"></circle>
+              <line x1="21.5" y1="21.5" x2="19.3" y2="19.3"></line>
+            </svg>
+          </div>
+          <span class="func-name">作者搜索 <span class="new-badge">NEW</span></span>
+        </div>
+        <!-- 搜索推荐词（新增） -->
+        <div class="arco-card" @click="currentPage = 'searchSuggestions'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <rect x="3" y="4" width="18" height="16" rx="2" ry="2"></rect>
+              <line x1="7" y1="9" x2="17" y2="9"></line>
+              <line x1="7" y1="13" x2="13" y2="13"></line>
+              <line x1="7" y1="17" x2="10" y2="17"></line>
+            </svg>
+          </div>
+          <span class="func-name">搜索推荐词 <span class="new-badge">NEW</span></span>
+        </div>
       </div>
     </div>
   </div>
@@ -275,6 +301,11 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   <!-- 二级页面：链接转附件 -->
   <UrlToAttachment v-if="currentPage === 'urlToAttachment'" :api_key="api_key" @back="currentPage = 'home'" />
 
+  <!-- 二级页面：作者搜索（新增） -->
+  <UserSearch v-if="currentPage === 'userSearch'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：搜索推荐词（新增） -->
+  <SearchSuggestions v-if="currentPage === 'searchSuggestions'" :api_key="api_key" @back="currentPage = 'home'" />
 
 </template>
 
@@ -588,4 +619,17 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 }
 .arco-card:active .func-icon { color: #8A0515; }
 .arco-card:active .func-name { color: #8A0515; }
+
+.new-badge {
+  display: inline-block;
+  margin-left: 2px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #A8071A;
+  color: #FFFFFF;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  vertical-align: 2px;
+}
 </style>

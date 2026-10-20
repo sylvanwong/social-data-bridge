@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>社媒数据助手 · 新增功能设计稿（博主搜索 / 搜索联想）</title>
+<style>
+  :root{
+    --red:#A8071A;
+    --red-hover:#C11126;
+    --red-active:#8A0515;
+    --red-bg:#FFF0F2;
+    --red-bg2:#FFF1F2;
+    --ink:#1D2129;
+    --ink-2:#4E5969;
+    --ink-3:#86909C;
+    --line:#E5E6EB;
+    --line-soft:#F0F1F3;
+    --fill:#F2F3F5;
+    --page-bg:#FFFCFC;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{
+    font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:#F7F8FA;
+    color:var(--ink);
+    padding:40px 32px 64px;
+  }
+  .doc-header{max-width:1800px;margin:0 auto 28px;}
+  .doc-header h1{font-size:22px;font-weight:600;color:var(--ink);}
+  .doc-header p{font-size:13px;color:var(--ink-3);margin-top:6px;line-height:20px;}
+  .doc-header p b{color:var(--red);font-weight:500;}
+  .frames{max-width:1800px;margin:0 auto;display:flex;flex-wrap:wrap;gap:36px;align-items:flex-start;}
+  .frame-col{width:549px;flex:0 0 auto;}
+  .frame-label{display:flex;align-items:baseline;gap:8px;margin-bottom:10px;}
+  .frame-label .num{font-size:12px;font-weight:600;color:var(--red);background:var(--red-bg2);border-radius:4px;padding:1px 7px;}
+  .frame-label .txt{font-size:14px;font-weight:600;color:var(--ink);}
+  .frame-label .sub{font-size:12px;color:var(--ink-3);}
+  .phone{
+    width:549px;
+    background:var(--page-bg);
+    border:1px solid var(--line);
+    border-radius:12px;
+    overflow:hidden;
+    box-shadow:0 4px 20px rgba(29,33,41,.06);
+  }
+  /* ===== 顶部导航栏（首页） ===== */
+  .topbar{
+    display:flex;align-items:center;gap:10px;
+    height:44px;padding:0 14px;
+    background:#fff;border-bottom:1px solid var(--line-soft);
+  }
+  .topbar .menu{width:16px;height:16px;color:var(--ink-2);}
+  .topbar .menu svg{width:100%;height:100%;stroke:currentColor;stroke-width:1.8;fill:none;stroke-linecap:round;}
+  .topbar .app-name{font-size:14px;font-weight:500;color:var(--ink);}
+  .topbar .spacer{flex:1;}
+  .topbar .tool{width:14px;height:14px;color:var(--ink-3);margin-left:12px;}
+  .topbar .tool svg{width:100%;height:100%;stroke:currentColor;stroke-width:1.8;fill:none;stroke-linecap:round;stroke-linejoin:round;}
+  /* ===== 首页内容 ===== */
+  .home-body{padding:10px 20px 24px;}
+  .banner{
+    position:relative;overflow:hidden;
+    margin:10px 0 20px;
+    padding:20px;
+    background:linear-gradient(135deg,#FFF0F2 0%,#FFE6E9 100%);
+    border-radius:8px;
+  }
+  .banner::before{content:'';position:absolute;top:-24px;right:-24px;width:120px;height:120px;border-radius:50%;background:#FFB3BB;opacity:.15;filter:blur(24px);}
+  .banner .help{position:absolute;top:16px;right:16px;display:flex;align-items:center;gap:4px;font-size:12px;color:var(--ink-3);}
+  .banner .help svg{width:14px;height:14px;stroke:var(--ink-3);stroke-width:1.8;fill:none;stroke-linecap:round;}
+  .banner .t{font-size:20px;font-weight:600;line-height:28px;margin-bottom:8px;position:relative;}
+  .banner .s{font-size:14px;color:var(--ink-2);line-height:22px;margin-bottom:16px;position:relative;}
+  .banner .s .hl{color:var(--red);font-weight:500;}
+  .banner .btn{
+    display:inline-flex;align-items:center;gap:6px;
+    height:32px;padding:0 16px;border-radius:6px;
+    background:var(--red);color:#fff;font-size:14px;font-weight:500;position:relative;
+  }
+  .banner .btn svg{width:14px;height:14px;stroke:#fff;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round;}
+  .api-card{
+    background:#fff;border:1px solid rgba(0,0,0,.06);border-radius:8px;
+    padding:16px;
+  }
+  .api-card .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;}
+  .api-card .hd .l{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:600;}
+  .api-card .hd .l a{font-size:13px;color:var(--red);font-weight:400;text-decoration:none;}
+  .api-card .hd .edit{width:18px;height:18px;color:var(--ink-3);}
+  .api-card .hd .edit svg{width:100%;height:100%;stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round;}
+  .api-card .ipt{height:30px;border-radius:4px;background:var(--fill);position:relative;overflow:hidden;}
+  .api-card .ipt::after{content:'';position:absolute;inset:9px 10px;background:repeating-linear-gradient(90deg,#C9CDD4 0 3px,transparent 3px 6px);border-radius:2px;}
+  .group-title{font-size:14px;font-weight:400;color:var(--ink-3);margin:32px 0 8px;letter-spacing:.3px;line-height:22px;}
+  .cards-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .card{
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    padding:22px 8px 20px;
+    background:#fff;border:1px solid var(--line);border-radius:8px;
+    position:relative;
+  }
+  .card .ico{width:24px;height:24px;margin-bottom:10px;color:var(--red);}
+  .card .ico svg{width:100%;height:100%;stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round;}
+  .card .nm{font-size:14px;font-weight:500;color:var(--ink);line-height:22px;text-align:center;}
+  .card.new{border-color:#F1B5BE;box-shadow:0 0 0 3px rgba(168,7,26,.05);}
+  .card .tag-new{
+    position:absolute;top:8px;right:8px;
+    font-size:10px;font-weight:600;color:var(--red);
+    background:var(--red-bg2);border-radius:4px;padding:1px 5px;line-height:16px;
+  }
+  /* ===== 二级页 ===== */
+  .sub-header{
+    display:grid;grid-template-columns:32px minmax(0,1fr);align-items:center;gap:8px;
+    min-height:48px;padding:0 8px;
+    background:#fff;border-bottom:1px solid var(--line);
+  }
+  .sub-header .back{width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:var(--ink-2);}
+  .sub-header .back svg{width:16px;height:16px;stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round;}
+  .sub-header .title{font-size:18px;font-weight:600;color:var(--ink);line-height:24px;}
+  .sub-body{padding:16px;}
+  .form-card{
+    background:#fff;border:1px solid var(--line);border-radius:8px;
+    padding:20px;
+  }
+  .sec-head{display:flex;align-items:center;gap:8px;margin-bottom:14px;font-size:16px;font-weight:500;color:var(--ink);}
+  .sec-head .step{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:20px;height:20px;border-radius:50%;
+    color:var(--red);background:var(--red-bg2);font-size:12px;font-weight:600;
+  }
+  .sec{border-top:1px solid var(--line-soft);margin-top:20px;padding-top:20px;}
+  .field{margin-bottom:16px;}
+  .label{font-size:14px;font-weight:500;color:var(--ink);margin-bottom:8px;display:flex;align-items:center;gap:4px;}
+  .select{
+    display:flex;align-items:center;justify-content:space-between;
+    height:36px;padding:0 12px;
+    border:1px solid var(--line);border-radius:6px;background:#fff;
+    font-size:14px;color:var(--ink);
+  }
+  .select.placeholder{color:#C9CDD4;}
+  .select .chev{width:10px;height:10px;border-right:1.5px solid var(--ink-3);border-bottom:1.5px solid var(--ink-3);transform:rotate(45deg) translateY(-2px);}
+  .textarea{
+    border:1px solid var(--line);border-radius:6px;background:#fff;
+    padding:8px 12px;min-height:80px;font-size:14px;color:var(--ink);line-height:22px;
+  }
+  .textarea::placeholder{color:#C9CDD4;}
+  .radio-row{display:flex;align-items:center;gap:24px;}
+  .radio{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink);}
+  .radio .dot{width:16px;height:16px;border-radius:50%;border:1px solid var(--line);background:#fff;flex-shrink:0;}
+  .radio.on .dot{border:4px solid var(--red);background:#fff;border-radius:50%;}
+  .stepper{
+    display:flex;align-items:center;width:80px;height:32px;
+    border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#fff;
+  }
+  .stepper input{width:100%;border:0;outline:0;text-align:center;font-size:14px;color:var(--ink);background:transparent;}
+  .stepper .btns{display:flex;flex-direction:column;width:28px;height:100%;border-left:1px solid var(--line);background:var(--fill);flex-shrink:0;}
+  .stepper .btns i{flex:1;position:relative;}
+  .stepper .btns i:first-child{border-bottom:1px solid var(--line);}
+  .stepper .btns i::before{content:'';position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border-left:4px solid transparent;border-right:4px solid transparent;}
+  .stepper .btns i.up::before{border-bottom:4px solid var(--ink-3);margin-top:-2px;}
+  .stepper .btns i.down::before{border-top:4px solid var(--ink-3);margin-top:2px;}
+  .field-block{margin-bottom:4px;}
+  .check-all{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500;color:var(--red);margin-bottom:10px;}
+  .checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px;}
+  .check{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink);}
+  .check .box{
+    width:16px;height:16px;border-radius:4px;border:1px solid var(--line);background:#fff;flex-shrink:0;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .check.on .box{background:var(--red);border-color:var(--red);}
+  .check.on .box svg{width:10px;height:10px;stroke:#fff;stroke-width:2.4;fill:none;stroke-linecap:round;stroke-linejoin:round;}
+  .mapping{
+    border-top:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft);
+    margin:14px 0 16px;
+  }
+  .mapping .trig{display:flex;align-items:center;justify-content:space-between;min-height:48px;padding:12px 0;cursor:pointer;}
+  .mapping .trig .l{font-size:14px;font-weight:500;color:var(--ink);}
+  .mapping .trig .l .opt{color:var(--ink-3);font-size:12px;font-weight:400;margin-left:4px;}
+  .mapping .trig .l .st{color:var(--ink-3);font-size:12px;font-weight:400;margin-left:8px;}
+  .mapping .trig .chev{width:8px;height:8px;border-right:1.5px solid var(--ink-3);border-bottom:1.5px solid var(--ink-3);transform:rotate(45deg) translateY(-2px);margin-right:4px;}
+  .exec{margin-bottom:16px;}
+  .exec .label{margin-bottom:8px;}
+  .commit{
+    width:100%;height:36px;border-radius:6px;
+    background:var(--red);color:#fff;font-size:14px;font-weight:500;
+    display:flex;align-items:center;justify-content:center;
+  }
+  /* 搜索联想下拉示意 */
+  .sug-wrap{position:relative;}
+  .sug-input{
+    display:flex;align-items:center;height:36px;padding:0 12px;
+    border:1px solid var(--red);border-radius:6px;background:#fff;font-size:14px;color:var(--ink);
+    box-shadow:0 0 0 3px rgba(168,7,26,.06);
+  }
+  .sug-input .caret{width:1px;height:16px;background:var(--red);margin-left:2px;animation:blink 1s step-end infinite;}
+  @keyframes blink{50%{opacity:0;}}
+  .sug-panel{
+    position:absolute;top:40px;left:0;right:0;z-index:5;
+    background:#fff;border:1px solid var(--line);border-radius:8px;
+    box-shadow:0 8px 24px rgba(29,33,41,.12);
+    overflow:hidden;
+  }
+  .sug-panel .cap{
+    display:flex;align-items:center;gap:6px;
+    padding:8px 12px 4px;font-size:12px;color:var(--ink-3);
+  }
+  .sug-panel .cap svg{width:12px;height:12px;stroke:var(--ink-3);stroke-width:1.8;fill:none;stroke-linecap:round;}
+  .sug-item{display:flex;align-items:center;gap:10px;padding:9px 12px;font-size:14px;color:var(--ink);}
+  .sug-item .word{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .sug-item .word em{font-style:normal;color:var(--red);}
+  .sug-item .type{
+    flex-shrink:0;font-size:11px;line-height:18px;padding:0 8px;border-radius:4px;
+    color:var(--ink-2);background:var(--fill);
+  }
+  .sug-item .type.hot{color:var(--red);background:var(--red-bg2);}
+  .sug-item.hover{background:var(--red-bg2);}
+  .sug-item .search-ico{width:12px;height:12px;flex-shrink:0;color:var(--ink-3);}
+  .sug-item .search-ico svg{width:100%;height:100%;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;}
+  .sug-note{margin-top:64px;font-size:12px;color:var(--ink-3);line-height:20px;}
+  /* ===== 设计说明 ===== */
+  .notes{max-width:1800px;margin:44px auto 0;}
+  .notes h2{font-size:16px;font-weight:600;margin-bottom:14px;}
+  .notes-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;}
+  .note-card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px 20px;}
+  .note-card h3{font-size:14px;font-weight:600;color:var(--ink);margin-bottom:10px;display:flex;align-items:center;gap:8px;}
+  .note-card h3 .dot-r{width:6px;height:6px;border-radius:50%;background:var(--red);flex-shrink:0;}
+  .note-card ul{list-style:none;}
+  .note-card li{font-size:13px;color:var(--ink-2);line-height:22px;padding-left:14px;position:relative;margin-bottom:6px;}
+  .note-card li::before{content:'';position:absolute;left:2px;top:9px;width:5px;height:5px;border-radius:50%;background:#F1B5BE;}
+  .note-card li b{color:var(--ink);font-weight:500;}
+  .note-card code{font-size:12px;background:var(--fill);border-radius:4px;padding:1px 5px;color:var(--red);}
+</style>
+</head>
+<body>
+
+<div class="doc-header">
+  <h1>社媒数据助手 · 新增功能设计稿</h1>
+  <p>新增两个功能点：<b>博主搜索</b>（输入平台 + 关键词，输出 user_id / 昵称 / 头像 / 粉丝数 / 主页链接 / 认证信息）与 <b>搜索联想</b>（输入平台 + 关键词，实时返回联想词与建议类型）。设计规范完全沿用现有插件：主色 #A8071A、卡片描边 #E5E6EB、设置页「1 获取设置 / 2 输出设置」结构。</p>
+</div>
+
+<div class="frames">
+
+  <!-- ============ 01 首页 ============ -->
+  <div class="frame-col">
+    <div class="frame-label"><span class="num">01</span><span class="txt">首页 · 新增功能板块</span><span class="sub">新增「博主与搜索」分组，置于音视频分组下方</span></div>
+    <div class="phone">
+      <div class="topbar">
+        <span class="menu"><svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></span>
+        <span class="app-name">社媒数据助手</span>
+        <span class="spacer"></span>
+        <span class="tool"><svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>
+        <span class="tool"><svg viewBox="0 0 24 24"><line x1="4" y1="12" x2="20" y2="12"/></svg></span>
+        <span class="tool"><svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></span>
+      </div>
+      <div class="home-body">
+        <div class="banner">
+          <span class="help"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>帮助文档</span>
+          <div class="t">加入交流群</div>
+          <div class="s">使用插件遇问题可进群答疑，<span class="hl">新版本更新群内抢先通知</span></div>
+          <span class="btn"><span>立即进群</span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 16 16 12 12 8"/><line x1="8" y1="12" x2="16" y2="12"/></svg></span>
+        </div>
+
+        <div class="api-card">
+          <div class="hd">
+            <div class="l">API Key 设置<a href="javascript:void(0)">点击获取API密钥</a></div>
+            <span class="edit"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></span>
+          </div>
+          <div class="ipt"></div>
+        </div>
+
+        <div class="group-title">音视频</div>
+        <div class="cards-grid">
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/><polyline points="9 10 12 7 15 10"/></svg></span><span class="nm">作品详情获取</span></div>
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 11l2 2 4-4"/></svg></span><span class="nm">获取作者信息</span></div>
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></span><span class="nm">获取作者作品</span></div>
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span><span class="nm">关键词搜索获取</span></div>
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="2"/><line x1="2" y1="8" x2="22" y2="8"/><line x1="2" y1="16" x2="22" y2="16"/><line x1="8" y1="8" x2="8" y2="22"/><line x1="16" y1="8" x2="16" y2="22"/></svg></span><span class="nm">博主短剧获取</span></div>
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><span class="nm">评论列表获取</span></div>
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></svg></span><span class="nm">热榜获取</span></div>
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="14 3 14 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></span><span class="nm">提取视频文案</span></div>
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><path d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg></span><span class="nm">小红书下载</span></div>
+          <div class="card"><span class="ico"><svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></span><span class="nm">链接转附件</span></div>
+        </div>
+
+        <div class="group-title">博主与搜索</div>
+        <div class="cards-grid">
+          <div class="card new">
+            <span class="tag-new">NEW</span>
+            <span class="ico"><svg viewBox="0 0 24 24"><path d="M14.5 21v-1.5a3.5 3.5 0 0 0-3.5-3.5H6a3.5 3.5 0 0 0-3.5 3.5V21"/><circle cx="8.5" cy="8" r="3.5"/><circle cx="16.5" cy="11.5" r="4"/><line x1="19.5" y1="14.5" x2="22" y2="17"/></svg></span>
+            <span class="nm">博主搜索</span>
+          </div>
+          <div class="card new">
+            <span class="tag-new">NEW</span>
+            <span class="ico"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7"/><line x1="19" y1="19" x2="15.5" y2="15.5"/><path d="M19.5 3.5v4"/><path d="M17.5 5.5h4"/></svg></span>
+            <span class="nm">搜索联想</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 02 博主搜索 设置页 ============ -->
+  <div class="frame-col">
+    <div class="frame-label"><span class="num">02</span><span class="txt">设置页 · 博主搜索</span><span class="sub">沿用「1 获取设置 / 2 输出设置」结构</span></div>
+    <div class="phone">
+      <div class="sub-header">
+        <span class="back"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></span>
+        <span class="title">博主搜索</span>
+      </div>
+      <div class="sub-body">
+        <div class="form-card">
+          <div class="sec" style="border-top:0;margin-top:0;padding-top:0;">
+            <div class="sec-head"><span class="step">1</span><span>获取设置</span></div>
+            <div class="field">
+              <div class="label">平台</div>
+              <div class="select">小红书<span class="chev"></span></div>
+            </div>
+            <div class="field">
+              <div class="label">关键词</div>
+              <div class="textarea">健身餐</div>
+            </div>
+          </div>
+
+          <div class="sec">
+            <div class="sec-head"><span class="step">2</span><span>输出设置</span></div>
+            <div class="field-block">
+              <div class="label">输出字段</div>
+              <div class="check-all">
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span></span>
+                全选
+              </div>
+              <div class="checks">
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>用户ID</span>
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>昵称</span>
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>头像</span>
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>粉丝数</span>
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>主页链接</span>
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>认证信息</span>
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>平台</span>
+              </div>
+            </div>
+            <div class="mapping">
+              <div class="trig">
+                <span class="l">字段映射<span class="opt">（可选）</span><span class="st">尚未设置自定义映射</span></span>
+                <span class="chev"></span>
+              </div>
+            </div>
+            <div class="exec">
+              <div class="label">执行方式</div>
+              <div class="radio-row">
+                <span class="radio on"><span class="dot"></span>立即执行</span>
+                <span class="radio"><span class="dot"></span>定时任务</span>
+              </div>
+            </div>
+          </div>
+          <div class="commit">立即执行</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 03 搜索联想 设置页 ============ -->
+  <div class="frame-col">
+    <div class="frame-label"><span class="num">03</span><span class="txt">设置页 · 搜索联想</span><span class="sub">输入关键词后实时展示联想词与建议类型</span></div>
+    <div class="phone">
+      <div class="sub-header">
+        <span class="back"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg></span>
+        <span class="title">搜索联想</span>
+      </div>
+      <div class="sub-body">
+        <div class="form-card">
+          <div class="sec" style="border-top:0;margin-top:0;padding-top:0;">
+            <div class="sec-head"><span class="step">1</span><span>获取设置</span></div>
+            <div class="field">
+              <div class="label">平台</div>
+              <div class="select">抖音<span class="chev"></span></div>
+            </div>
+            <div class="field" style="margin-bottom:8px;">
+              <div class="label">关键词</div>
+              <div class="sug-wrap">
+                <div class="sug-input">健身<span class="caret"></span></div>
+                <div class="sug-panel">
+                  <div class="cap">
+                    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="19" y1="19" x2="16" y2="16"/></svg>
+                    搜索联想
+                  </div>
+                  <div class="sug-item hover">
+                    <span class="search-ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="19" y1="19" x2="16" y2="16"/></svg></span>
+                    <span class="word"><em>健身</em>餐</span>
+                    <span class="type">普通词</span>
+                  </div>
+                  <div class="sug-item">
+                    <span class="search-ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="19" y1="19" x2="16" y2="16"/></svg></span>
+                    <span class="word"><em>健身</em>房推荐</span>
+                    <span class="type">普通词</span>
+                  </div>
+                  <div class="sug-item">
+                    <span class="search-ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="19" y1="19" x2="16" y2="16"/></svg></span>
+                    <span class="word"><em>健身</em>教练</span>
+                    <span class="type hot">热搜词</span>
+                  </div>
+                  <div class="sug-item">
+                    <span class="search-ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="19" y1="19" x2="16" y2="16"/></svg></span>
+                    <span class="word">减脂<em>健身</em>餐</span>
+                    <span class="type">关联词</span>
+                  </div>
+                  <div class="sug-item">
+                    <span class="search-ico"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="19" y1="19" x2="16" y2="16"/></svg></span>
+                    <span class="word"><em>健身</em>计划</span>
+                    <span class="type">关联词</span>
+                  </div>
+                </div>
+              </div>
+              <div class="sug-note">输入关键词后实时返回联想词与建议类型；建议类型（普通词 / 热搜词 / 关联词）以下拉标签展示。</div>
+            </div>
+          </div>
+
+          <div class="sec" style="margin-top:12px;">
+            <div class="sec-head"><span class="step">2</span><span>输出设置</span></div>
+            <div class="field-block">
+              <div class="label">输出字段</div>
+              <div class="check-all">
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span></span>
+                全选
+              </div>
+              <div class="checks">
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>联想词</span>
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>建议类型</span>
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>关键词</span>
+                <span class="check on"><span class="box"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></span>平台</span>
+              </div>
+            </div>
+            <div class="mapping">
+              <div class="trig">
+                <span class="l">字段映射<span class="opt">（可选）</span><span class="st">尚未设置自定义映射</span></span>
+                <span class="chev"></span>
+              </div>
+            </div>
+            <div class="exec">
+              <div class="label">执行方式</div>
+              <div class="radio-row">
+                <span class="radio on"><span class="dot"></span>立即执行</span>
+                <span class="radio"><span class="dot"></span>定时任务</span>
+              </div>
+            </div>
+          </div>
+          <div class="commit">立即执行</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 设计说明 ============ -->
+<div class="notes">
+  <h2>设计说明</h2>
+  <div class="notes-grid">
+    <div class="note-card">
+      <h3><span class="dot-r"></span>首页 · 新增板块</h3>
+      <ul>
+        <li>新增独立分组「<b>博主与搜索</b>」，置于「音视频」分组下方，与现有信息架构解耦，后续同类功能可继续归入</li>
+        <li>卡片规格完全复用：<b>24px 线性图标（stroke 1.6）+ 14px/500 文案 + #E5E6EB 描边 + 8px 圆角</b>，hover 态沿用现有粉底红边规则</li>
+        <li>「NEW」标记仅为设计稿标注，上线时可去掉</li>
+        <li>图标语义：博主搜索 = 人像 + 放大镜；搜索联想 = 放大镜 + 星号（联想/发散）</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3><span class="dot-r"></span>博主搜索 · 设置页</h3>
+      <ul>
+        <li>获取设置仅两项（<b>平台 + 关键词</b>），与「关键词搜索获取」的表单心智保持一致，关键词支持批量（换行/逗号分隔）</li>
+        <li>输出字段对齐需求：<b>用户ID、昵称、头像、粉丝数、主页链接、认证信息</b>，另含「平台」便于多平台数据混表</li>
+        <li>沿用字段勾选网格（2 列）+ 字段映射折叠条 + 执行方式 + 底部主按钮，与「作品详情获取」页结构一一对应</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <h3><span class="dot-r"></span>搜索联想 · 设置页</h3>
+      <ul>
+        <li>关键词为<b>单行输入框</b>（区别于批量场景），输入后下拉面板实时展示联想词，命中字符标红</li>
+        <li>建议类型用<b>轻量标签</b>呈现：普通词 / 关联词用中性灰底，热搜词用品牌红浅底，克制不抢焦点</li>
+        <li>输出字段：<b>联想词、建议类型、关键词、平台</b>；其余交互（映射、执行方式、主按钮）与现有页面完全一致</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
