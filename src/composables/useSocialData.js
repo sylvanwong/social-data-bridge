@@ -76,6 +76,25 @@ export const PROFILE_FIELD_MAPPING = [
   { key: 'ctime', name: '提取时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
 ];
 
+// 作者搜索和作者信息使用同一组统一字段。user_id 作为作者搜索的稳定唯一键。
+export const BLOGGER_FIELD_MAPPING = [
+  { key: 'nickname', name: '作者名称', legacyNames: ['作者'], type: FieldType.Text, defaultSelected: true },
+  { key: 'uid', name: '作者账号', type: FieldType.Text, defaultSelected: true },
+  { key: 'user_id', name: '作者ID', legacyNames: ['用户ID'], type: FieldType.Text, defaultSelected: true, required: true },
+  { key: 'profile_url', name: '作者主页链接', type: FieldType.Url, defaultSelected: true },
+  { key: 'avatar', name: '作者头像', legacyNames: ['博主头像'], type: FieldType.Text, defaultSelected: true },
+  { key: 'signature', name: '个人简介', type: FieldType.Text, defaultSelected: true },
+  { key: 'follower_count', name: '粉丝数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'following_count', name: '关注数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'total_favorited', name: '获赞数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'aweme_count', name: '作品数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
+  { key: 'verified', name: '认证状态', type: FieldType.Text, defaultSelected: true },
+  { key: 'verification_category', name: '认证类型', type: FieldType.Text, defaultSelected: true },
+  { key: 'social_type', name: '平台', type: FieldType.Text, defaultSelected: true },
+  { key: 'ip_location', name: 'IP属地', type: FieldType.Text, defaultSelected: true },
+  { key: 'ctime', name: '提取时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
+];
+
 export const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
   [FieldType.Number]: '数字',
@@ -387,6 +406,10 @@ const normalizeCellValue = async (table, field, value, config, fieldType, extra 
     return normalizeSelectCompatibleValue(nextValue);
   }
 
+  if (config.key === 'verified' && fieldType === FieldType.Text) {
+    return nextValue === true ? '已认证' : nextValue === false ? '未认证' : String(nextValue ?? '');
+  }
+
   if (config.key === 'tags') {
     return normalizeTagsCompatibleValue(nextValue, fieldType, extra.tagOptionIdMap);
   }
@@ -530,7 +553,7 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
     );
     const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
     if (options.writeMode === 'upsert') {
-      for (const key of ['aweme_id']) {
+      for (const key of [options.uniqueKey || 'aweme_id']) {
         const config = fieldMapping.find(item => item.key === key);
         if (config && !activeFieldMapping.some(item => item.key === key)) activeFieldMapping.push(config);
       }
@@ -709,8 +732,9 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       return;
     }
     const selectedFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
+    const uniqueKey = options.uniqueKey || 'aweme_id';
     const keyConfigs = options.writeMode === 'upsert'
-      ? ['aweme_id'].map(key => fieldMapping.find(config => config.key === key)).filter(Boolean)
+      ? [uniqueKey].map(key => fieldMapping.find(config => config.key === key)).filter(Boolean)
       : [];
     const activeFieldMapping = [...selectedFieldMapping];
     for (const keyConfig of keyConfigs) {
@@ -863,13 +887,13 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       if (options.writeMode === 'upsert') {
         const keyFields = keyConfigs.map(config => availableFieldList.find(item => item.config.key === config.key)?.field);
         if (!keyFields.every(Boolean)) {
-          throw new Error('未找到“作品ID”字段，无法执行更新或新增');
+          throw new Error(`未找到“${keyConfigs[0]?.name || uniqueKey}”字段，无法执行更新或新增`);
         }
 
         const uniqueRecords = new Map();
         let skippedCount = 0;
         list.forEach((item, index) => {
-          const key = buildWorkUniqueKey(item?.aweme_id);
+          const key = buildWorkUniqueKey(item?.[uniqueKey]);
           if (!key) {
             skippedCount += 1;
             return;
@@ -877,7 +901,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
           uniqueRecords.set(key, { record: records[index], fields: normalizedRecords[index] });
         });
         if (skippedCount > 0) {
-          ElMessage({ message: `${skippedCount} 条作品缺少作品ID，未写入`, type: 'warning', plain: true });
+          ElMessage({ message: `${skippedCount} 条数据缺少${keyConfigs[0]?.name || uniqueKey}，未写入`, type: 'warning', plain: true });
         }
 
         const indexCache = options.upsertIndex || upsertIndexCache;
