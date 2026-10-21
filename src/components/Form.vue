@@ -4,6 +4,7 @@ import { ElMessage } from "element-plus";
 import { ref, onMounted } from "vue";
 import ProfileFetch from './ProfileFetch.vue'
 import KeywordSearch from './KeywordSearch.vue'
+import BloggerSearch from './BloggerSearch.vue'
 import CommentFetch from './CommentFetch.vue'
 import VideoDataFetch from './VideoDataFetch.vue'
 import VideoCopySummary from './VideoCopySummary.vue'
@@ -236,6 +237,14 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           </div>
           <span class="func-name">链接转附件</span>
         </div>
+        <div class="arco-card" @click="currentPage = 'bloggerSearch'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <circle cx="10" cy="8" r="4"></circle><path d="M3 21a7 7 0 0 1 14 0"></path><circle cx="18" cy="17" r="3"></circle><path d="m20.2 19.2 2 2"></path>
+            </svg>
+          </div>
+          <span class="func-name">作者搜索获取</span>
+        </div>
       </div>
     </div>
   </div>
@@ -256,6 +265,9 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
   <!-- 二级页面：关键词搜索获取 -->
   <KeywordSearch v-if="currentPage === 'search'" :api_key="api_key" :social_type_options="social_type_options" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：作者搜索获取 -->
+  <BloggerSearch v-if="currentPage === 'bloggerSearch'" :api_key="api_key" :social_type_options="social_type_options" @back="currentPage = 'home'" />
 
   <!-- 二级页面：评论列表获取 -->
   <CommentFetch v-if="currentPage === 'comment'" :api_key="api_key" @back="currentPage = 'home'" />
