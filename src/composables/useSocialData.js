@@ -779,36 +779,28 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
         fieldMetaById = new Map(fieldMetaList.map(meta => [meta.id, meta]));
       }
-      const fieldList = [];
-      for (const config of activeFieldMapping) {
+      const fieldList = await Promise.all(activeFieldMapping.map(async config => {
         const explicitMapping = explicitMappings.get(config.key);
         const matchedField = explicitMapping?.target_field_id
           ? { matchedName: explicitMapping.target_field_name || '', fieldMeta: fieldMetaById.get(explicitMapping.target_field_id) }
           : resolveFieldMetaByConfig(fieldMetaByName, config);
         const fieldId = matchedField?.fieldMeta?.id;
-        if (!fieldId) {
-          fieldList.push({ field: null, config });
-          continue;
-        }
+        if (!fieldId) return { field: null, config };
         try {
           const field = await activeTable.getFieldById(fieldId);
-          fieldList.push({ field, config });
+          const fieldType = await field.getType();
+          return { field, config, fieldType };
         } catch (error) {
           console.error(`获取字段失败：${config.name}`, error);
-          fieldList.push({ field: null, config });
+          return { field: null, config };
         }
-      }
+      }));
 
-      for (const item of fieldList) {
-        if (item.field) {
-          const fieldType = await item.field.getType();
-          item.fieldType = fieldType;
-          if (!isFieldTypeCompatible(fieldType, item.config)) {
-            ElNotification({ title: '出错', message: `字段"${item.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(item.config)}类型，请修改后，点击插件顶部右上角关闭按钮，再重新进入操作`, type: 'error', duration: 0 });
-            resetParams();
-            return;
-          }
-        }
+      const incompatibleField = fieldList.find(item => item.field && !isFieldTypeCompatible(item.fieldType, item.config));
+      if (incompatibleField) {
+        ElNotification({ title: '出错', message: `字段"${incompatibleField.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(incompatibleField.config)}类型，请修改后，点击插件顶部右上角关闭按钮，再重新进入操作`, type: 'error', duration: 0 });
+        resetParams();
+        return;
       }
 
       const availableFieldList = fieldList.filter(item => !!item.field);
@@ -818,17 +810,19 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         return;
       }
 
-      for (const item of availableFieldList) {
+      await Promise.all(availableFieldList.map(async item => {
         item.extra = {};
         if (item.config.key === 'tags') {
           item.extra.tagOptionIdMap = await ensureTagOptions(item.field, list, item.config, item.fieldType);
         }
-        try {
-          await applyFieldDisplayConfig(item.field, item.config);
-        } catch (error) {
-          console.error(`设置字段 ${item.config.name} 格式失败:`, error);
+        if (!options.skipFieldDisplayConfig) {
+          try {
+            await applyFieldDisplayConfig(item.field, item.config);
+          } catch (error) {
+            console.error(`设置字段 ${item.config.name} 格式失败:`, error);
+          }
         }
-      }
+      }));
 
       const attachmentEntries = [];
       for (const fieldItem of availableFieldList) {
@@ -862,20 +856,40 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
 
       let records = [];
       let normalizedRecords = [];
-      for (const item of list) {
-        let record = [];
-        let normalizedRecord = {};
-        for (const { field, config, fieldType } of availableFieldList) {
-          const matchedField = availableFieldList.find(fieldItem => fieldItem.field?.id === field.id && fieldItem.config.key === config.key);
-          const valueKeys = config.valueKeys || [config.key];
-          const sourceValue = valueKeys.reduce((value, key) => value ?? item?.[key], undefined);
-          const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, matchedField?.extra, item, api_key);
-          const cell = await field.createCell(value);
-          record.push(cell);
-          normalizedRecord[field.id] = config.type === FieldType.Attachment ? await cell.getValue() : value;
+      if (options.parallelCellCreation) {
+        const recordChunks = chunkRecords(list, options.cellCreationBatchSize || 50);
+        for (const items of recordChunks) {
+          const prepared = await Promise.all(items.map(async item => {
+            const cells = await Promise.all(availableFieldList.map(async ({ field, config, fieldType, extra }) => {
+              const valueKeys = config.valueKeys || [config.key];
+              const sourceValue = valueKeys.reduce((value, key) => value ?? item?.[key], undefined);
+              const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, extra, item, api_key);
+              const cell = await field.createCell(value);
+              return { cell, fieldId: field.id, value: config.type === FieldType.Attachment ? await cell.getValue() : value };
+            }));
+            return {
+              record: cells.map(entry => entry.cell),
+              normalizedRecord: Object.fromEntries(cells.map(entry => [entry.fieldId, entry.value])),
+            };
+          }));
+          records.push(...prepared.map(item => item.record));
+          normalizedRecords.push(...prepared.map(item => item.normalizedRecord));
         }
-        records.push(record);
-        normalizedRecords.push(normalizedRecord);
+      } else {
+        for (const item of list) {
+          let record = [];
+          let normalizedRecord = {};
+          for (const { field, config, fieldType, extra } of availableFieldList) {
+            const valueKeys = config.valueKeys || [config.key];
+            const sourceValue = valueKeys.reduce((value, key) => value ?? item?.[key], undefined);
+            const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, extra, item, api_key);
+            const cell = await field.createCell(value);
+            record.push(cell);
+            normalizedRecord[field.id] = config.type === FieldType.Attachment ? await cell.getValue() : value;
+          }
+          records.push(record);
+          normalizedRecords.push(normalizedRecord);
+        }
       }
       let recordIds = [];
       const writeBatch = async (write) => {

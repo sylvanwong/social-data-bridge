@@ -6,9 +6,16 @@ import { BLOGGER_FIELD_MAPPING, getDefaultSelectedFieldKeys, showErrorMsg, useSo
 import { useIncrementalTask } from '@/composables/useIncrementalTask';
 
 const props = defineProps({ api_key: String, social_type_options: Array });
+const TASK_PLUGIN_TYPE = 'blogger_search';
+const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
+const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 const form = ref({ social_type: '', keyword: '', rangeType: 'pages', pages: 1, radio: 1, table_id: '', writeMode: 'upsert', follower_count_range: 'all', user_type: 'all' });
 const tableOptions = ref([]);
+const tableFieldOptions = ref([]);
 const selectedFieldKeys = ref([]);
+const mappingDraft = ref([]);
+const mappingExpanded = ref(false);
+const mappingLoading = ref(false);
 const loading = ref(false);
 const submitting = ref(false);
 const cancelling = ref(false);
@@ -20,6 +27,10 @@ let toastTimer = null;
 const fieldReady = ref(false);
 const storageKey = 'blogger_search_stream_task_v1';
 const fieldStorageKey = 'blogger_search_selected_fields_v1';
+const tableOutputConfigs = ref({});
+const tableConfigSaving = ref(false);
+const tableConfigApplying = ref(false);
+let tableConfigSaveQueued = false;
 const allKeys = BLOGGER_FIELD_MAPPING.map(field => field.key);
 const allSelected = computed(() => allKeys.every(key => selectedFieldKeys.value.includes(key)));
 const socialOptions = computed(() => [
@@ -80,6 +91,7 @@ const searchTask = useIncrementalTask({
       const result = await createAndWriteData(group.items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', task.selectedFieldKeys, {
       writeMode: group.mode,
       uniqueKey: 'user_id',
+      fieldMappings: task.fieldMappings || [],
       upsertCacheKey: task.taskId,
       stopAfterCurrentBatch: true,
       onTargetTableReady: async tableId => { task.targetTableId = tableId; },
@@ -125,6 +137,76 @@ const loadTables = async () => {
     tableOptions.value = await Promise.all(tables.map(async table => ({ id: table.id, name: await table.getName() })));
   } catch (error) { showErrorMsg('获取表格列表失败，请稍后重试'); }
 };
+const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
+const loadTableOutputConfigs = async () => {
+  if (!props.api_key) return;
+  try {
+    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: auth(), params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
+    const data = response.data?.data || response.data;
+    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
+    tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
+  } catch (error) { console.error('读取作者搜索表格配置失败:', error); }
+};
+const loadTableFields = async tableId => {
+  tableConfigApplying.value = true;
+  tableFieldOptions.value = [];
+  mappingDraft.value = [];
+  if (!tableId) { mappingLoading.value = false; tableConfigApplying.value = false; return; }
+  mappingLoading.value = true;
+  try {
+    const table = await bitable.base.getTableById(tableId);
+    const fields = await table.getFieldMetaList();
+    tableFieldOptions.value = fields.map(field => ({ id: field.id, name: field.name, type: field.type }));
+    const config = tableOutputConfigs.value[tableId];
+    mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
+    if (config?.write_mode === 'append' || config?.write_mode === 'upsert') form.value.writeMode = config.write_mode;
+  } catch (error) {
+    showErrorMsg('读取目标表字段失败，请稍后重试');
+  } finally {
+    mappingLoading.value = false;
+    tableConfigApplying.value = false;
+  }
+};
+const saveTableOutputConfig = async () => {
+  if (form.value.radio !== 2 || !form.value.table_id || tableConfigApplying.value) return;
+  if (tableConfigSaving.value) { tableConfigSaveQueued = true; return; }
+  if (!props.api_key || !tableFieldOptions.value.length) return;
+  tableConfigSaving.value = true;
+  try {
+    const targetTableId = form.value.table_id;
+    const table = await bitable.base.getTableById(targetTableId);
+    const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => {
+      const source = BLOGGER_FIELD_MAPPING.find(field => field.key === item.source_key);
+      const target = tableFieldOptions.value.find(field => field.id === item.target_field_id);
+      return { ...item, source_name: source?.name || item.source_name || '', target_field_name: target?.name || item.target_field_name || '', target_field_type: target?.type ?? item.target_field_type };
+    });
+    const response = await request({
+      url: TABLE_CONFIG_API_PATH,
+      method: 'put',
+      headers: auth(),
+      data: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: form.value.writeMode, field_mappings: fieldMappings },
+    });
+    tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: response.data?.data || response.data };
+  } catch (error) {
+    console.error('保存作者搜索表格配置失败:', error);
+  } finally {
+    tableConfigSaving.value = false;
+    if (tableConfigSaveQueued) { tableConfigSaveQueued = false; saveTableOutputConfig(); }
+  }
+};
+const getMappingSourceFields = index => {
+  const usedKeys = new Set(mappingDraft.value.filter((item, itemIndex) => itemIndex !== index).map(item => item.source_key).filter(Boolean));
+  return BLOGGER_FIELD_MAPPING.filter(field => selectedFieldKeys.value.includes(field.key)).map(field => ({ ...field, disabled: usedKeys.has(field.key) }));
+};
+const getMappingTargetFields = index => {
+  const usedIds = new Set(mappingDraft.value.filter((item, itemIndex) => itemIndex !== index).map(item => item.target_field_id).filter(Boolean));
+  return tableFieldOptions.value.map(field => ({ ...field, disabled: usedIds.has(field.id) }));
+};
+const mappingStatus = computed(() => {
+  if (form.value.radio === 2 && !form.value.table_id) return '选择目标表格后可设置';
+  const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
+  return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
+});
 const loadFields = async () => {
   try {
     const saved = await bitable.bridge.getData(fieldStorageKey);
@@ -133,7 +215,12 @@ const loadFields = async () => {
   fieldReady.value = true;
 };
 watch(selectedFieldKeys, keys => { if (fieldReady.value) bitable.bridge.setData(fieldStorageKey, keys); }, { deep: true });
-watch(() => form.value.radio, value => { if (value === 2) loadTables(); });
+watch([mappingDraft, () => form.value.writeMode], saveTableOutputConfig, { deep: true });
+watch(() => form.value.radio, value => {
+  if (value === 2) loadTables();
+  else { tableFieldOptions.value = []; mappingDraft.value = []; }
+});
+watch(() => form.value.table_id, loadTableFields);
 
 const toggleAll = checked => { selectedFieldKeys.value = checked ? [...allKeys] : ['user_id']; };
 const parseKeywords = value => [...new Set(String(value || '').split(/[\n,，]+/).map(item => item.trim()).filter(Boolean))];
@@ -158,7 +245,9 @@ const submit = async () => {
     if (form.value.social_type === 'instagram' && keywords.some(keyword => [...keyword].length > 256)) throw new Error('Instagram 每个关键词最多 256 个字符');
     if (form.value.rangeType === 'pages' && (!Number.isInteger(form.value.pages) || form.value.pages < 1 || form.value.pages > 100)) throw new Error('搜索页数必须为 1～100 的整数');
     if (form.value.radio === 2 && !form.value.table_id) throw new Error('请选择现有表格');
-    if (form.value.radio === 2 && !(await validateTableFields(form.value.table_id, selectedFieldKeys.value, { writeMode: form.value.writeMode, uniqueKey: 'user_id' }))) return;
+    if (form.value.radio === 2 && mappingLoading.value) throw new Error('正在读取目标表字段，请稍后重试');
+    if (form.value.radio === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
+    if (form.value.radio === 2 && !(await validateTableFields(form.value.table_id, selectedFieldKeys.value, BLOGGER_FIELD_MAPPING, { writeMode: form.value.writeMode, uniqueKey: 'user_id', fieldMappings: mappingDraft.value }))) return;
     const filter_config = isDouyin.value ? { follower_count_range: form.value.follower_count_range, user_type: form.value.user_type } : {};
     const response = await request({ url: '/social/api/v1/feishu/blogger/search/task', method: 'post', headers: auth(), data: { social_type: form.value.social_type, keyword: keywords, pages: form.value.rangeType === 'all' ? 0 : Number(form.value.pages), filter_config } });
     if (response.data?.sta !== 0) throw new Error(response.data?.msg || '创建任务失败');
@@ -166,7 +255,7 @@ const submit = async () => {
     const id = task?.task_id;
     if (!id) throw new Error('创建任务未返回任务ID');
     taskId.value = id; loading.value = true; showToast('任务已创建，正在获取作者…');
-    await searchTask.start({ taskId: id, totalPages: Number(task.total) || 0, targetTableId: form.value.radio === 2 ? form.value.table_id : '', selectedFieldKeys: [...selectedFieldKeys.value], writeMode: form.value.writeMode });
+    await searchTask.start({ taskId: id, totalPages: Number(task.total) || 0, targetTableId: form.value.radio === 2 ? form.value.table_id : '', selectedFieldKeys: [...selectedFieldKeys.value], writeMode: form.value.writeMode, fieldMappings: form.value.radio === 2 ? mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({ ...item })) : [] });
   } catch (error) {
     loading.value = false;
     showErrorMsg(error.message || '提交失败，请稍后重试');
@@ -182,7 +271,7 @@ const handleTaskAction = () => {
   if (taskActionState.value === 'running') return cancel();
   if (taskActionState.value === 'idle') return submit();
 };
-onMounted(async () => { form.value.social_type = socialOptions.value[0]?.value || ''; await loadFields(); const saved = await searchTask.resume(task => { taskId.value = task.taskId; loading.value = true; showToast('正在恢复未完成的作者搜索任务…'); }); if (saved === false) taskId.value = ''; });
+onMounted(async () => { form.value.social_type = socialOptions.value[0]?.value || ''; await Promise.all([loadFields(), loadTableOutputConfigs()]); const saved = await searchTask.resume(task => { taskId.value = task.taskId; loading.value = true; showToast('正在恢复未完成的作者搜索任务…'); }); if (saved === false) taskId.value = ''; });
 onUnmounted(() => {
   searchTask.stop();
   if (toastTimer) clearTimeout(toastTimer);
@@ -301,6 +390,30 @@ onUnmounted(() => {
             </el-checkbox-group>
           </div>
         </el-form-item>
+        <div v-if="form.radio === 2" class="mapping-accordion">
+          <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded">
+            <span>字段映射 <span class="mapping-optional">（可选）</span> <span class="mapping-status">{{ mappingStatus }}</span></span>
+            <span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span>
+          </button>
+          <div v-show="mappingExpanded" class="mapping-accordion-panel">
+            <div v-if="mappingLoading" class="sub-hint">正在读取目标表字段...</div>
+            <div v-else-if="!form.table_id" class="sub-hint">请先选择现有表格，再配置字段映射。</div>
+            <template v-else>
+              <p class="mapping-note">同名字段会自动匹配；不同名时可指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
+              <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
+                <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+                  <el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
+                </el-select>
+                <span class="mapping-arrow">→</span>
+                <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+                  <el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
+                </el-select>
+                <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+              </div>
+              <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
+            </template>
+          </div>
+        </div>
         </section>
         <el-button
           class="commit-btn"
@@ -338,6 +451,24 @@ onUnmounted(() => {
 .settings-section-heading { display:flex; align-items:center; gap:8px; margin:0 0 12px; color:#1d2129; font-size:16px; font-weight:500; line-height:22px; }
 .settings-step { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; color:#a8071a; background:#fff1f2; border-radius:50%; font-size:12px; font-weight:600; line-height:20px; }
 .field-stack,.field-selection-content { width:100%; }
+.mapping-accordion { margin:12px 0 16px; border-top:1px solid #f0f1f3; border-bottom:1px solid #f0f1f3; }
+.mapping-accordion-trigger { display:flex; align-items:center; justify-content:space-between; width:100%; min-height:48px; padding:12px 0; border:0; background:transparent; color:#1d2129; font:inherit; text-align:left; cursor:pointer; }
+.mapping-optional,.mapping-status,.mapping-note { color:#86909c; font-size:12px; font-weight:400; }
+.mapping-chevron { width:8px; height:8px; border-right:1px solid #86909c; border-bottom:1px solid #86909c; transform:rotate(45deg); transition:transform .2s ease; }
+.mapping-chevron.is-expanded { transform:rotate(225deg); }
+.mapping-accordion-panel { padding:0 0 12px; }
+.mapping-note { margin:0 0 12px; line-height:18px; }
+.mapping-row { display:grid; grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr) auto; align-items:center; gap:4px; min-height:44px; border-top:1px solid #f0f1f3; }
+.mapping-row :deep(.el-select__wrapper) { min-height:36px; height:36px; padding:0 12px; border-radius:6px; box-shadow:0 0 0 1px #e5e6eb inset; }
+.mapping-arrow { color:#86909c; }
+.mapping-delete { min-width:28px; padding:4px; }
+.mapping-actions { display:flex; align-items:center; gap:12px; margin-top:8px; }
+.mapping-actions :deep(.el-button) { margin-left:0; }
+.sub-hint { margin:0 0 10px; color:#86909c; font-size:12px; line-height:18px; }
+@media (max-width: 420px) {
+  .mapping-row { grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr); }
+  .mapping-delete { grid-column:3; justify-self:end; }
+}
 .c-label { display:flex; align-items:center; margin-bottom:8px; color:#1d2129; font-size:14px; font-weight:500; line-height:20px; }
 .help-icon { width:16px; height:16px; margin-left:4px; }
 .radio-block { display:flex; flex-wrap:wrap; gap:16px; width:100%; }
