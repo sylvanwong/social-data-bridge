@@ -1,4 +1,5 @@
 <script setup>
+import { createTableConfigSaver } from '@/utils/tableOutputConfig.mjs';
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { computed, ref, onMounted, watch } from "vue";
 import { ElNotification } from "element-plus";
@@ -56,6 +57,7 @@ const formData = ref({
 const platformOptions = ref([]);
 const table_options = ref([]);
 const loading = ref(false);
+const isSubmitting = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
@@ -67,6 +69,15 @@ const mappingDraft = ref([]);
 const targetFieldOptions = ref([]);
 const tableOutputConfigs = ref({});
 const tableConfigLoading = ref(false);
+const tableConfigError = ref('');
+const tableOutputConfigsLoaded = ref(false);
+const mainOutputTableId = ref('');
+const tableConfigReady = computed(() => formData.value.radio !== 2 || (
+  !!formData.value.table_id && mainOutputTableId.value === formData.value.table_id
+  && !tableConfigLoading.value && !tableConfigError.value
+));
+let tableConfigReadId = 0;
+let tableConfigsRequest = null;
 const mappingStatus = computed(() => {
   const count = mappingDraft.value.filter(item => item?.source_key && item?.target_field_id).length;
   return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
@@ -98,15 +109,18 @@ const getMappingSourceFields = (index) => {
 };
 
 const getMappingTargetFields = (index) => {
-  const usedTargetFieldIds = new Set(
-    mappingDraft.value
-      .filter((item, itemIndex) => itemIndex !== index && item?.target_field_id)
-      .map(item => item.target_field_id)
-  );
-
+  const sourceKey = mappingDraft.value[index]?.source_key;
+  const fieldMetaMap = new Map(targetFieldOptions.value.map(field => [field.name, field.id]));
+  const occupiedFields = new Map();
+  for (const config of getActiveFieldMapping()) {
+    if (config.key === sourceKey) continue;
+    const fieldId = resolveFieldId(config, fieldMetaMap, true);
+    if (fieldId) occupiedFields.set(fieldId, config.name);
+  }
   return targetFieldOptions.value.map(field => ({
     ...field,
-    disabled: usedTargetFieldIds.has(field.id),
+    disabled: occupiedFields.has(field.id),
+    disabledReason: occupiedFields.has(field.id) ? `已被「${occupiedFields.get(field.id)}」占用` : '',
   }));
 };
 
@@ -161,38 +175,93 @@ const saveSelectedFieldKeys = async (keys) => {
     console.error('保存字段勾选状态失败:', error);
   }
 };
+let targetFieldReadId = 0;
 const loadTargetFieldOptions = async (tableId) => {
-  if (!tableId) { targetFieldOptions.value = []; return; }
-  try { targetFieldOptions.value = await (await bitable.base.getTableById(tableId)).getFieldMetaList(); } catch (error) { targetFieldOptions.value = []; }
+  const readId = ++targetFieldReadId;
+  targetFieldOptions.value = [];
+  if (!tableId) return;
+  try {
+    const fields = await (await bitable.base.getTableById(tableId)).getFieldMetaList();
+    if (readId !== targetFieldReadId) return false;
+    targetFieldOptions.value = fields;
+    return true;
+  } catch (error) {
+    if (readId === targetFieldReadId) targetFieldOptions.value = [];
+    return false;
+  }
 };
 const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
 const loadTableOutputConfigs = async () => {
-  if (!props.api_key) return;
-  try {
-    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
-    const data = response.data?.data || response.data;
-    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
-    tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
-  } catch (error) { console.error('读取表格配置失败:', error); }
+  if (tableOutputConfigsLoaded.value) return true;
+  if (tableConfigsRequest) return tableConfigsRequest;
+  tableConfigsRequest = (async () => {
+    try {
+      if (!props.api_key) throw new Error('请先设置API Key');
+      const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
+      if (response.data?.sta !== 0) throw new Error(response.data?.msg || '读取表格配置失败');
+      const data = response.data?.data;
+      const list = Array.isArray(data) ? data : (data?.list || data?.items);
+      if (!Array.isArray(list)) throw new Error('表格配置返回格式不正确');
+      tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
+      tableOutputConfigsLoaded.value = true;
+      return true;
+    } catch (error) {
+      console.error('读取表格配置失败:', error);
+      return false;
+    }
+  })();
+  try { return await tableConfigsRequest; }
+  finally { tableConfigsRequest = null; }
 };
 const applyTableOutputConfig = async (tableId) => {
-  const config = tableOutputConfigs.value[tableId];
-  mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
-  await loadTargetFieldOptions(tableId);
+  const readId = ++tableConfigReadId;
+  mainOutputTableId.value = '';
+  tableConfigError.value = '';
+  tableConfigLoading.value = !!tableId;
+  if (!tableId) {
+    await loadTargetFieldOptions('');
+    return;
+  }
+  try {
+    if (!(await loadTableOutputConfigs())) throw new Error('无法读取表格配置，请重试');
+    if (readId !== tableConfigReadId) return;
+    if (!(await loadTargetFieldOptions(tableId))) throw new Error('无法读取目标表字段，请重试');
+    if (readId !== tableConfigReadId) return;
+    const config = tableOutputConfigs.value[tableId];
+    mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
+    mainOutputTableId.value = tableId;
+  } catch (error) {
+    if (readId === tableConfigReadId) tableConfigError.value = error.message;
+  } finally {
+    if (readId === tableConfigReadId) tableConfigLoading.value = false;
+  }
 };
+const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, fieldMappings }) => {
+  const table = await bitable.base.getTableById(targetTableId);
+  const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: 'append', field_mappings: fieldMappings };
+  const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+  if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存表格配置失败');
+  tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: response.data?.data || payload };
+});
 const saveTableOutputConfig = async () => {
   const tableId = formData.value.table_id;
-  if (formData.value.radio !== 2 || !tableId || !props.api_key) return;
+  if (formData.value.radio !== 2 || !tableId || !props.api_key
+    || !tableConfigReady.value || tableConfigLoading.value) return;
   try {
-    const table = await bitable.base.getTableById(tableId);
     const fields = targetFieldOptions.value;
     const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({ ...item, source_name: FIELD_MAPPING.find(field => field.key === item.source_key)?.name || '', target_field_name: fields.find(field => field.id === item.target_field_id)?.name || '' }));
-    const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: tableId, target_table_name: await table.getName(), write_mode: 'append', field_mappings: fieldMappings };
-    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
-    tableOutputConfigs.value = { ...tableOutputConfigs.value, [tableId]: response.data?.data || response.data || payload };
-  } catch (error) { console.error('保存表格配置失败:', error); }
+    await persistTableOutputConfig({ targetTableId: tableId, fieldMappings });
+  } catch (error) {
+    console.error('保存表格配置失败:', error);
+    showErrorMsg('保存表格配置失败，请重试');
+  }
 };
-const resolveFieldId = (config, fieldMetaMap) => mappingDraft.value.find(item => item?.source_key === config.key && item?.target_field_id)?.target_field_id || fieldMetaMap.get(config.name);
+const resolveFieldId = (config, fieldMetaMap, isExistingTable) => {
+  const mappedFieldId = isExistingTable
+    ? mappingDraft.value.find(item => item?.source_key === config.key && item?.target_field_id)?.target_field_id
+    : undefined;
+  return mappedFieldId || fieldMetaMap.get(config.name);
+};
 
 const createSequentialTable = async (baseTableName) => {
   const existingTables = await bitable.base.getTableMetaList();
@@ -222,6 +291,18 @@ const setupTableFields = async (tableId, isNewTable = false) => {
   const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
   const missingFields = [];
 
+  if (!isNewTable) {
+    const occupiedFields = new Map();
+    for (const config of activeFieldMapping) {
+      const fieldId = resolveFieldId(config, fieldMetaMap, true);
+      if (!fieldId) continue;
+      if (occupiedFields.has(fieldId)) {
+        throw new Error(`「${occupiedFields.get(fieldId)}」和「${config.name}」不能写入同一列，请调整字段映射`);
+      }
+      occupiedFields.set(fieldId, config.name);
+    }
+  }
+
   const defaultFirstField = fieldMetaList[0];
   if (isNewTable && defaultFirstField && defaultFirstField.name === '文本') {
     await table.setField(defaultFirstField.id, {
@@ -233,7 +314,7 @@ const setupTableFields = async (tableId, isNewTable = false) => {
 
   for (let index = 0; index < activeFieldMapping.length; index++) {
     const config = activeFieldMapping[index];
-    const fieldId = resolveFieldId(config, fieldMetaMap);
+    const fieldId = resolveFieldId(config, fieldMetaMap, !isNewTable);
     if (fieldId) {
       const field = await table.getFieldById(fieldId);
       const fieldType = await field.getType();
@@ -327,9 +408,11 @@ watch(
     }
   }
 );
-watch(() => formData.value.table_id, (id) => loadTargetFieldOptions(id));
-watch(() => formData.value.table_id, async (id) => { mappingExpanded.value = false; if (id && tableOutputConfigs.value[id]) await applyTableOutputConfig(id); else mappingDraft.value = []; });
-watch(mappingDraft, saveTableOutputConfig, { deep: true });
+watch(() => formData.value.table_id, (id) => {
+  mappingExpanded.value = false;
+  applyTableOutputConfig(id);
+}, { flush: 'sync' });
+watch(mappingDraft, saveTableOutputConfig, { deep: true, flush: 'sync' });
 
 const normalizeValue = (value, config, fieldType) => {
   if (config?.key === 'social_type' && fieldType === FieldType.SingleSelect) {
@@ -358,7 +441,7 @@ const writeDataToTable = async (table, list, isExistingTable = false) => {
   const fieldList = [];
 
   for (const config of activeFieldMapping) {
-    const fieldId = resolveFieldId(config, fieldMetaMap);
+    const fieldId = resolveFieldId(config, fieldMetaMap, isExistingTable);
     if (!fieldId) continue;
     const field = await table.getFieldById(fieldId);
     if (config.formatter && !isExistingTable) {
@@ -445,19 +528,27 @@ const submit = async (targetTableId = "") => {
   }
 };
 
-const commit = () => {
-  if (formData.value.radio === 2) {
-    if (!formData.value.table_id) {
-      showErrorMsg("请选择现有表格");
+const commit = async () => {
+  if (loading.value || isSubmitting.value) return;
+  isSubmitting.value = true;
+  try {
+    if (formData.value.radio === 2) {
+      const tableId = formData.value.table_id;
+      if (!tableId) {
+        showErrorMsg("请选择现有表格");
+        return;
+      }
+      if (!tableConfigReady.value) {
+        showErrorMsg(tableConfigError.value || '请等待表格配置加载完成');
+        return;
+      }
+      if (await validateTableFields(tableId)) await submit(tableId);
       return;
     }
-    validateTableFields(formData.value.table_id).then((isValid) => {
-      if (isValid) submit(formData.value.table_id);
-    });
-    return;
+    await submit("");
+  } finally {
+    isSubmitting.value = false;
   }
-
-  submit("");
 };
 
 onMounted(async () => {
@@ -487,7 +578,7 @@ watch(selectedFieldKeys, (keys) => {
 <template>
   <div class="sub-page">
     <div class="sub-page-header">
-      <span class="sub-page-back" @click="emit('back')">
+      <span class="sub-page-back" :aria-disabled="loading || isSubmitting" :title="(loading || isSubmitting) ? '请等待任务结束后返回' : '返回'" @click="!(loading || isSubmitting) && emit('back')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="16" height="16">
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
@@ -495,60 +586,66 @@ watch(selectedFieldKeys, (keys) => {
       <span class="sub-page-title">热榜获取</span>
     </div>
     <div class="form-card">
-      <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
-      <el-form class="form" :model="formData" label-position="top">
-        <el-form-item>
-          <div class="c-label">
-            <span class="required">*</span>
-            平台
+      <div class="execution-config" :inert="(loading || isSubmitting) ? '' : null" :aria-busy="loading || isSubmitting">
+        <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
+        <el-form class="form" :model="formData" label-position="top">
+          <el-form-item>
+            <div class="c-label">
+              <span class="required">*</span>
+              平台
+            </div>
+            <el-select v-model="formData.platform" placeholder="请选择" style="width: 100%">
+              <el-option v-for="option in platformOptions" :key="option.value" :label="option.label" :value="option.value" />
+            </el-select>
+          </el-form-item>
+          <div class="section-heading output-heading"><span class="section-step">2</span><span>输出设置</span></div>
+          <el-form-item label="">
+            <div class="field-stack">
+              <div class="c-label">输出到表格</div>
+              <el-radio-group v-model="formData.radio" class="radio-block">
+                <el-radio :value="1">新建表格</el-radio>
+                <el-radio :value="2">使用现有表格</el-radio>
+              </el-radio-group>
+            </div>
+          </el-form-item>
+          <el-form-item v-if="formData.radio === 2" label="">
+            <div class="c-label">选择现有表格</div>
+            <el-select v-model="formData.table_id" placeholder="请选择" style="width: 100%">
+              <el-option v-for="table in table_options" :key="table.id" :label="table.name" :value="table.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="" style="margin-top: 12px">
+            <div class="field-selection-title">
+              <div class="c-label">输出字段</div>
+              <el-checkbox :model-value="isAllFieldsSelected" :indeterminate="isFieldsIndeterminate" class="select-all-fields" @change="toggleAllFields">全选</el-checkbox>
+            </div>
+            <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+              <el-checkbox
+                v-for="field in FIELD_MAPPING"
+                :key="field.key"
+                :label="field.key"
+                :disabled="field.required"
+                class="field-checkbox-item"
+              >
+                {{ field.name }}
+              </el-checkbox>
+            </el-checkbox-group>
+          </el-form-item>
+          <div v-if="formData.radio === 2 && (tableConfigLoading || tableConfigError)" class="table-config-feedback" role="status">
+            <span>{{ tableConfigLoading ? '正在加载表格配置…' : tableConfigError }}</span>
+            <el-button v-if="tableConfigError" link type="primary" @click="applyTableOutputConfig(formData.table_id)">重试</el-button>
           </div>
-          <el-select v-model="formData.platform" placeholder="请选择" style="width: 100%">
-            <el-option v-for="option in platformOptions" :key="option.value" :label="option.label" :value="option.value" />
-          </el-select>
-        </el-form-item>
-        <div class="section-heading output-heading"><span class="section-step">2</span><span>输出设置</span></div>
-        <el-form-item label="">
-          <div class="field-stack">
-            <div class="c-label">输出到表格</div>
-            <el-radio-group v-model="formData.radio" class="radio-block">
-              <el-radio :value="1">新建表格</el-radio>
-              <el-radio :value="2">使用现有表格</el-radio>
-            </el-radio-group>
+          <div v-if="formData.radio === 2" class="mapping-accordion">
+            <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded"><span class="mapping-accordion-label">字段映射 <span class="mapping-optional">（可选）</span><span class="mapping-status">{{ mappingStatus }}</span></span><span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span></button>
+            <div v-show="mappingExpanded" class="mapping-accordion-panel" :inert="!tableConfigReady ? '' : null" :aria-disabled="!tableConfigReady"><p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
+              <div v-for="(mapping,index) in mappingDraft" :key="index" class="mapping-row"><el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" /></el-select><span class="mapping-arrow">→</span><el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" :title="field.disabledReason" /></el-select><el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index,1)">删除</el-button></div>
+              <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({source_key:'',target_field_id:''})">+ 添加字段映射</el-button></div>
+            </div>
           </div>
-        </el-form-item>
-        <el-form-item v-if="formData.radio === 2" label="">
-          <div class="c-label">选择现有表格</div>
-          <el-select v-model="formData.table_id" placeholder="请选择" style="width: 100%">
-            <el-option v-for="table in table_options" :key="table.id" :label="table.name" :value="table.id" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="" style="margin-top: 12px">
-          <div class="field-selection-title">
-            <div class="c-label">输出字段</div>
-            <el-checkbox :model-value="isAllFieldsSelected" :indeterminate="isFieldsIndeterminate" class="select-all-fields" @change="toggleAllFields">全选</el-checkbox>
-          </div>
-          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
-            <el-checkbox
-              v-for="field in FIELD_MAPPING"
-              :key="field.key"
-              :label="field.key"
-              :disabled="field.required"
-              class="field-checkbox-item"
-            >
-              {{ field.name }}
-            </el-checkbox>
-          </el-checkbox-group>
-        </el-form-item>
-        <div v-if="formData.radio === 2" class="mapping-accordion">
-          <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded"><span class="mapping-accordion-label">字段映射 <span class="mapping-optional">（可选）</span><span class="mapping-status">{{ mappingStatus }}</span></span><span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span></button>
-          <div v-show="mappingExpanded" class="mapping-accordion-panel"><p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
-            <div v-for="(mapping,index) in mappingDraft" :key="index" class="mapping-row"><el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" /></el-select><span class="mapping-arrow">→</span><el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" /></el-select><el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index,1)">删除</el-button></div>
-            <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({source_key:'',target_field_id:''})">+ 添加字段映射</el-button></div>
-          </div>
-        </div>
-      </el-form>
+        </el-form>
+      </div>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading" @click="commit">立即执行</el-button>
+      <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="!tableConfigReady" @click="commit">立即执行</el-button>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">

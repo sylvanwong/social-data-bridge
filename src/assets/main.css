@@ -1,7 +1,11 @@
 @import 'reset-css';
+@import './typography.css';
 
 /* Element Plus 主题色配置 */
 :root {
+  --app-space-control: 8px;
+  --app-space-group: 16px;
+  --app-space-section: 24px;
   --el-color-primary: #A8071A;
   --el-color-primary-light-3: #c43344;
   --el-color-primary-light-5: #d65b6a;
@@ -9,4 +13,34 @@
   --el-color-primary-light-8: #f1a7b2;
   --el-color-primary-light-9: #f8c9cf;
   --el-color-primary-dark-2: #860515;
+}
+
+/* 目标表读取使用局部状态提示，不遮挡其他表单。 */
+.table-config-feedback {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+.table-config-spinner {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  animation: table-config-spin 1s linear infinite;
+}
+@keyframes table-config-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .table-config-spinner { animation: none; }
+}
+
+.sub-page .sub-page-back[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 保留停止按钮的可操作性，仅弱化锁定的配置区域。 */
+.execution-config[inert] {
+  opacity: 0.6;
 }

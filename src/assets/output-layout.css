@@ -1,0 +1,62 @@
+/* 三个获取页共用，由 scoped style 引入；组间距只由容器负责。 */
+.form .output-config {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-group);
+  margin-top: var(--app-space-section);
+}
+
+.form .output-config > .el-form-item,
+.form .output-config > .mapping-accordion,
+.form .output-config > .output-heading {
+  margin: 0;
+}
+
+.form .output-config > .output-heading,
+.form .output-config > .mapping-accordion {
+  padding: 0;
+  border: 0;
+}
+
+.form .output-config :deep(.el-form-item__content) {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--app-space-control);
+}
+
+.form .output-config .c-label,
+.form .output-config .choice-label {
+  margin: 0;
+  line-height: 22px;
+}
+
+.form .output-config .field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-control);
+}
+
+.form .output-config .mapping-accordion-trigger {
+  min-height: 32px;
+  padding: 0;
+}
+
+.form .output-config .mapping-accordion-panel {
+  padding: var(--app-space-control) 0 0;
+}
+
+.form .output-config .field-selection-title,
+.form .output-config .select-all-fields {
+  margin-bottom: var(--app-space-control);
+}
+
+.form .output-config .mapping-note,
+.form .output-config .mapping-empty {
+  margin-bottom: var(--app-space-control);
+}
+
+.execution-config + .action-group,
+.execution-config + .schedule-inline-panel {
+  margin-top: var(--app-space-group);
+}

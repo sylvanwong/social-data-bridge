@@ -976,7 +976,7 @@ watch(selectedFieldKeys, (keys) => {
 <template>
   <div class="sub-page">
     <div class="sub-page-header">
-      <span class="sub-page-back" @click="emit('back')">
+      <span class="sub-page-back" :aria-disabled="taskActionState !== 'idle'" :title="(taskActionState !== 'idle') ? '请等待任务结束后返回' : '返回'" @click="!(taskActionState !== 'idle') && emit('back')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="16" height="16">
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
