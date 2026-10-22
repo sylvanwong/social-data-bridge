@@ -18,8 +18,8 @@ export default defineConfig({
     host: true,
     proxy: {
       '/social/api': {
-        target: 'https://test-lotto.weiyoubot.cn',
-        // target: 'https://api.52choujiang.cn',
+        // target: 'https://test-lotto.weiyoubot.cn',
+        target: 'https://api.52choujiang.cn',
         changeOrigin: true,
         rewrite: (path) => path
       }

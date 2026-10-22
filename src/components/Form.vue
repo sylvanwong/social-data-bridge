@@ -9,6 +9,7 @@ import CommentFetch from './CommentFetch.vue'
 import VideoDataFetch from './VideoDataFetch.vue'
 import VideoCopySummary from './VideoCopySummary.vue'
 import BloggerInfoFetch from './BloggerInfoFetch.vue'
+import SearchSuggestions from './SearchSuggestions.vue'
 import XhsDownload from './XhsDownload.vue'
 import UrlToAttachment from './UrlToAttachment.vue'
 import SeriesFetch from './SeriesFetch.vue'
@@ -245,6 +246,16 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           </div>
           <span class="func-name">作者搜索获取</span>
         </div>
+        <div class="arco-card" @click="currentPage = 'searchSuggestions'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <circle cx="10.5" cy="10.5" r="6.5"></circle>
+              <line x1="15.5" y1="15.5" x2="21" y2="21"></line>
+              <path d="M10.5 7.5v6M7.5 10.5h6"></path>
+            </svg>
+          </div>
+          <span class="func-name">搜索推荐词</span>
+        </div>
       </div>
     </div>
   </div>
@@ -268,6 +279,9 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
   <!-- 二级页面：作者搜索获取 -->
   <BloggerSearch v-if="currentPage === 'bloggerSearch'" :api_key="api_key" :social_type_options="social_type_options" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：搜索推荐词 -->
+  <SearchSuggestions v-if="currentPage === 'searchSuggestions'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：评论列表获取 -->
   <CommentFetch v-if="currentPage === 'comment'" :api_key="api_key" @back="currentPage = 'home'" />
