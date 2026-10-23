@@ -306,6 +306,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
 <style scoped>
 .home-page {
+  font-family: var(--app-font-family);
   min-height: 100vh;
   background: #fffcfc;
 }
@@ -374,8 +375,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   pointer-events: none;
 }
 .banner-title {
-  font-size: 20px;
-  font-weight: 600;
+  font-size: var(--app-font-size-hero);
+  font-weight: var(--app-font-weight-semibold);
   color: #1D2129;
   line-height: 28px;
   margin-bottom: 8px;
@@ -383,8 +384,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   z-index: 1;
 }
 .banner-subtitle {
-  font-size: 14px;
-  font-weight: 400;
+  font-size: var(--app-font-size-body);
+  font-weight: var(--app-font-weight-regular);
   line-height: 22px;
   margin-bottom: 16px;
   position: relative;
@@ -393,7 +394,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 }
 .banner-subtitle .highlight {
   color: #A8071A;
-  font-weight: 500;
+  font-weight: var(--app-font-weight-medium);
 }
 .banner-btn {
   display: inline-flex;
@@ -401,8 +402,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   gap: 8px;
   padding: 0 16px;
   height: 32px;
-  font-size: 14px;
-  font-weight: 500;
+  font-size: var(--app-font-size-body);
+  font-weight: var(--app-font-weight-medium);
   color: #FFFFFF;
   background: #A8071A;
   border: none;
@@ -458,8 +459,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   flex-shrink: 0;
 }
 .banner-help .help-text {
-  font-size: 12px;
-  font-weight: 400;
+  font-size: var(--app-font-size-caption);
+  font-weight: var(--app-font-weight-regular);
   color: #86909C;
   line-height: 20px;
   transition: color 0.2s ease;
@@ -486,13 +487,13 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   gap: 10px;
 }
 .api-title {
-  font-size: 16px;
-  font-weight: 600;
+  font-size: var(--app-font-size-section);
+  font-weight: var(--app-font-weight-semibold);
   color: #1D2129;
   line-height: 24px;
 }
 .api-link {
-  font-size: 13px;
+  font-size: var(--app-font-size-small);
   color: #A8071A;
   text-decoration: none;
   cursor: pointer;
@@ -537,8 +538,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   align-items: center;
   justify-content: center;
   color: #fff;
-  font-size: 14px;
-  font-weight: 500;
+  font-size: var(--app-font-size-body);
+  font-weight: var(--app-font-weight-medium);
   cursor: pointer;
   transition: background 0.2s ease;
 }
@@ -551,8 +552,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   box-sizing: border-box;
 }
 .group-title {
-  font-size: 14px;
-  font-weight: 400;
+  font-size: var(--app-font-size-body);
+  font-weight: var(--app-font-weight-regular);
   color: #86909C;
   margin-bottom: 8px;
   letter-spacing: 0.3px;
@@ -594,8 +595,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   stroke-linejoin: round;
 }
 .arco-card .func-name {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: var(--app-font-size-body);
+  font-weight: var(--app-font-weight-medium);
   color: #1D2129;
   text-align: center;
   line-height: 22px;

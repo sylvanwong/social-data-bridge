@@ -1,1 +1,1 @@
-export const PLUGIN_VERSION = "web-10.22";
+export const PLUGIN_VERSION = "web-10.23";

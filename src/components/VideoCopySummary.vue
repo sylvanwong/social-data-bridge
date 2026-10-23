@@ -1019,7 +1019,7 @@ watch(() => formData.value.targetType, async (type) => {
 <template>
   <div class="sub-page">
     <div class="sub-page-header">
-      <span class="sub-page-back" @click="emit('back')">
+      <span class="sub-page-back" :aria-disabled="loading" :title="(loading) ? '请等待任务结束后返回' : '返回'" @click="!(loading) && emit('back')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="16" height="16">
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
