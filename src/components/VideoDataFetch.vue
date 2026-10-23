@@ -3,7 +3,7 @@ import { createTableConfigSaver } from '@/utils/tableOutputConfig.mjs';
 import InputFilterEditor from './InputFilterEditor.vue';
 import { cloneInputFilter, prepareInputFilter, filterRecordIds } from '@/utils/inputFilter.mjs';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { ref, onMounted, watch, computed } from "vue";
+import { ref, onMounted, onUnmounted, watch, computed } from "vue";
 import { ElNotification } from "element-plus";
 import request, { buildApiUrl } from '@/utils/request';
 
@@ -407,6 +407,8 @@ const createAttachmentFiles = async (config, item) => {
 const fieldOptions = ref([]);
 const tableOptions = ref([]);
 const fieldListLoading = ref(false);
+const linkFieldContext = { tableId: '', viewId: '', fieldName: '', pendingSelection: null };
+let unsubscribeSelectionChange = null;
 const loading = ref(false);
 const stopRequested = ref(false);
 const toastVisible = ref(false);
@@ -750,18 +752,26 @@ const saveSelectedFieldKeys = async (keys) => {
   }
 };
 
-const getFieldListByType = async ({ silent = false } = {}) => {
+const getFieldListByType = async ({ silent = false, selection = null, matchName } = {}) => {
+  const requestId = Symbol();
+  fieldReadRequests.set(fieldOptions, requestId);
+  fieldListLoading.value = true;
+  const config = taskDialogVisible.value ? taskDialogForm.value : formData.value;
   try {
-    const savedSource = taskDialogVisible.value && taskDialogMode.value === 'edit'
+    const savedSource = !selection && taskDialogVisible.value && taskDialogMode.value === 'edit'
       ? taskDialogForm.value : null;
-    const table = savedSource?.sourceTableId
-      ? await bitable.base.getTableById(savedSource.sourceTableId)
+    const tableId = selection?.tableId || savedSource?.sourceTableId;
+    const viewId = selection?.viewId || savedSource?.sourceViewId;
+    const table = tableId
+      ? await bitable.base.getTableById(tableId)
       : await bitable.base.getActiveTable();
-    const view = savedSource?.sourceViewId
-      ? await table.getViewById(savedSource.sourceViewId)
+    const view = viewId
+      ? await table.getViewById(viewId)
       : await table.getActiveView();
     // 视图字段元数据按列顺序返回，数据表字段列表不保证与视图顺序一致。
     const fieldList = await view.getFieldMetaList();
+    if (fieldReadRequests.get(fieldOptions) !== requestId
+      || config !== (taskDialogVisible.value ? taskDialogForm.value : formData.value)) return;
 
     const urlFieldList = fieldList.filter(item =>
       item.type === FieldType.Url || item.type === FieldType.Text
@@ -771,17 +781,64 @@ const getFieldListByType = async ({ silent = false } = {}) => {
       id: field.id,
       name: field.name
     }));
+    if (!savedSource) {
+      if (matchName !== undefined) {
+        const matches = fieldOptions.value.filter(field => field.name === matchName);
+        config.videoLinkFieldId = matches.length === 1 ? matches[0].id : '';
+      } else if (!fieldOptions.value.some(field => field.id === config.videoLinkFieldId)) {
+        config.videoLinkFieldId = '';
+      }
+      linkFieldContext.tableId = table.id;
+      linkFieldContext.viewId = view.id || viewId || '';
+      linkFieldContext.fieldName = fieldOptions.value.find(field => field.id === config.videoLinkFieldId)?.name || '';
+    }
   } catch (error) {
+    if (fieldReadRequests.get(fieldOptions) !== requestId
+      || config !== (taskDialogVisible.value ? taskDialogForm.value : formData.value)) return;
     console.error('获取字段列表失败:', error);
     fieldOptions.value = [{ id: 'nodata', name: '获取字段列表失败' }];
+    if (!(taskDialogVisible.value && taskDialogMode.value === 'edit')) config.videoLinkFieldId = '';
     if (!silent) {
       ElNotification({ message: '当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
     }
+  } finally {
+    if (fieldReadRequests.get(fieldOptions) === requestId) fieldListLoading.value = false;
+  }
+};
+
+const handleSourceSelectionChange = ({ data: selection }) => {
+  if (!selection) return;
+  if (selection.tableId === linkFieldContext.tableId && selection.viewId === linkFieldContext.viewId) {
+    linkFieldContext.pendingSelection = null;
+    return;
+  }
+  // 执行中的源表已固定；编辑旧任务时也不能改成飞书当前表。
+  if (loading.value || taskDialogLoading.value || (taskDialogVisible.value && taskDialogMode.value === 'edit')) {
+    linkFieldContext.pendingSelection = selection;
+    return;
+  }
+  linkFieldContext.pendingSelection = null;
+  const tableChanged = selection.tableId !== linkFieldContext.tableId;
+  const config = taskDialogVisible.value ? taskDialogForm.value : formData.value;
+  const fieldName = fieldOptions.value.find(field => field.id === config.videoLinkFieldId)?.name || linkFieldContext.fieldName;
+  linkFieldContext.tableId = selection.tableId;
+  linkFieldContext.viewId = selection.viewId;
+  linkFieldContext.fieldName = fieldName;
+  config.videoLinkFieldId = '';
+  fieldOptions.value = [];
+  fieldReadRequests.delete(fieldOptions);
+  fieldListLoading.value = false;
+  if (selection.tableId) {
+    void getFieldListByType({ silent: true, selection, matchName: fieldName });
+  }
+  if (tableChanged && !taskDialogVisible.value && formData.value.mode === 'table' && formData.value.targetType === 'current') {
+    mainOutputTableId.value = '';
+    if (selection.tableId) void applyTableConfig(selection.tableId);
   }
 };
 
 const handleLinkFieldDropdownVisibleChange = (visible) => {
-  if (visible) {
+  if (visible && !loading.value && !taskDialogLoading.value) {
     getFieldListByType({ silent: true });
   }
 };
@@ -2299,6 +2356,7 @@ const hideToast = () => {
 };
 
 onMounted(() => {
+  unsubscribeSelectionChange = bitable.base.onSelectionChange(handleSourceSelectionChange);
   if (formData.value.mode === 'table') {
     getFieldListByType({ silent: true });
   }
@@ -2314,6 +2372,17 @@ onMounted(() => {
   }).finally(() => {
     fieldSelectionReady.value = true;
   });
+});
+
+onUnmounted(() => {
+  unsubscribeSelectionChange?.();
+  fieldReadRequests.delete(fieldOptions);
+});
+
+watch([loading, taskDialogLoading, taskDialogVisible], () => {
+  if (linkFieldContext.pendingSelection) {
+    handleSourceSelectionChange({ data: linkFieldContext.pendingSelection });
+  }
 });
 
 watch(selectedFieldKeys, (keys) => {
@@ -2474,6 +2543,8 @@ watch(
           </div>
           <el-select
             v-model="formData.videoLinkFieldId"
+            :loading="fieldListLoading"
+            :disabled="fieldListLoading || loading || taskDialogLoading"
             filterable
             placeholder="输入字段名称搜索或选择"
             no-match-text="未找到匹配字段"
@@ -2840,6 +2911,8 @@ watch(
                 <div class="c-label">作品链接所在字段</div>
                 <el-select
                   v-model="taskDialogForm.videoLinkFieldId"
+                  :loading="fieldListLoading"
+                  :disabled="fieldListLoading || loading || taskDialogLoading"
                   filterable
                   placeholder="输入字段名称搜索或选择"
                   no-match-text="未找到匹配字段"

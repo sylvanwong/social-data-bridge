@@ -8,7 +8,7 @@ import { bitable, FieldType, DateFormatter, NumberFormatter } from '@lark-base-o
 
 // Exercise the real page handlers, substituting only their SDK and external dependencies.
 function pageHandler(page, name, bindings) {
-  bindings = { writeMode: { value: 'upsert' }, editingTaskId: { value: null }, taskMappingDraft: { value: [] }, mappingDraft: { value: [] }, taskOutputLoading: { value: false }, taskOutputError: { value: '' }, taskOutputTableId: { value: '' }, taskOutputConfigReady: { value: true }, taskDialogVisible: { value: false }, tableConfigApplying: { value: false }, mainOutputTableId: { value: '' }, mainConfigReadId: { value: 0 }, taskConfigReadId: { value: 0 }, fieldReadRequests: new WeakMap(), taskTableFieldOptions: { value: [] }, tableFieldOptions: { value: [] }, ...bindings };
+  bindings = { formData: { value: {} }, fieldListLoading: { value: false }, linkFieldContext: { tableId: '', viewId: '', fieldName: '', pendingSelection: null }, writeMode: { value: 'upsert' }, editingTaskId: { value: null }, taskMappingDraft: { value: [] }, mappingDraft: { value: [] }, taskOutputLoading: { value: false }, taskOutputError: { value: '' }, taskOutputTableId: { value: '' }, taskOutputConfigReady: { value: true }, taskDialogVisible: { value: false }, tableConfigApplying: { value: false }, mainOutputTableId: { value: '' }, mainConfigReadId: { value: 0 }, taskConfigReadId: { value: 0 }, fieldReadRequests: new WeakMap(), taskTableFieldOptions: { value: [] }, tableFieldOptions: { value: [] }, ...bindings };
   if (name === 'saveTableOutputConfig' && !bindings.persistTableOutputConfig) {
     bindings.persistTableOutputConfig = pageHandler(page, 'persistTableOutputConfig', { ...bindings, createTableConfigSaver });
   }
@@ -431,6 +431,177 @@ for (const page of ['VideoDataFetch', 'BloggerInfoFetch', 'ProfileFetch']) {
     assert.equal(created.snapshot.source_view_id, 'B-view');
   });
 }
+
+function videoLinkFieldPage() {
+  const tables = new Map();
+  const reads = [], pendingReads = [], outputTables = [];
+  const bindings = {
+    formData: { value: { mode: 'table', targetType: 'current', videoLinkFieldId: 'A-link' } },
+    fieldOptions: { value: [{ id: 'A-link', name: '作品链接' }] },
+    fieldListLoading: { value: false }, fieldReadRequests: new WeakMap(),
+    linkFieldContext: { tableId: 'A', viewId: 'A-view', fieldName: '作品链接', pendingSelection: null },
+    loading: { value: false }, taskDialogLoading: { value: false },
+    taskDialogVisible: { value: false }, taskDialogMode: { value: 'create' },
+    taskDialogForm: { value: { videoLinkFieldId: 'saved-link' } },
+    mainOutputTableId: { value: 'A' },
+    applyTableConfig: async id => outputTables.push(id),
+    FieldType, console: { error() {} }, ElNotification: () => assert.fail('自动刷新不应弹出通知'),
+    bitable: { base: {
+      getActiveTable: async () => assert.fail('切表刷新应使用事件里的表 ID'),
+      getTableById: async id => {
+        reads.push(id);
+        return { id, getViewById: async viewId => ({
+          id: viewId, getFieldMetaList: async () => {
+            const fields = tables.get(id);
+            return typeof fields === 'function' ? fields() : fields;
+          },
+        }) };
+      },
+    } },
+  };
+  const load = pageHandler('VideoDataFetch', 'getFieldListByType', bindings);
+  bindings.getFieldListByType = options => {
+    const pending = load(options);
+    pendingReads.push(pending);
+    return pending;
+  };
+  const change = pageHandler('VideoDataFetch', 'handleSourceSelectionChange', bindings);
+  return { ...bindings, tables, reads, pendingReads, outputTables, change,
+    switchTo: id => change({ data: { tableId: id, viewId: id ? `${id}-view` : null } }),
+    flush: () => Promise.all(pendingReads),
+  };
+}
+
+test('作品详情切表：自动选中新表同名列的新 ID，同表点击不刷新且不记忆各表选择', async () => {
+  const page = videoLinkFieldPage();
+  page.tables.set('B', [
+    { id: 'B-number', name: '其他字段', type: FieldType.Number },
+    { id: 'B-link', name: '作品链接', type: FieldType.Url },
+  ]);
+  page.tables.set('A', [{ id: 'A-new-link', name: '作品链接', type: FieldType.Text }]);
+  page.tables.set('C', [{ id: 'C-title', name: '标题', type: FieldType.Text }]);
+  page.switchTo('B');
+  assert.equal(page.formData.value.videoLinkFieldId, '');
+  assert.deepEqual(page.fieldOptions.value, []);
+  assert.equal(page.fieldListLoading.value, true);
+  await page.flush();
+  assert.equal(page.formData.value.videoLinkFieldId, 'B-link');
+  assert.deepEqual(page.fieldOptions.value, [{ id: 'B-link', name: '作品链接' }]);
+  assert.equal(page.fieldListLoading.value, false);
+  page.change({ data: { tableId: 'B', viewId: 'B-view', recordId: 'r2', fieldId: 'another-field' } });
+  assert.deepEqual(page.reads, ['B']);
+  assert.equal(page.formData.value.videoLinkFieldId, 'B-link');
+  page.switchTo('A');
+  await page.flush();
+  assert.equal(page.formData.value.videoLinkFieldId, 'A-new-link');
+  page.switchTo('C');
+  await page.flush();
+  assert.equal(page.formData.value.videoLinkFieldId, '');
+  page.switchTo('A');
+  await page.flush();
+  assert.equal(page.formData.value.videoLinkFieldId, '');
+  assert.deepEqual(page.outputTables, ['B', 'A', 'C', 'A']);
+});
+
+for (const [scenario, fields] of [
+  ['没有同名列', [{ id: 'B-link', name: '其他链接', type: FieldType.Url }]],
+  ['同名列类型不支持', [{ id: 'B-number', name: '作品链接', type: FieldType.Number }]],
+  ['同名列不唯一', [{ id: 'B-link1', name: '作品链接', type: FieldType.Url }, { id: 'B-link2', name: '作品链接', type: FieldType.Text }]],
+]) {
+  test(`作品详情切表：${scenario}时清空选中项`, async () => {
+    const page = videoLinkFieldPage();
+    page.tables.set('B', fields);
+    page.switchTo('B');
+    await page.flush();
+    assert.equal(page.formData.value.videoLinkFieldId, '');
+    assert.equal(page.fieldListLoading.value, false);
+    assert.ok(page.fieldOptions.value.every(field => fields.some(meta => meta.id === field.id && [FieldType.Text, FieldType.Url].includes(meta.type))));
+  });
+}
+
+for (const result of ['success', 'error']) {
+  test(`作品详情快速切表：旧表读取${result}都不能覆盖新表选项`, async () => {
+    const page = videoLinkFieldPage();
+    let finishOld;
+    page.tables.set('B', () => new Promise((resolve, reject) => {
+      finishOld = () => result === 'success'
+        ? resolve([{ id: 'B-link', name: '作品链接', type: FieldType.Url }])
+        : reject(new Error('旧表读取失败'));
+    }));
+    page.tables.set('C', [{ id: 'C-link', name: '作品链接', type: FieldType.Text }]);
+    page.switchTo('B');
+    await new Promise(resolve => setImmediate(resolve));
+    page.switchTo('C');
+    await page.pendingReads[1];
+    assert.equal(page.formData.value.videoLinkFieldId, 'C-link');
+    finishOld();
+    await page.flush();
+    assert.deepEqual(page.fieldOptions.value, [{ id: 'C-link', name: '作品链接' }]);
+    assert.equal(page.formData.value.videoLinkFieldId, 'C-link');
+    assert.equal(page.fieldListLoading.value, false);
+  });
+}
+
+test('作品详情切表：执行中和编辑旧任务时保留来源，结束后处理最后一次切表', async () => {
+  for (const busy of ['loading', 'taskDialogLoading', 'edit']) {
+    const page = videoLinkFieldPage();
+    page.tables.set('C', [{ id: 'C-link', name: '作品链接', type: FieldType.Url }]);
+    if (busy === 'edit') {
+      page.taskDialogVisible.value = true;
+      page.taskDialogMode.value = 'edit';
+    } else {
+      page[busy].value = true;
+    }
+    page.switchTo('B');
+    page.switchTo('C');
+    assert.equal(page.formData.value.videoLinkFieldId, 'A-link');
+    assert.equal(page.taskDialogForm.value.videoLinkFieldId, 'saved-link');
+    assert.deepEqual(page.reads, []);
+    assert.equal(page.linkFieldContext.pendingSelection.tableId, 'C');
+    page.loading.value = false;
+    page.taskDialogLoading.value = false;
+    page.taskDialogVisible.value = false;
+    page.change({ data: page.linkFieldContext.pendingSelection });
+    await page.flush();
+    assert.equal(page.formData.value.videoLinkFieldId, 'C-link');
+    assert.equal(page.linkFieldContext.pendingSelection, null);
+    assert.equal(page.taskDialogForm.value.videoLinkFieldId, 'saved-link');
+  }
+});
+
+test('作品详情切表：离开数据表时清空选项，取消旧请求和加载状态', async () => {
+  const page = videoLinkFieldPage();
+  let finish;
+  page.tables.set('B', () => new Promise(resolve => { finish = resolve; }));
+  page.switchTo('B');
+  await new Promise(resolve => setImmediate(resolve));
+  page.switchTo(null);
+  assert.equal(page.fieldListLoading.value, false);
+  assert.equal(page.formData.value.videoLinkFieldId, '');
+  finish([{ id: 'B-link', name: '作品链接', type: FieldType.Url }]);
+  await page.flush();
+  assert.deepEqual(page.fieldOptions.value, []);
+  assert.equal(page.formData.value.videoLinkFieldId, '');
+});
+
+test('作品详情：执行或保存期间不通过下拉刷新改变当前来源字段', () => {
+  const loading = { value: true }, taskDialogLoading = { value: false };
+  let reads = 0;
+  const open = pageHandler('VideoDataFetch', 'handleLinkFieldDropdownVisibleChange', {
+    loading, taskDialogLoading, getFieldListByType: () => { reads++; },
+  });
+  open(true);
+  assert.equal(reads, 0);
+  loading.value = false;
+  taskDialogLoading.value = true;
+  open(true);
+  assert.equal(reads, 0);
+  taskDialogLoading.value = false;
+  open(false);
+  assert.equal(reads, 0);
+  open(true);
+  assert.equal(reads, 1);
+});
 
 test('VideoDataFetch：跨表编辑保存任务时，字段映射写入原来源表', async () => {
   const config = { mode: 'table', targetType: 'current', sourceTableId: 'A', resolvedTargetTableId: 'A', fieldMappings: [], writeMode: 'upsert' };
