@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { createTableConfigSaver } from '../src/utils/tableOutputConfig.mjs';
+import { bitable, FieldType, DateFormatter, NumberFormatter } from '@lark-base-open/js-sdk';
 
 // Exercise the real page handlers, substituting only their SDK and external dependencies.
 function pageHandler(page, name, bindings) {
@@ -258,6 +259,116 @@ for (const page of ['VideoDataFetch', 'BloggerInfoFetch', 'ProfileFetch']) {
     assert.equal(page === 'ProfileFetch' ? rows[0] : rows[0].url, 'https://example.test/A');
   });
 }
+
+// Keep the SDK's real field transforms; substitute only host metadata and writes.
+async function videoOutputTable() {
+  const base = Object.create(bitable.base, {
+    isTableExist: { value: async () => true },
+    tableMapCache: { value: new Map() },
+  });
+  const table = await base.getTableById('output');
+  const meta = [
+    { id: 'author', name: '作者名称', type: FieldType.Text },
+    { id: 'tags', name: '标签', type: FieldType.MultiSelect, property: { options: [] } },
+    { id: 'platform', name: '平台', type: FieldType.Text },
+    { id: 'video', name: '作品ID', type: FieldType.Text },
+  ];
+  const writes = [];
+  Object.defineProperties(table, {
+    isFieldExist: { value: async id => meta.some(field => field.id === id) },
+    getFieldMetaById: { value: async id => meta.find(field => field.id === id) },
+    getFieldMetaList: { value: async () => meta },
+    setField: { value: async (id, config) => {
+      const field = meta.find(field => field.id === id);
+      field.property = { ...config.property, options: config.property.options.map((option, index) => ({ id: option.id || `option-${index}`, ...option })) };
+    } },
+    setRecord: { value: async (recordId, record) => writes.push({ recordId, ...record }) },
+    setRecords: { value: async records => writes.push(...records) },
+    addRecords: { value: async records => {
+      for (const cells of records) {
+        const entries = await Promise.all(cells.map(async cell => [cell.getFieldId(), await cell.getValue()]));
+        writes.push({ fields: Object.fromEntries(entries) });
+      }
+    } },
+    getRecordsByPage: { value: async () => ({ records: [{ recordId: 'existing', fields: {
+      platform: [{ type: 'text', text: 'xhs' }], video: [{ type: 'text', text: 'video-1' }],
+    } }], hasMore: false }) },
+  });
+  for (const field of await table.getFieldList()) {
+    Object.defineProperties(field, {
+      getName: { value: async () => meta.find(item => item.id === field.id).name },
+      getType: { value: async () => field.type },
+      getMeta: { value: async () => meta.find(item => item.id === field.id) },
+    });
+  }
+  return { table, writes };
+}
+
+for (const caption of [undefined, null, '', '  \n ', [], [' ', '']]) {
+  test(`作品详情：空标签 ${JSON.stringify(caption)} 使用真实 SDK 写入当前表，不影响作者名称`, async () => {
+    const { table, writes } = await videoOutputTable();
+    const bindings = { FieldType, DateFormatter, NumberFormatter, httpToHttps: value => value,
+      console: { log() {}, error() {} }, stopRequested: { value: false }, props: { api_key: 'test-only' },
+      TASK_TOAST_SUFFIX: '', showToast() {},
+      request: async () => ({ data: { sta: 0, data: { nickname: '正常作者', caption } } }),
+      ElNotification: value => assert.fail(value.message),
+      writeErrorMessageToFirstField: () => assert.fail('成功响应不应覆盖作者名称'),
+    };
+    bindings.normalizeTagTextValue = pageHandler('VideoDataFetch', 'normalizeTagTextValue', bindings);
+    bindings.normalizeFieldValue = pageHandler('VideoDataFetch', 'normalizeFieldValue', bindings);
+    const configs = pageHandler('VideoDataFetch', 'FIELD_CONFIG', bindings).filter(config => ['nickname', 'caption'].includes(config.key));
+    const write = pageHandler('VideoDataFetch', 'writeDataToRecord', bindings);
+    const fetch = pageHandler('VideoDataFetch', 'fetchVideoDataByRows', bindings);
+    const result = await fetch([{ recordId: 'r1', url: 'https://example.test' }], {
+      sourceTable: table, writeFailureToCurrent: true, fieldNameToId: { 作者名称: 'author', 标签: 'tags' },
+      activeFieldConfigs: configs,
+      onSuccess: item => write(table, item.__recordId, item, { 作者名称: 'author', 标签: 'tags' }, configs),
+    });
+    assert.deepEqual(result, { successCount: 1, failCount: 0, stopped: false });
+    assert.deepEqual(writes, [{ recordId: 'r1', fields: { author: [{ type: 'text', text: '正常作者' }], tags: [] } }]);
+  });
+}
+
+for (const writeMode of ['append', 'upsert']) {
+  test(`作品详情：${writeMode} 使用真实 SDK 写入空标签及非空标签`, async () => {
+    const { table, writes } = await videoOutputTable();
+    const bindings = { FieldType, DateFormatter, NumberFormatter, httpToHttps: value => value,
+      bitable: { base: { getTableById: async () => table } }, console: { log() {}, error() {} } };
+    bindings.normalizeTagTextValue = pageHandler('VideoDataFetch', 'normalizeTagTextValue', bindings);
+    bindings.normalizeFieldValue = pageHandler('VideoDataFetch', 'normalizeFieldValue', bindings);
+    bindings.FIELD_CONFIG = pageHandler('VideoDataFetch', 'FIELD_CONFIG', bindings);
+    bindings.createCellValue = pageHandler('VideoDataFetch', 'createCellValue', bindings);
+    const configs = bindings.FIELD_CONFIG.filter(config => ['nickname', 'caption', 'social_type', 'social_id'].includes(config.key));
+    const append = pageHandler('VideoDataFetch', 'appendRecordsToTable', bindings);
+    for (const caption of ['', '标签一 标签二']) {
+      await append('output', [{ nickname: '正常作者', caption, social_type: 'xhs', social_id: 'video-1' }], configs, { writeMode });
+    }
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes.map(record => record.fields.author), Array(2).fill([{ type: 'text', text: '正常作者' }]));
+    assert.deepEqual(writes[0].fields.tags, []);
+    assert.deepEqual(writes[1].fields.tags.map(tag => tag.text), ['标签一', '标签二']);
+    assert.equal(writes[0].recordId, writeMode === 'upsert' ? 'existing' : undefined);
+  });
+}
+
+test('作品详情：接口成功后本地写入失败，不把异常写入作者名称', async () => {
+  const notifications = [];
+  const bindings = {
+    console: { log() {}, error() {} }, stopRequested: { value: false }, props: { api_key: 'test-only' },
+    TASK_TOAST_SUFFIX: '', showToast() {}, ElNotification: value => notifications.push(value),
+    request: async () => ({ data: { sta: 0, data: { nickname: '正常作者' } } }),
+    writeErrorMessageToFirstField: () => assert.fail('本地写入异常不应覆盖作者名称'),
+  };
+  const fetch = pageHandler('VideoDataFetch', 'fetchVideoDataByRows', bindings);
+  const result = await fetch([{ recordId: 'r1', url: 'https://example.test' }], {
+    sourceTable: {}, writeFailureToCurrent: true, fieldNameToId: { 作者名称: 'author' },
+    activeFieldConfigs: [{ name: '作者名称' }],
+    onSuccess: async () => { throw new TypeError('e11 is not iterable'); },
+  });
+  assert.deepEqual(result, { successCount: 0, failCount: 1, stopped: false });
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0].message, /写入失败.*e11 is not iterable/);
+});
 
 test('作品详情失败信息写回源表，切表后不会写入新当前表', async () => {
   const writes = [];

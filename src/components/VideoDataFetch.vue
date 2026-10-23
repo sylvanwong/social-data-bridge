@@ -205,11 +205,12 @@ const normalizeTimeValue = (value) => {
 
 const normalizeTagTextValue = (value, fieldType) => {
   if (fieldType === FieldType.MultiSelect) {
+    // 多选字段的 createCell 需要可迭代值，空标签使用 [] 清空。
     if (Array.isArray(value)) {
       const tags = value
         .map(item => typeof item === 'string' ? item.trim() : '')
         .filter(Boolean);
-      return tags.length ? tags : null;
+      return tags;
     }
 
     if (typeof value === 'string') {
@@ -217,10 +218,10 @@ const normalizeTagTextValue = (value, fieldType) => {
         .split(/\s+/)
         .map(item => item.trim())
         .filter(Boolean);
-      return tags.length ? tags : null;
+      return tags;
     }
 
-    return null;
+    return [];
   }
 
   if (Array.isArray(value)) {
@@ -1346,6 +1347,7 @@ const fetchVideoDataByRows = async (rowList, {
     }
 
     const { url, recordId, rawValue } = rowList[index];
+    let dataFetched = false;
 
     try {
       showToast(`正在处理 ${Math.min(index + 1, rowList.length)}/${rowList.length} 条...${TASK_TOAST_SUFFIX}`, true);
@@ -1366,6 +1368,7 @@ const fetchVideoDataByRows = async (rowList, {
       console.log(`接口返回数据:`, res);
 
       if (res.sta === 0 && res.data) {
+        dataFetched = true;
         const item = { ...res.data, __recordId: recordId };
         if (onSuccess) {
           await onSuccess(item, index);
@@ -1387,7 +1390,9 @@ const fetchVideoDataByRows = async (rowList, {
       if (error?.code === 'INVALID_API_KEY') {
         throw error;
       }
-      if (writeFailureToCurrent && recordId && fieldNameToId) {
+      if (dataFetched) {
+        ElNotification({ message: `第 ${index + 1} 条数据写入失败：${errorMessage}`, type: 'error', duration: 0 });
+      } else if (writeFailureToCurrent && recordId && fieldNameToId) {
         await writeErrorMessageToFirstField(sourceTable, recordId, errorMessage, fieldNameToId, activeFieldConfigs);
       }
       failCount++;
