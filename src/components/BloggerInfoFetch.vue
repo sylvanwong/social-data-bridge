@@ -14,7 +14,7 @@ const props = defineProps({
 });
 
 const TASK_PLUGIN_TYPE = 'blogger_info';
-const TASK_API_PATH = '/social/api/v1/feishu/schle/tasks';
+const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 const MANUAL_TABLE_BASE_NAME = '博主信息';
