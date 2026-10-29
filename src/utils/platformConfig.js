@@ -12,6 +12,7 @@ export const PLATFORM_LABELS = {
   zhihu: '知乎',
   toutiao: '今日头条',
   tieba: '百度贴吧',
+  haokan: '好看视频',
   instagram: 'Instagram',
   youtube: 'YouTube',
   x: 'X',
