@@ -1,7 +1,7 @@
 <script setup>
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage, ElNotification } from "element-plus";
-import { computed, ref, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
 
@@ -218,14 +218,29 @@ const showErrorMsg = (message) => {
 
 const showToast = (text, isLoading = true) => {
   if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = null;
   toastText.value = text;
   toastLoading.value = isLoading;
   toastVisible.value = true;
 };
 
+const hideToast = () => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+  toastVisible.value = false;
+};
+
 const showCompletionToast = (text) => {
   showToast(text, false);
-  toastTimer = setTimeout(() => { toastVisible.value = false; }, 3000);
+  toastTimer = setTimeout(hideToast, 3000);
+};
+
+const showFieldProgress = (message) => {
+  showToast(isCancelling.value
+    ? `正在停止任务，已写入 ${commentStreamTask.getActiveTask()?.writtenCount || 0} 条评论`
+    : `${message}，请勿关闭插件，关闭将中断任务`, true);
 };
 
 const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
@@ -687,17 +702,21 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
     let resolvedTargetTableId = targetTableId;
     if (!type && !resolvedTargetTableId) {
       const tableName = '社媒评论加载工具';
+      options.onProgress?.('正在创建评论目标表...');
       const { tableId } = await createSequentialTable(tableName);
       const newTable = await bitable.base.getTable(tableId);
       await bitable.ui.switchToTable(tableId);
       const fieldMetaList = await newTable.getFieldMetaList();
       const firstFieldId = fieldMetaList[0]?.id;
       if (firstFieldId) {
+        options.onProgress?.(`正在创建字段 1/${fields.length}：${activeFieldConfigs[0].name}...`);
         await newTable.setField(firstFieldId, { ...fields[0] });
       }
       for (let i = 1; i < fields.length; i++) {
+        options.onProgress?.(`正在创建字段 ${i + 1}/${fields.length}：${activeFieldConfigs[i].name}...`);
         await newTable.addField({ ...fields[i] });
       }
+      options.onProgress?.('正在设置字段格式...');
       resolvedTargetTableId = tableId;
       await options.onTargetTableReady?.(tableId);
     }
@@ -714,14 +733,19 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
           .map(item => [item.source_key, item.target_field_id])
       );
 
-      for (const config of activeFieldConfigs) {
-        if (!mappingBySource.has(config.key) && !existingFieldMap.has(config.name)) {
-          await activeTable.addField(buildFieldPayload(config));
-        }
+      const missingFields = activeFieldConfigs.filter(config =>
+        !mappingBySource.has(config.key) && !existingFieldMap.has(config.name)
+      );
+      if (missingFields.length) {
+        options.onProgress?.(`正在创建字段（共 ${missingFields.length} 个）...`);
+      }
+      for (const [index, config] of missingFields.entries()) {
+        options.onProgress?.(`正在创建字段 ${index + 1}/${missingFields.length}：${config.name}...`);
+        await activeTable.addField(buildFieldPayload(config));
       }
 
       existingFieldMap = await getFieldInstanceMapByConfigs(activeTable, activeFieldConfigs);
-
+      options.onProgress?.('正在设置字段格式...');
       for (const config of activeFieldConfigs) {
         const mappedFieldId = mappingBySource.get(config.key);
         const field = mappedFieldId
@@ -859,6 +883,7 @@ const commentStreamTask = useIncrementalTask({
       writeMode: task.writeMode || 'upsert',
       fieldMappings: task.fieldMappings || [],
       upsertCacheKey: task.taskId,
+      onProgress: showFieldProgress,
       onTargetTableReady: async (tableId) => { task.targetTableId = tableId; },
     });
     task.targetTableId = result?.tableId || task.targetTableId;
@@ -921,6 +946,7 @@ const cancelCommentTask = async () => {
 };
 
 const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {}) => {
+  showToast('正在提交评论采集任务...请勿关闭插件，关闭将中断任务', true);
   await request({
     url: "/social/api/v1/feishu/comment/task",
     method: "post",
@@ -946,6 +972,7 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
       } else {
         loading.value = false;
         activeCommentTaskId.value = '';
+        showCompletionToast(res.msg || '提交任务失败');
         showErrorMsg(res.msg);
       }
     })
@@ -953,12 +980,14 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
       loading.value = false;
       activeCommentTaskId.value = '';
       console.log(error);
+      showCompletionToast(error.message || '提交任务失败');
       showErrorMsg(error.message || '请求失败');
     });
 };
 
 const getNoteData = async (targetTableId = "", urlList = []) => {
   if (urlList.length === 0) {
+    showCompletionToast('没有可处理的帖子链接');
     showErrorMsg("请至少输入一个有效的帖子链接");
     return;
   }
@@ -1008,33 +1037,44 @@ const commit = async () => {
       return;
     }
 
+    showToast('正在启动评论列表获取...请勿关闭插件，关闭将中断任务', true);
+    await nextTick();
     let urlList = [];
     if (mode === 'manual') {
       if (!manualUrls || !manualUrls.trim()) {
+        showCompletionToast('任务未开始');
         showErrorMsg("请输入帖子链接");
         return;
       }
       urlList = parseManualUrls(manualUrls);
     } else {
       if (!noteLinkFieldId) {
+        showCompletionToast('任务未开始');
         showErrorMsg("请选择帖子链接字段");
         return;
       }
       if (noteLinkFieldId === 'nodata') {
+        showCompletionToast('当前不在数据表页面，任务未开始');
         showErrorMsg("未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。");
         return;
       }
+      showToast('正在读取待处理记录...请勿关闭插件，关闭将中断任务', true);
       const recordIdList = await getRecordIdListByScope(scope, rowCount);
       if (!recordIdList) {
+        showCompletionToast('任务未开始');
         return;
       }
+      showToast('正在读取作品链接...请勿关闭插件，关闭将中断任务', true);
       urlList = await getNoteUrlsByFieldId(recordIdList, noteLinkFieldId);
     }
 
     if (radio === 2) {
+      showToast('正在检查目标表字段...请勿关闭插件，关闭将中断任务', true);
       const isValid = await validateTableFields(table_id);
       if (isValid) {
         await getNoteData(table_id, urlList);
+      } else {
+        showCompletionToast('目标字段校验未通过，任务未开始');
       }
       return;
     }
@@ -1042,6 +1082,7 @@ const commit = async () => {
     await getNoteData("", urlList);
   } catch (error) {
     console.error("提交评论采集任务失败:", error);
+    showCompletionToast(`任务提交失败：${error.message || '请稍后重试'}`);
     showErrorMsg(error.message || "提交失败，请稍后重试");
   } finally {
     isSubmitting.value = false;

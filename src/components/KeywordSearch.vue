@@ -1,7 +1,7 @@
 <script setup>
 import { bitable } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
-import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import request from '@/utils/request'
 import { useSocialData, showErrorMsg, KEYWORD_SEARCH_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
@@ -291,14 +291,29 @@ const {
 
 const showToast = (text, isLoading = true) => {
   if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = null;
   toastText.value = text;
   toastLoading.value = isLoading;
   toastVisible.value = true;
 };
 
+const hideToast = () => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+  toastVisible.value = false;
+};
+
 const showCompletionToast = (text) => {
   showToast(text, false);
-  toastTimer = setTimeout(() => { toastVisible.value = false; }, 3000);
+  toastTimer = setTimeout(hideToast, 3000);
+};
+
+const showFieldProgress = (message) => {
+  showToast(isCancelling.value
+    ? getStoppingText(keywordStreamTask.getActiveTask() || { writtenCount: 0 })
+    : `${message}${TASK_TOAST_SUFFIX}`, true);
 };
 
 const loadSelectedFieldKeys = async () => {
@@ -364,6 +379,7 @@ const keywordStreamTask = useIncrementalTask({
       writeMode: task.writeMode || 'upsert',
       upsertCacheKey: task.taskId,
       fieldMappings: task.fieldMappings || [],
+      onProgress: showFieldProgress,
       onTargetTableReady: async (tableId) => { task.targetTableId = tableId; },
     });
     task.targetTableId = result?.tableId || task.targetTableId;
@@ -475,6 +491,7 @@ const postSearchTask = async (targetTableId = "") => {
   } else if (socialType === 'tiktok') {
     filter_config = { content_type: formData1.value.content_type };
   }
+  showToast(`正在提交关键词搜索任务...${TASK_TOAST_SUFFIX}`, true);
   await request({
     url: "/social/api/v1/feishu/keyword/task",
     method: "post",
@@ -504,6 +521,7 @@ const postSearchTask = async (targetTableId = "") => {
       } else {
         loading.value = false;
         activeKeywordTaskId.value = '';
+        showCompletionToast(res.msg || '提交任务失败');
         showErrorMsg(res.msg);
       }
     })
@@ -511,6 +529,7 @@ const postSearchTask = async (targetTableId = "") => {
       loading.value = false;
       activeKeywordTaskId.value = '';
       console.log(error);
+      showCompletionToast(error.message || '提交任务失败');
       showErrorMsg(error.message || '请求失败');
     });
 };
@@ -687,14 +706,20 @@ const commit = async () => {
       return;
     }
 
+    showToast(`正在启动关键词搜索...${TASK_TOAST_SUFFIX}`, true);
+    await nextTick();
     if (radio === 2) {
+      showToast(`正在检查目标表字段...${TASK_TOAST_SUFFIX}`, true);
       const isValid = await validateTableFields(table_id, selectedFieldKeys.value, {
         successMessageSuffix: `，${TASK_TOAST_SUFFIX}`,
         writeMode: formData1.value.writeMode,
         fieldMappings: mappingDraft.value,
+        onProgress: showFieldProgress,
       });
       if (isValid) {
         await getSearchData(table_id);
+      } else {
+        showCompletionToast('目标字段校验未通过，任务未开始');
       }
       return;
     }
@@ -704,6 +729,7 @@ const commit = async () => {
     bitable.bridge.setData("search_keyword", formData1.value.keyword);
   } catch (error) {
     console.error("提交关键词搜索任务失败:", error);
+    showCompletionToast(`任务提交失败：${error.message || '请稍后重试'}`);
     showErrorMsg(error.message || "提交失败，请稍后重试");
   } finally {
     isSubmitting.value = false;

@@ -4,7 +4,7 @@ import InputFilterEditor from './InputFilterEditor.vue';
 import { cloneInputFilter, prepareInputFilter, filterRecordIds } from '@/utils/inputFilter.mjs';
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
-import { computed, ref, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request from '@/utils/request'
 import { useSocialData, showErrorMsg, PROFILE_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 
@@ -602,7 +602,17 @@ const showToast = (text, isLoading = true) => {
 };
 
 const hideToast = () => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
   toastVisible.value = false;
+};
+
+const showProfileFieldProgress = (message) => {
+  showToast(isCancelling.value
+    ? getStoppingText(activeStreamTask)
+    : `${message}${TASK_TOAST_SUFFIX}`, true);
 };
 
 const showCompletionToast = (text) => {
@@ -706,6 +716,7 @@ const drainAvailablePosts = async (streamTask) => {
         fieldMappings: streamTask.fieldMappings,
         writeMode: streamTask.writeMode,
         upsertCacheKey: streamTask.taskId,
+        onProgress: showProfileFieldProgress,
         onTargetTableReady: async (tableId) => {
           streamTask.targetTableId = tableId;
           await saveStreamTask(streamTask);
@@ -1361,7 +1372,9 @@ const submitProfileUrls = async (urlList, targetTableId = "") => {
   const urlText = urlList.join('\n');
 
   try {
+    showToast('正在保存作者作品采集配置...', true);
     await saveTableOutputConfig();
+    showToast('正在提交作者作品采集任务...', true);
     await postProfileTask(targetTableId, urlText, {
       fieldMappings: cloneFieldMappings(mappingDraft.value),
       writeMode: formData.value.writeMode,
@@ -1386,6 +1399,9 @@ const handleImmediateSubmit = async () => {
       return;
     }
 
+    showToast(`正在启动作者作品获取...${TASK_TOAST_SUFFIX}`, true);
+    await nextTick();
+    showToast(`正在读取作者主页与作品范围...${TASK_TOAST_SUFFIX}`, true);
     const sourceTable = formData.value.mode === 'table' ? await bitable.base.getActiveTable() : null;
     const inputFilter = await validateConfiguredInputFilter(formData.value, sourceTable);
     let urlList = [];
@@ -1394,19 +1410,24 @@ const handleImmediateSubmit = async () => {
     } else {
       let recordIdList = await getRecordIdListByScope(sourceTable, formData.value.scope, formData.value.rowCount);
       if (!recordIdList) {
+        showCompletionToast('任务未开始');
         return;
       }
       if (inputFilter) {
+        showToast(`正在筛选符合条件的记录...${TASK_TOAST_SUFFIX}`, true);
         recordIdList = await filterRecordIds(sourceTable, recordIdList, inputFilter);
         if (!recordIdList.length) {
+          showCompletionToast('没有符合筛选条件的数据');
           ElNotification({ message: '没有符合筛选条件的数据', type: 'info' });
           return;
         }
       }
+      showToast(`正在读取作者主页链接...${TASK_TOAST_SUFFIX}`, true);
       urlList = await getProfileUrlsByFieldId(sourceTable, recordIdList, formData.value.profileLinkFieldId);
     }
 
     if (inputFilter && !urlList.length) {
+      showCompletionToast('符合条件的行中没有可用链接');
       ElNotification({ message: '符合条件的行中没有可用链接', type: 'info' });
       return;
     }
@@ -1416,9 +1437,12 @@ const handleImmediateSubmit = async () => {
         successMessageSuffix: `，${TASK_TOAST_SUFFIX}`,
         fieldMappings: cloneFieldMappings(mappingDraft.value),
         writeMode: formData.value.writeMode,
+        onProgress: showProfileFieldProgress,
       });
       if (isValid) {
         await submitProfileUrls(urlList, formData.value.targetTableId);
+      } else {
+        showCompletionToast('目标字段校验未通过，任务未开始');
       }
       return;
     }
@@ -1426,6 +1450,7 @@ const handleImmediateSubmit = async () => {
     await submitProfileUrls(urlList, '');
   } catch (error) {
     console.error('提交博主作品采集任务失败:', error);
+    showCompletionToast(`任务提交失败：${error.message || '请稍后重试'}`);
     showErrorMsg(error.message || '提交失败，请稍后重试');
   } finally {
     isSubmitting.value = false;

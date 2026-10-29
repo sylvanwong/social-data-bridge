@@ -3,7 +3,7 @@ import { createTableConfigSaver } from '@/utils/tableOutputConfig.mjs';
 import InputFilterEditor from './InputFilterEditor.vue';
 import { cloneInputFilter, prepareInputFilter, filterRecordIds } from '@/utils/inputFilter.mjs';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { computed, ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { ElNotification } from "element-plus";
 import request from '@/utils/request';
 
@@ -14,7 +14,7 @@ const props = defineProps({
 });
 
 const TASK_PLUGIN_TYPE = 'blogger_info';
-const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
+const TASK_API_PATH = '/social/api/v1/feishu/schle/tasks';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 const MANUAL_TABLE_BASE_NAME = '博主信息';
@@ -164,6 +164,7 @@ const stopRequested = ref(false);
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
+let toastTimer = null;
 const selectedFieldKeys = ref([]);
 const writeMode = ref('upsert');
 const mappingDraft = ref([]);
@@ -655,7 +656,8 @@ const createManualTargetTable = async () => {
   return tableId;
 };
 
-const setupNewTableFields = async (tableId, activeFieldConfigs) => {
+const setupNewTableFields = async (tableId, activeFieldConfigs, onProgress = null) => {
+  onProgress?.('正在准备新表字段...');
   const table = await bitable.base.getTableById(tableId);
   const fieldMetaList = await table.getFieldMetaList();
   const defaultFirstField = fieldMetaList[0];
@@ -665,6 +667,7 @@ const setupNewTableFields = async (tableId, activeFieldConfigs) => {
   }
 
   if (defaultFirstField && defaultFirstField.name === '文本') {
+    onProgress?.(`正在创建字段 1/${activeFieldConfigs.length}：${activeFieldConfigs[0].name}...`);
     await table.setField(defaultFirstField.id, {
       type: activeFieldConfigs[0].type,
       name: activeFieldConfigs[0].name
@@ -673,9 +676,11 @@ const setupNewTableFields = async (tableId, activeFieldConfigs) => {
 
   for (let index = 1; index < activeFieldConfigs.length; index++) {
     const config = activeFieldConfigs[index];
+    onProgress?.(`正在创建字段 ${index + 1}/${activeFieldConfigs.length}：${config.name}...`);
     await table.addField({ type: config.type, name: config.name });
   }
 
+  onProgress?.('正在设置字段格式...');
   const latestFieldList = await table.getFieldList();
   for (const field of latestFieldList) {
     const name = await field.getName();
@@ -692,10 +697,12 @@ const setupNewTableFields = async (tableId, activeFieldConfigs) => {
   }
 };
 
-const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
+const resolveTargetTableId = async (targetType, activeFieldConfigs, onProgress = null) => {
   if (targetType === 'new') {
+    onProgress?.('正在创建目标表...');
     const tableId = await createManualTargetTable();
-    await setupNewTableFields(tableId, activeFieldConfigs);
+    await setupNewTableFields(tableId, activeFieldConfigs, onProgress);
+    onProgress?.('正在切换到目标表...');
     await bitable.ui.switchToTable(tableId);
     return tableId;
   }
@@ -707,7 +714,8 @@ const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
       .map(item => item.source_key));
     const fieldNameToId = await validateAndAddFields(
       tableId,
-      activeFieldConfigs.filter(field => !mappedKeys.has(field.key))
+      activeFieldConfigs.filter(field => !mappedKeys.has(field.key)),
+      onProgress
     );
     if (!fieldNameToId) {
       return null;
@@ -775,8 +783,9 @@ const getRecordIdListByScope = async (table, scope, rowCount) => {
   return recordIdList;
 };
 
-const validateAndAddFields = async (tableId, activeFieldConfigs) => {
+const validateAndAddFields = async (tableId, activeFieldConfigs, onProgress = null) => {
   try {
+    onProgress?.('正在检查目标表字段...');
     const table = tableId
       ? await bitable.base.getTableById(tableId)
       : await bitable.base.getActiveTable();
@@ -831,8 +840,13 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
       }
     }
 
+    if (missingFields.length) {
+      onProgress?.(`正在创建字段（共 ${missingFields.length} 个）...`);
+    }
+    let createdFieldCount = 0;
     for (const fieldConfig of missingFields) {
       try {
+        onProgress?.(`正在创建字段 ${createdFieldCount + 1}/${missingFields.length}：${fieldConfig.name}...`);
         const addFieldResult = await table.addField({
           type: fieldConfig.type,
           name: fieldConfig.name
@@ -853,6 +867,7 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
           }
         }
         await ensureFieldDisplayConfig(fieldMetaMap.get(fieldConfig.name)?.id, fieldConfig);
+        createdFieldCount++;
       } catch (e) {
         ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
         return null;
@@ -1105,12 +1120,31 @@ const getCellValuesByFieldId = async (table, recordIdList, fieldId) => {
 };
 
 const showToast = (text, isLoading = true) => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
   toastText.value = text;
   toastLoading.value = isLoading;
   toastVisible.value = true;
 };
 
+const showExecutionProgress = (message) => {
+  showToast(stopRequested.value
+    ? '正在停止，等待当前操作完成...'
+    : message);
+};
+
+const finishToast = (text) => {
+  showToast(text, false);
+  toastTimer = setTimeout(hideToast, 3000);
+};
+
 const hideToast = () => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
   toastVisible.value = false;
 };
 
@@ -1749,11 +1783,15 @@ const handleTableModeSubmit = async () => {
   const executionWriteMode = writeMode.value;
   stopRequested.value = false;
   loading.value = true;
+  showToast('正在启动作者信息获取...');
+  await nextTick();
 
   try {
+    showToast('正在读取来源表数据...');
     const sourceTable = await bitable.base.getActiveTable();
     const inputFilter = await validateConfiguredInputFilter(formData.value, sourceTable);
     const activeFieldConfigs = getActiveFieldConfigs();
+    showToast('正在读取待处理记录...');
     let recordIdList = await getRecordIdListByScope(
       sourceTable,
       formData.value.scope,
@@ -1761,54 +1799,56 @@ const handleTableModeSubmit = async () => {
     );
 
     if (!recordIdList) {
-      loading.value = false;
+      finishToast('任务未开始');
       return;
     }
 
     if (inputFilter) {
+      showToast('正在筛选符合条件的记录...');
       recordIdList = await filterRecordIds(sourceTable, recordIdList, inputFilter);
       if (stopRequested.value) {
-        showToast('任务已停止', false);
-        setTimeout(() => hideToast(), 3000);
+        finishToast('任务已停止');
         return;
       }
       if (!recordIdList.length) {
+        finishToast('没有符合筛选条件的数据');
         ElNotification({ message: '没有符合筛选条件的数据', type: 'info' });
         return;
       }
     }
 
+    showToast('正在读取作者主页链接...');
     const rowList = await getCellValuesByFieldId(sourceTable, recordIdList, formData.value.profileLinkFieldId);
     if (stopRequested.value) {
-      showToast('任务已停止', false);
-      setTimeout(() => hideToast(), 3000);
+      finishToast('任务已停止');
       return;
     }
     if (inputFilter && !rowList.length) {
+      finishToast('符合条件的行中没有可用链接');
       ElNotification({ message: '符合条件的行中没有可用链接', type: 'info' });
       return;
     }
     if (formData.value.targetType === 'current') {
-      const fieldNameToId = await validateAndAddFields(sourceTable.id, activeFieldConfigs);
-      if (!fieldNameToId) return;
+      const fieldNameToId = await validateAndAddFields(sourceTable.id, activeFieldConfigs, showExecutionProgress);
+      if (!fieldNameToId) {
+        finishToast('目标字段校验未通过，任务未开始');
+        return;
+      }
       const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
         onSuccess: (item) => writeDataToRecord(sourceTable, item.__recordId, item, fieldNameToId, activeFieldConfigs, executionMappings),
       });
 
-      showToast(
+      finishToast(
         stopped
           ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
-        false
+          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`
       );
-      setTimeout(() => {
-        hideToast();
-      }, 3000);
       return;
     }
 
-    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
+    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs, showExecutionProgress);
     if (!targetTableId) {
+      finishToast('目标表字段校验未通过，任务未开始');
       return;
     }
 
@@ -1819,19 +1859,14 @@ const handleTableModeSubmit = async () => {
       }),
     });
 
-    showToast(
+    finishToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
-      false
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`
     );
-    setTimeout(() => {
-      hideToast();
-    }, 3000);
   } catch (error) {
     const errorMessage = error.message || '获取数据失败';
-    showToast(`处理失败：${errorMessage}`, false);
-    setTimeout(() => hideToast(), 3000);
+    finishToast(`处理失败：${errorMessage}`);
     ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
@@ -1853,11 +1888,15 @@ const handleManualModeSubmit = async () => {
   const executionWriteMode = writeMode.value;
   stopRequested.value = false;
   loading.value = true;
+  showToast('正在启动作者信息获取...');
+  await nextTick();
 
   try {
+    showToast('正在整理作者主页链接...');
     const rowList = urls.map(url => ({ url }));
-    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
+    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs, showExecutionProgress);
     if (!targetTableId) {
+      finishToast('目标表字段校验未通过，任务未开始');
       return;
     }
 
@@ -1868,19 +1907,14 @@ const handleManualModeSubmit = async () => {
       }),
     });
 
-    showToast(
+    finishToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
-      false
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`
     );
-    setTimeout(() => {
-      hideToast();
-    }, 3000);
   } catch (error) {
     const errorMessage = error.message || '获取数据失败';
-    showToast(`处理失败：${errorMessage}`, false);
-    setTimeout(() => hideToast(), 3000);
+    finishToast(`处理失败：${errorMessage}`);
     ElNotification({ message: errorMessage, type: 'error', duration: 0 });
   } finally {
     loading.value = false;
@@ -1938,6 +1972,10 @@ onMounted(() => {
   ]).finally(() => {
     fieldSelectionReady.value = true;
   });
+});
+
+onUnmounted(() => {
+  if (toastTimer) clearTimeout(toastTimer);
 });
 
 const getMappingSourceFields = (mappings, index, selectedKeys) => {

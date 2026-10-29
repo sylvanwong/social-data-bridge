@@ -1,7 +1,7 @@
 <script setup>
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
-import { computed, ref, onMounted, onUnmounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request from '@/utils/request'
 
 const props = defineProps({
@@ -35,6 +35,7 @@ const listPageSize = 20;
 const toastVisible = ref(false);
 const toastText = ref('');
 const toastLoading = ref(false);
+let toastTimer = null;
 const FIELD_SELECTION_STORAGE_KEY = 'series_fetch_selected_fields_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
@@ -215,13 +216,32 @@ const resetParams = () => {
 };
 
 const showToast = (text, isLoading = true) => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
   toastText.value = text;
   toastLoading.value = isLoading;
   toastVisible.value = true;
 };
 
 const hideToast = () => {
+  if (toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
   toastVisible.value = false;
+};
+
+const finishToast = (text) => {
+  showToast(text, false);
+  toastTimer = setTimeout(hideToast, 3000);
+};
+
+const showFieldProgress = (message) => {
+  showToast(isCancelling.value
+    ? `正在停止，已写入 ${activeSeriesTask?.writtenCount || 0} 条短剧`
+    : `${message}，请勿关闭插件，关闭将中断任务`, true);
 };
 
 const showErrorMsg = (message) => {
@@ -245,8 +265,9 @@ const getFieldMetaMap = async (table) => {
   return new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
 };
 
-const setupTableFields = async (tableId, isNewTable = false) => {
+const setupTableFields = async (tableId, isNewTable = false, onProgress = null) => {
   const activeFieldMapping = getActiveFieldMapping();
+  onProgress?.('正在检查目标表字段...');
   const table = await bitable.base.getTableById(tableId);
   const fieldMetaList = await table.getFieldMetaList();
   const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
@@ -257,6 +278,7 @@ const setupTableFields = async (tableId, isNewTable = false) => {
 
   const defaultFirstField = fieldMetaList[0];
   if (isNewTable && defaultFirstField && defaultFirstField.name === '文本') {
+    onProgress?.(`正在创建字段 1/${activeFieldMapping.length}：${activeFieldMapping[0].name}...`);
     await table.setField(defaultFirstField.id, {
       type: activeFieldMapping[0].type,
       name: activeFieldMapping[0].name
@@ -279,15 +301,22 @@ const setupTableFields = async (tableId, isNewTable = false) => {
       continue;
     }
     if (isNewTable) {
+      onProgress?.(`正在创建字段 ${index + 1}/${activeFieldMapping.length}：${config.name}...`);
       await table.addField({ type: config.type, name: config.name });
       continue;
     }
     missingFields.push(config);
   }
 
+  if (missingFields.length) {
+    onProgress?.(`正在创建字段（共 ${missingFields.length} 个）...`);
+  }
+  let createdFieldCount = 0;
   for (const config of missingFields) {
     try {
+      onProgress?.(`正在创建字段 ${createdFieldCount + 1}/${missingFields.length}：${config.name}...`);
       await table.addField({ type: config.type, name: config.name });
+      createdFieldCount++;
     } catch (error) {
       ElNotification({ message: `添加字段 "${config.name}" 失败`, type: 'error', duration: 0 });
       throw error;
@@ -298,6 +327,7 @@ const setupTableFields = async (tableId, isNewTable = false) => {
     ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
   }
 
+  onProgress?.('正在设置字段格式...');
   const latestFieldMetaList = await table.getFieldMetaList();
   const latestFieldMetaMap = new Map(latestFieldMetaList.map(meta => [meta.name, meta.id]));
   for (const config of activeFieldMapping) {
@@ -317,9 +347,9 @@ const setupTableFields = async (tableId, isNewTable = false) => {
   }
 };
 
-const validateTableFields = async (tableId) => {
+const validateTableFields = async (tableId, onProgress = null) => {
   try {
-    await setupTableFields(tableId);
+    await setupTableFields(tableId, false, onProgress);
     return true;
   } catch (error) {
     console.error("验证表格字段时出错:", error);
@@ -494,8 +524,7 @@ const finishSeriesTask = (task, status) => {
     : statusCode === 2
       ? `任务失败：已写入 ${task.writtenCount} 条短剧`
       : `处理完成：成功 ${task.writtenCount} 条，失败 0 条`;
-  showToast(text, false);
-  setTimeout(hideToast, 3000);
+  finishToast(text);
 };
 
 const drainSeriesResults = async (task) => {
@@ -512,9 +541,11 @@ const drainSeriesResults = async (task) => {
 
     let tableId = task.targetTableId;
     if (!tableId) {
+      showFieldProgress('正在创建短剧目标表...');
       const created = await createSequentialTable('博主短剧获取');
       tableId = created.tableId;
-      await setupTableFields(tableId, true);
+      await setupTableFields(tableId, true, showFieldProgress);
+      showFieldProgress('正在切换到目标表...');
       await bitable.ui.switchToTable(tableId);
       task.targetTableId = tableId;
     }
@@ -569,6 +600,7 @@ const pollSeriesTask = async (task) => {
 
 const postSeriesTask = async (targetTableId = "", profileUrlText = "") => {
   try {
+    showToast('正在提交博主短剧任务...请勿关闭插件，关闭将中断任务', true);
     const response = await request({
     url: "/social/api/v1/feishu/series/list",
     method: "post",
@@ -601,6 +633,7 @@ const postSeriesTask = async (targetTableId = "", profileUrlText = "") => {
     loading.value = false;
     activeSeriesTaskId.value = '';
     console.error('创建博主短剧任务失败:', error);
+    finishToast(`任务提交失败：${error.message || '请求失败'}`);
     showErrorMsg(error.message || '请求失败');
   }
 };
@@ -839,6 +872,7 @@ const getProfileUrlsByFieldId = async (recordIdList, fieldId) => {
 
 const submitSeriesUrls = async (urlList, targetTableId = "") => {
   if (urlList.length === 0) {
+    finishToast('没有可处理的作者主页链接');
     showErrorMsg("请至少输入一个有效的作者主页链接");
     return;
   }
@@ -881,6 +915,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   closeInterval();
+  if (toastTimer) clearTimeout(toastTimer);
 });
 
 const commit = async () => {
@@ -900,33 +935,43 @@ const commit = async () => {
       return;
     }
 
+    showToast('正在启动博主短剧获取...请勿关闭插件，关闭将中断任务', true);
+    await nextTick();
     let urlList = [];
     if (mode === 'manual') {
       if (!manualUrls || !manualUrls.trim()) {
+        finishToast('任务未开始');
         showErrorMsg("请输入作者主页链接");
         return;
       }
       urlList = parseManualUrls(manualUrls);
     } else {
       if (!profileLinkFieldId) {
+        finishToast('任务未开始');
         showErrorMsg("请选择作者主页链接字段");
         return;
       }
       if (profileLinkFieldId === 'nodata') {
+        finishToast('当前不在数据表页面，任务未开始');
         showErrorMsg("未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。");
         return;
       }
+      showToast('正在读取待处理记录...请勿关闭插件，关闭将中断任务', true);
       const recordIdList = await getRecordIdListByScope(scope, rowCount);
       if (!recordIdList) {
+        finishToast('任务未开始');
         return;
       }
+      showToast('正在读取作者主页链接...请勿关闭插件，关闭将中断任务', true);
       urlList = await getProfileUrlsByFieldId(recordIdList, profileLinkFieldId);
     }
 
     if (radio === 2) {
-      const isValid = await validateTableFields(table_id);
+      const isValid = await validateTableFields(table_id, showFieldProgress);
       if (isValid) {
         await submitSeriesUrls(urlList, table_id);
+      } else {
+        finishToast('目标字段校验未通过，任务未开始');
       }
       return;
     }
@@ -934,6 +979,7 @@ const commit = async () => {
     await submitSeriesUrls(urlList, "");
   } catch (error) {
     console.error('提交博主短剧任务失败:', error);
+    finishToast(`任务提交失败：${error.message || '请稍后重试'}`);
     showErrorMsg(error.message || '提交失败，请稍后重试');
   } finally {
     isSubmitting.value = false;
