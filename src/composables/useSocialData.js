@@ -515,12 +515,13 @@ export const createSequentialTable = async (baseTableName) => {
   }
 };
 
-export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING) => {
+export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING, onProgress = null) => {
   const newTable = await bitable.base.getTable(tableId);
   await bitable.ui.switchToTable(tableId);
   const first_field = await newTable.getField('文本');
   const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
   for (const [index, config] of activeFieldMapping.entries()) {
+    onProgress?.(`正在创建字段 ${index + 1}/${activeFieldMapping.length}：${config.name}...`);
     if (index === 0 && first_field) {
       await newTable.setField(first_field.id, { type: config.type, name: config.name });
     } else {
@@ -528,6 +529,7 @@ export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMap
     }
   }
 
+  onProgress?.('正在设置字段格式...');
   for (const config of activeFieldMapping) {
     try {
       const field = await newTable.getField(config.name);
@@ -542,6 +544,7 @@ export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMap
 
 export const validateTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING, options = {}) => {
   try {
+    options.onProgress?.('正在检查目标表字段...');
     const activeTable = await bitable.base.getTableById(tableId);
     const fieldMetaList = await activeTable.getFieldMetaList();
     const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
@@ -594,9 +597,15 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
       }
     }
 
+    if (missingFields.length) {
+      options.onProgress?.(`正在创建字段（共 ${missingFields.length} 个）...`);
+    }
+    let createdFieldCount = 0;
     for (const config of missingFields) {
       try {
+        options.onProgress?.(`正在创建字段 ${createdFieldCount + 1}/${missingFields.length}：${config.name}...`);
         await activeTable.addField({ type: config.type, name: config.name });
+        createdFieldCount++;
       } catch (error) {
         ElNotification({ title: '出错', message: `添加字段 "${config.name}" 失败`, type: 'error', duration: 0 });
         return false;
@@ -746,9 +755,10 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
     try {
       let resolvedTargetTableId = targetTableId;
       if (!type && !resolvedTargetTableId) {
+        options.onProgress?.('正在创建目标表...');
         const tableName = getTableName(list);
         const { tableId } = await createSequentialTable(tableName);
-        await setupTableFields(tableId, selectedFieldKeys, fieldMapping);
+        await setupTableFields(tableId, selectedFieldKeys, fieldMapping, options.onProgress);
         resolvedTargetTableId = tableId;
         await options.onTargetTableReady?.(tableId);
       }
@@ -772,6 +782,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
             throw new Error(`唯一键字段“${config.name}”映射的目标字段不存在`);
           }
           if (!explicitMapping && !resolveFieldMetaByConfig(fieldMetaByName, config)?.fieldMeta?.id) {
+            options.onProgress?.(`正在创建唯一键字段：${config.name}...`);
             await activeTable.addField({ type: config.type, name: config.name });
           }
         }
