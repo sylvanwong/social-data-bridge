@@ -1,5 +1,6 @@
 <script setup>
-import { bitable } from '@lark-base-open/js-sdk';
+import { getTaskStoppingText } from '@/utils/taskStopText';
+import { bitable, FieldType } from '@lark-base-open/js-sdk';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import request from '@/utils/request';
 import { BLOGGER_FIELD_MAPPING, getDefaultSelectedFieldKeys, showErrorMsg, useSocialData } from '@/composables/useSocialData';
@@ -7,6 +8,8 @@ import { useIncrementalTask } from '@/composables/useIncrementalTask';
 
 const props = defineProps({ api_key: String, social_type_options: Array });
 const TASK_PLUGIN_TYPE = 'blogger_search';
+const SEARCH_FIELD_MAPPING = [...BLOGGER_FIELD_MAPPING,
+  { key: 'identity_key', name: '作者标识', type: FieldType.Text, defaultSelected: false }];
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
 const form = ref({ social_type: '', keyword: '', rangeType: 'pages', pages: 1, radio: 1, table_id: '', writeMode: 'upsert', follower_count_range: 'all', user_type: 'all' });
@@ -31,7 +34,7 @@ const tableOutputConfigs = ref({});
 const tableConfigSaving = ref(false);
 const tableConfigApplying = ref(false);
 let tableConfigSaveQueued = false;
-const allKeys = BLOGGER_FIELD_MAPPING.map(field => field.key);
+const allKeys = SEARCH_FIELD_MAPPING.map(field => field.key);
 const allSelected = computed(() => allKeys.every(key => selectedFieldKeys.value.includes(key)));
 const socialOptions = computed(() => [
   { value: 'xhs', label: '小红书' }, { value: 'douyin', label: '抖音' },
@@ -44,7 +47,7 @@ const socialOptions = computed(() => [
 const isDouyin = computed(() => form.value.social_type === 'douyin');
 
 const getTableName = () => form.value.keyword.split(/[\n,，]+/).map(item => item.trim()).find(Boolean) || '作者搜索';
-const { createAndWriteData, validateTableFields } = useSocialData(getTableName, props.api_key, BLOGGER_FIELD_MAPPING);
+const { createAndWriteData, validateTableFields } = useSocialData(getTableName, props.api_key, SEARCH_FIELD_MAPPING);
 const auth = () => ({ authorization: `Bearer ${props.api_key}` });
 
 const showToast = (text, isLoading = true) => {
@@ -66,51 +69,84 @@ const showCompletionToast = text => {
   toastTimer = setTimeout(hideToast, 3000);
 };
 
-const getStoppingText = task => {
-  const total = Number(task.totalPages) || 0;
-  const processed = Number(task.processedPages) || 0;
-  if (!total) {
-    return '正在停止任务，等待剩余作者写入完成后停止，避免已获取数据丢失';
+const getStoppingText = task => getTaskStoppingText(task, '作者');
+
+const hasRecoverableTask = ref(false);
+const requiresReopen = ref(false);
+let componentUnmounted = false;
+const restoreTask = task => {
+  hasRecoverableTask.value = true;
+  loading.value = true;
+  taskId.value = task.taskId;
+  showToast('正在恢复未完成的作者搜索任务…');
+};
+const resumeSavedTask = async () => {
+  if (requiresReopen.value || componentUnmounted) return;
+  loading.value = true;
+  try {
+    const resumed = await searchTask.resume(restoreTask);
+    if (!resumed) loading.value = false;
+  } catch (error) {
+    hasRecoverableTask.value = true;
+    requiresReopen.value = !!error.requiresReopen;
+    loading.value = false;
+    showErrorMsg(error.message || '恢复任务失败，请重试');
   }
-  const remaining = Math.max(0, total - processed);
-  return `正在停止任务，剩余${remaining}页作者未写入，等待写入完成后停止，避免已获取数据丢失`;
 };
 
 const searchTask = useIncrementalTask({
   storageKey,
+  operationTimeoutMs: 180000,
   isTerminal: status => [1, 2, 3].includes(Number(status.status)),
   getStatus: async task => (await request({ url: `/social/api/v1/feishu/blogger/search/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', headers: auth() })).data,
   getResults: async task => (await request({ url: '/social/api/v1/feishu/blogger/search/list', method: 'post', headers: auth(), data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 } })).data,
-  writeBatch: async (items, task) => {
-    // 搜索允许作者ID为空；这些作者保留为新增记录，避免被唯一键写入逻辑跳过。
-    const groups = task.writeMode === 'upsert'
-      ? [{ items: items.filter(item => item.user_id), mode: 'upsert' }, { items: items.filter(item => !item.user_id), mode: 'append' }]
-      : [{ items, mode: 'append' }];
-    for (const group of groups) {
-      if (!group.items.length) continue;
-      const result = await createAndWriteData(group.items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', task.selectedFieldKeys, {
-      writeMode: group.mode,
-      uniqueKey: 'user_id',
-      fieldMappings: task.fieldMappings || [],
-      upsertCacheKey: task.taskId,
+  writeBatch: async (items, task, controls) => {
+    const reconcile = task.pendingWrite ?? !!task.targetTableId;
+    task.pendingWrite = reconcile;
+    const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', task.selectedFieldKeys, {
       stopAfterCurrentBatch: true,
-      onTargetTableReady: async tableId => { task.targetTableId = tableId; },
+      initializingTableId: task.initializingTableId,
+      onTableInitialized: async () => {
+        controls.assertActive();
+        task.initializingTableId = '';
+        await controls.saveProgress();
+      },
+      attachmentPipeline: true,
+      uploadBatchSize: 5,
+      writeMode: task.writeMode || 'upsert',
+      uniqueKey: 'user_id',
+      fallbackUniqueKey: 'identity_key',
+      reconcile,
+      assertActive: controls.assertActive,
+      onBeforeWrite: async () => {
+        controls.assertActive();
+        task.pendingWrite = true;
+        await controls.saveProgress();
+      },
+      upsertCacheKey: task.taskId,
+      fieldMappings: task.fieldMappings || [],
+      onTargetTableReady: async (tableId) => {
+        controls.assertActive();
+        task.targetTableId = tableId;
+        task.initializingTableId = tableId;
+        await controls.saveProgress();
+      },
     });
+    controls.assertActive();
     task.targetTableId = result?.tableId || task.targetTableId;
-    }
+    task.pendingWrite = false;
   },
   onProgress: (status, task) => {
-    if (status.status_text === 'cancel_requested' || status.cancel_requested) cancelling.value = true;
+    if (Number(status.status) === 3 || status.status_text === 'cancel_requested' || status.cancel_requested) cancelling.value = true;
     const processed = Number(status.processed) || 0;
     const total = Number(status.total) || 0;
-    task.processedPages = processed;
-    task.totalPages = total;
     showToast(cancelling.value
       ? getStoppingText(task)
       : `正在获取作者，已处理 ${total ? `${processed}/${total}` : processed} 页，已写入 ${task.writtenCount || 0} 条`);
   },
   onWriting: (items, task) => { showToast(cancelling.value ? getStoppingText(task) : `正在写入 ${items.length} 条作者数据…`); },
   onFinish: (status, task) => {
+    hasRecoverableTask.value = false;
     loading.value = false; cancelling.value = false; taskId.value = '';
     if (Number(status.status) === 2) {
       showCompletionToast(status.reason || '任务失败');
@@ -123,7 +159,9 @@ const searchTask = useIncrementalTask({
     }
     showCompletionToast(`处理完成，已写入 ${task.writtenCount || 0} 条作者`);
   },
-  onError: error => {
+  onError: (error, task) => {
+    hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
+    requiresReopen.value = !!error.requiresReopen;
     loading.value = false; cancelling.value = false; taskId.value = '';
     const message = error.message || '任务长时间没有进度';
     showCompletionToast(message);
@@ -176,7 +214,7 @@ const saveTableOutputConfig = async () => {
     const targetTableId = form.value.table_id;
     const table = await bitable.base.getTableById(targetTableId);
     const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => {
-      const source = BLOGGER_FIELD_MAPPING.find(field => field.key === item.source_key);
+      const source = SEARCH_FIELD_MAPPING.find(field => field.key === item.source_key);
       const target = tableFieldOptions.value.find(field => field.id === item.target_field_id);
       return { ...item, source_name: source?.name || item.source_name || '', target_field_name: target?.name || item.target_field_name || '', target_field_type: target?.type ?? item.target_field_type };
     });
@@ -196,7 +234,7 @@ const saveTableOutputConfig = async () => {
 };
 const getMappingSourceFields = index => {
   const usedKeys = new Set(mappingDraft.value.filter((item, itemIndex) => itemIndex !== index).map(item => item.source_key).filter(Boolean));
-  return BLOGGER_FIELD_MAPPING.filter(field => selectedFieldKeys.value.includes(field.key)).map(field => ({ ...field, disabled: usedKeys.has(field.key) }));
+  return SEARCH_FIELD_MAPPING.filter(field => selectedFieldKeys.value.includes(field.key)).map(field => ({ ...field, disabled: usedKeys.has(field.key) }));
 };
 const getMappingTargetFields = index => {
   const usedIds = new Set(mappingDraft.value.filter((item, itemIndex) => itemIndex !== index).map(item => item.target_field_id).filter(Boolean));
@@ -210,8 +248,8 @@ const mappingStatus = computed(() => {
 const loadFields = async () => {
   try {
     const saved = await bitable.bridge.getData(fieldStorageKey);
-    selectedFieldKeys.value = Array.isArray(saved) ? [...new Set([...saved, 'user_id'])].filter(key => allKeys.includes(key)) : getDefaultSelectedFieldKeys(BLOGGER_FIELD_MAPPING);
-  } catch { selectedFieldKeys.value = getDefaultSelectedFieldKeys(BLOGGER_FIELD_MAPPING); }
+    selectedFieldKeys.value = Array.isArray(saved) ? [...new Set([...saved, 'user_id'])].filter(key => allKeys.includes(key)) : getDefaultSelectedFieldKeys(SEARCH_FIELD_MAPPING);
+  } catch { selectedFieldKeys.value = getDefaultSelectedFieldKeys(SEARCH_FIELD_MAPPING); }
   fieldReady.value = true;
 };
 watch(selectedFieldKeys, keys => { if (fieldReady.value) bitable.bridge.setData(fieldStorageKey, keys); }, { deep: true });
@@ -234,6 +272,7 @@ const cancel = async () => {
   } catch (error) { cancelling.value = false; showErrorMsg(error.message || '停止任务失败'); }
 };
 const submit = async () => {
+  if (hasRecoverableTask.value) return resumeSavedTask();
   if (submitting.value || loading.value) return;
   submitting.value = true;
   try {
@@ -247,15 +286,23 @@ const submit = async () => {
     if (form.value.radio === 2 && !form.value.table_id) throw new Error('请选择现有表格');
     if (form.value.radio === 2 && mappingLoading.value) throw new Error('正在读取目标表字段，请稍后重试');
     if (form.value.radio === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
-    if (form.value.radio === 2 && !(await validateTableFields(form.value.table_id, selectedFieldKeys.value, BLOGGER_FIELD_MAPPING, { writeMode: form.value.writeMode, uniqueKey: 'user_id', fieldMappings: mappingDraft.value }))) return;
+    const outputSnapshot = {
+      targetTableId: form.value.radio === 2 ? form.value.table_id : '',
+      selectedFieldKeys: [...selectedFieldKeys.value], writeMode: form.value.writeMode,
+      fieldMappings: form.value.radio === 2 ? mappingDraft.value.map(item => ({ ...item })) : [],
+    };
+    if (outputSnapshot.targetTableId && !(await validateTableFields(outputSnapshot.targetTableId, outputSnapshot.selectedFieldKeys, {
+      writeMode: outputSnapshot.writeMode, uniqueKey: 'user_id', fieldMappings: outputSnapshot.fieldMappings,
+    }))) return;
     const filter_config = isDouyin.value ? { follower_count_range: form.value.follower_count_range, user_type: form.value.user_type } : {};
+    if (componentUnmounted) return;
+    await searchTask.submit(async () => {
     const response = await request({ url: '/social/api/v1/feishu/blogger/search/task', method: 'post', headers: auth(), data: { social_type: form.value.social_type, keyword: keywords, pages: form.value.rangeType === 'all' ? 0 : Number(form.value.pages), filter_config } });
-    if (response.data?.sta !== 0) throw new Error(response.data?.msg || '创建任务失败');
-    const task = response.data.data;
-    const id = task?.task_id;
-    if (!id) throw new Error('创建任务未返回任务ID');
-    taskId.value = id; loading.value = true; showToast('任务已创建，正在获取作者…');
-    await searchTask.start({ taskId: id, totalPages: Number(task.total) || 0, targetTableId: form.value.radio === 2 ? form.value.table_id : '', selectedFieldKeys: [...selectedFieldKeys.value], writeMode: form.value.writeMode, fieldMappings: form.value.radio === 2 ? mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({ ...item })) : [] });
+      if (response.data?.sta !== 0 || !response.data.data?.task_id) throw new Error(response.data?.msg || '创建任务未返回任务ID');
+      const task = response.data.data;
+      return { taskId: task.task_id, pendingWrite: false,
+        ...outputSnapshot };
+    }, restoreTask);
   } catch (error) {
     loading.value = false;
     showErrorMsg(error.message || '提交失败，请稍后重试');
@@ -265,14 +312,28 @@ const taskActionState = computed(() => {
   if (cancelling.value) return 'stopping';
   if (loading.value && taskId.value) return 'running';
   if (loading.value || submitting.value) return 'submitting';
+  if (requiresReopen.value) return 'reopen';
+  if (hasRecoverableTask.value) return 'recoverable';
   return 'idle';
 });
 const handleTaskAction = () => {
+  if (taskActionState.value === 'recoverable') return resumeSavedTask();
   if (taskActionState.value === 'running') return cancel();
   if (taskActionState.value === 'idle') return submit();
 };
-onMounted(async () => { form.value.social_type = socialOptions.value[0]?.value || ''; await Promise.all([loadFields(), loadTableOutputConfigs()]); const saved = await searchTask.resume(task => { taskId.value = task.taskId; loading.value = true; showToast('正在恢复未完成的作者搜索任务…'); }); if (saved === false) taskId.value = ''; });
+onMounted(async () => {
+  submitting.value = true;
+  try {
+    form.value.social_type = socialOptions.value[0]?.value || '';
+    await Promise.all([loadFields(), loadTableOutputConfigs()]);
+    await resumeSavedTask();
+  } catch (error) {
+    hasRecoverableTask.value = true;
+    showErrorMsg(error.message || '读取任务状态失败，请重试恢复');
+  } finally { submitting.value = false; }
+});
 onUnmounted(() => {
+  componentUnmounted = true;
   searchTask.stop();
   if (toastTimer) clearTimeout(toastTimer);
 });
@@ -386,7 +447,7 @@ onUnmounted(() => {
             <div class="field-selection-title"><div class="c-label">选择需要的字段</div></div>
             <el-checkbox :model-value="allSelected" class="select-all-fields" @change="toggleAll">全选</el-checkbox>
             <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
-              <el-checkbox v-for="field in BLOGGER_FIELD_MAPPING" :key="field.key" :label="field.key" :disabled="field.required" class="field-checkbox-item">{{ field.name }}</el-checkbox>
+              <el-checkbox v-for="field in SEARCH_FIELD_MAPPING" :key="field.key" :label="field.key" :disabled="field.required" class="field-checkbox-item">{{ field.name }}</el-checkbox>
             </el-checkbox-group>
           </div>
         </el-form-item>
@@ -419,9 +480,9 @@ onUnmounted(() => {
           class="commit-btn"
           :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
           :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
-          :disabled="taskActionState === 'submitting' || taskActionState === 'stopping'"
+          :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'reopen'"
           @click="handleTaskAction"
-        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : '立即执行' }}</el-button>
+        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
       </el-form>
     </div>
 

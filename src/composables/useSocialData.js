@@ -159,7 +159,7 @@ const splitTags = (value) => {
   return [];
 };
 
-const ensureTagOptions = async (field, list, config, fieldType) => {
+const ensureTagOptions = async (field, list, config, fieldType, assertActive) => {
   if (config.key !== 'tags' || fieldType !== FieldType.MultiSelect) {
     return null;
   }
@@ -182,6 +182,7 @@ const ensureTagOptions = async (field, list, config, fieldType) => {
     .map(tag => ({ name: tag }));
 
   if (missingOptions.length > 0) {
+    assertActive?.();
     await field.addOptions(missingOptions);
   }
 
@@ -301,12 +302,13 @@ const createAttachmentFiles = async (config, item, apiKey, onDownloadFailure) =>
   });
 };
 
-const uploadAttachmentFilesInBatch = async (entries) => {
+const uploadAttachmentFilesInBatch = async (entries, assertActive) => {
   const files = entries.flatMap(entry => entry.files);
   if (!files.length) {
     return;
   }
 
+  assertActive?.();
   const tokens = await bitable.base.batchUploadFile(files);
   if (!Array.isArray(tokens) || tokens.length !== files.length) {
     throw new Error('附件批量上传返回的 token 数量不匹配');
@@ -328,7 +330,7 @@ const uploadAttachmentFilesInBatch = async (entries) => {
 
 // Download the page continuously; upload groups as they become ready.
 // Only one SDK upload is in flight, while downloads keep their three-slot limit.
-const prepareAttachmentPipeline = async (entries, apiKey, metrics = null, uploadBatchSize = 10) => {
+const prepareAttachmentPipeline = async (entries, apiKey, metrics = null, uploadBatchSize = 10, assertActive) => {
   const startedAt = performance.now();
   let uploadMs = 0;
   let attachmentCount = 0;
@@ -374,7 +376,7 @@ const prepareAttachmentPipeline = async (entries, apiKey, metrics = null, upload
       const { value, error } = await group;
       if (error) throw error;
       const uploadStartedAt = performance.now();
-      await uploadAttachmentFilesInBatch(value);
+      await uploadAttachmentFilesInBatch(value, assertActive);
       uploadMs += performance.now() - uploadStartedAt;
     }
   })();
@@ -421,12 +423,14 @@ const normalizeCellValue = async (table, field, value, config, fieldType, extra 
   return normalizeTextCompatibleValue(nextValue);
 };
 
-const applyFieldDisplayConfig = async (field, config) => {
+const applyFieldDisplayConfig = async (field, config, assertActive) => {
   const fieldType = await field.getType();
   if (config.formatter && fieldType === FieldType.Number) {
+    assertActive?.();
     await field.setFormatter(config.formatter);
   }
   if (config.dateFormat && fieldType === FieldType.DateTime) {
+    assertActive?.();
     await field.setDateFormat(config.dateFormat);
   }
 };
@@ -451,7 +455,7 @@ const normalizeUniqueKeyPart = (value) => {
   if (value === null || value === undefined) return '';
   if (Array.isArray(value)) return value.map(normalizeUniqueKeyPart).filter(Boolean).join(',');
   if (typeof value === 'object') return normalizeUniqueKeyPart(value.text ?? value.name ?? value.value ?? '');
-  return String(value).trim().toLowerCase();
+  return String(value).trim();
 };
 
 const buildWorkUniqueKey = (awemeId) => normalizeUniqueKeyPart(awemeId);
@@ -483,7 +487,7 @@ const normalizeTableName = (value) => {
   return (normalized || fallback).slice(0, 80);
 };
 
-export const createSequentialTable = async (baseTableName) => {
+export const createSequentialTable = async (baseTableName, assertActive) => {
   try {
     const safeBaseTableName = normalizeTableName(baseTableName);
     const existingTables = await bitable.base.getTableMetaList();
@@ -492,6 +496,7 @@ export const createSequentialTable = async (baseTableName) => {
     const existsBaseTable = tableNames.includes(safeBaseTableName);
     const existsSequentialTable = tableNames.some(name => name.startsWith(`${safeBaseTableName}`) && /\d+$/.test(name.slice(safeBaseTableName.length)));
     if (!existsBaseTable && !existsSequentialTable) {
+      assertActive?.();
       const newTable = await bitable.base.addTable({ name: safeBaseTableName });
       return newTable;
     }
@@ -507,6 +512,7 @@ export const createSequentialTable = async (baseTableName) => {
     });
 
     const newTableName = `${safeBaseTableName}${maxIndex + 1}`;
+    assertActive?.();
     const newTable = await bitable.base.addTable({ name: newTableName });
     return newTable;
   } catch (error) {
@@ -515,13 +521,15 @@ export const createSequentialTable = async (baseTableName) => {
   }
 };
 
-export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING, onProgress = null) => {
+export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING, onProgress = null, assertActive) => {
   const newTable = await bitable.base.getTable(tableId);
+  assertActive?.();
   await bitable.ui.switchToTable(tableId);
   const first_field = await newTable.getField('文本');
   const activeFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
   for (const [index, config] of activeFieldMapping.entries()) {
     onProgress?.(`正在创建字段 ${index + 1}/${activeFieldMapping.length}：${config.name}...`);
+    assertActive?.();
     if (index === 0 && first_field) {
       await newTable.setField(first_field.id, { type: config.type, name: config.name });
     } else {
@@ -534,7 +542,7 @@ export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMap
     try {
       const field = await newTable.getField(config.name);
       if (field) {
-        await applyFieldDisplayConfig(field, config);
+        await applyFieldDisplayConfig(field, config, assertActive);
       }
     } catch (error) {
       console.error(`设置字段 ${config.name} 格式失败:`, error);
@@ -742,8 +750,18 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
     }
     const selectedFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
     const uniqueKey = options.uniqueKey || 'aweme_id';
-    const keyConfigs = options.writeMode === 'upsert'
-      ? [uniqueKey].map(key => fieldMapping.find(config => config.key === key)).filter(Boolean)
+    const fallbackUniqueKey = options.fallbackUniqueKey;
+    const fallbackConfig = fieldMapping.find(config => config.key === fallbackUniqueKey);
+    const needsFallback = !!fallbackUniqueKey && list.some(item => !buildWorkUniqueKey(item?.[uniqueKey]));
+    const getUniqueKey = (value, fallbackValue) => {
+      const key = buildWorkUniqueKey(value);
+      if (key) return fallbackUniqueKey ? `id:${key}` : key;
+      const fallback = fallbackUniqueKey ? buildWorkUniqueKey(fallbackValue) : '';
+      return fallback ? `fallback:${fallback}` : '';
+    };
+    const keyConfigs = (options.writeMode === 'upsert' || options.stopAfterCurrentBatch || options.reconcile)
+      ? [uniqueKey, ...(needsFallback ? [fallbackUniqueKey] : [])]
+        .map(key => fieldMapping.find(config => config.key === key)).filter(Boolean)
       : [];
     const activeFieldMapping = [...selectedFieldMapping];
     for (const keyConfig of keyConfigs) {
@@ -753,14 +771,21 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
     }
 
     try {
+      options.assertActive?.();
+      if (needsFallback && !fallbackConfig) throw new Error('备用唯一键字段未配置，无法核对写入结果');
+      if ((options.stopAfterCurrentBatch || options.reconcile) && keyConfigs.length && list.some(item => !getUniqueKey(item?.[uniqueKey], item?.[fallbackUniqueKey]))) {
+        throw new Error(`${keyConfigs[0].name}缺失，无法安全核对写入结果；已暂停写入，剩余结果仍保留`);
+      }
       let resolvedTargetTableId = targetTableId;
+      let initializingTable = !!targetTableId && options.initializingTableId === targetTableId && !options.reconcile;
       if (!type && !resolvedTargetTableId) {
         options.onProgress?.('正在创建目标表...');
         const tableName = getTableName(list);
-        const { tableId } = await createSequentialTable(tableName);
-        await setupTableFields(tableId, selectedFieldKeys, fieldMapping, options.onProgress);
+        const { tableId } = await createSequentialTable(tableName, options.assertActive);
         resolvedTargetTableId = tableId;
+        initializingTable = true;
         await options.onTargetTableReady?.(tableId);
+        await setupTableFields(tableId, activeFieldMapping.map(config => config.key), fieldMapping, options.onProgress, options.assertActive);
       }
 
       const activeTable = resolvedTargetTableId
@@ -775,13 +800,27 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
           .map(item => [item.source_key, item])
       );
 
-      if (options.writeMode === 'upsert') {
+      // 只补齐当前任务新建且未完成初始化的表；不重命名已存在字段或替换映射。
+      if (initializingTable) {
+        for (const config of activeFieldMapping) {
+          if (explicitMappings.has(config.key) || resolveFieldMetaByConfig(fieldMetaByName, config)?.fieldMeta?.id) continue;
+          options.assertActive?.();
+          await activeTable.addField({ type: config.type, name: config.name });
+        }
+        fieldMetaList = await activeTable.getFieldMetaList();
+        fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
+        fieldMetaById = new Map(fieldMetaList.map(meta => [meta.id, meta]));
+      }
+
+      if (keyConfigs.length) {
         for (const config of keyConfigs) {
           const explicitMapping = explicitMappings.get(config.key);
           if (explicitMapping?.target_field_id && !fieldMetaById.has(explicitMapping.target_field_id)) {
             throw new Error(`唯一键字段“${config.name}”映射的目标字段不存在`);
           }
           if (!explicitMapping && !resolveFieldMetaByConfig(fieldMetaByName, config)?.fieldMeta?.id) {
+            if (options.reconcile) throw new Error(`唯一键字段“${config.name}”不存在，无法核对已有结果，请恢复原字段后重试`);
+            options.assertActive?.();
             options.onProgress?.(`正在创建唯一键字段：${config.name}...`);
             await activeTable.addField({ type: config.type, name: config.name });
           }
@@ -809,11 +848,18 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
 
       const incompatibleField = fieldList.find(item => item.field && !isFieldTypeCompatible(item.fieldType, item.config));
       if (incompatibleField) {
+        if (options.stopAfterCurrentBatch) {
+          throw new Error(`字段“${incompatibleField.config.name}”类型不匹配，请修正后恢复任务`);
+        }
         ElNotification({ title: '出错', message: `字段"${incompatibleField.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(incompatibleField.config)}类型，请修改后，点击插件顶部右上角关闭按钮，再重新进入操作`, type: 'error', duration: 0 });
         resetParams();
         return;
       }
 
+      const missingField = fieldList.find(item => !item.field);
+      if (options.stopAfterCurrentBatch && missingField) {
+        throw new Error(`字段“${missingField.config.name}”不可用，请检查目标表字段后恢复任务`);
+      }
       const availableFieldList = fieldList.filter(item => !!item.field);
       if (availableFieldList.length === 0) {
         showErrorMsg("所选表格没有可写入字段");
@@ -821,14 +867,19 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         return;
       }
 
+      if (initializingTable) {
+        options.assertActive?.();
+        await options.onTableInitialized?.();
+      }
+
       await Promise.all(availableFieldList.map(async item => {
         item.extra = {};
         if (item.config.key === 'tags') {
-          item.extra.tagOptionIdMap = await ensureTagOptions(item.field, list, item.config, item.fieldType);
+          item.extra.tagOptionIdMap = await ensureTagOptions(item.field, list, item.config, item.fieldType, options.assertActive);
         }
         if (!options.skipFieldDisplayConfig) {
           try {
-            await applyFieldDisplayConfig(item.field, item.config);
+            await applyFieldDisplayConfig(item.field, item.config, options.assertActive);
           } catch (error) {
             console.error(`设置字段 ${item.config.name} 格式失败:`, error);
           }
@@ -846,7 +897,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         }
       }
       if (options.attachmentPipeline) {
-        await prepareAttachmentPipeline(attachmentEntries, api_key, metrics, options.uploadBatchSize || 10);
+        await prepareAttachmentPipeline(attachmentEntries, api_key, metrics, options.uploadBatchSize || 10, options.assertActive);
       } else {
         const downloadStartedAt = metrics ? performance.now() : 0;
         const downloaded = await Promise.all(attachmentEntries.map(async entry => ({
@@ -861,7 +912,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
           if (metrics.attachmentCount !== expected) throw new Error('测试图片下载不完整');
         }
         const uploadStartedAt = metrics ? performance.now() : 0;
-        await uploadAttachmentFilesInBatch(downloaded);
+        await uploadAttachmentFilesInBatch(downloaded, options.assertActive);
         if (metrics) metrics.uploadMs = performance.now() - uploadStartedAt;
       }
 
@@ -875,6 +926,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
               const valueKeys = config.valueKeys || [config.key];
               const sourceValue = valueKeys.reduce((value, key) => value ?? item?.[key], undefined);
               const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, extra, item, api_key);
+              options.assertActive?.();
               const cell = await field.createCell(value);
               return { cell, fieldId: field.id, value: config.type === FieldType.Attachment ? await cell.getValue() : value };
             }));
@@ -894,6 +946,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
             const valueKeys = config.valueKeys || [config.key];
             const sourceValue = valueKeys.reduce((value, key) => value ?? item?.[key], undefined);
             const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, extra, item, api_key);
+            options.assertActive?.();
             const cell = await field.createCell(value);
             record.push(cell);
             normalizedRecord[field.id] = config.type === FieldType.Attachment ? await cell.getValue() : value;
@@ -903,13 +956,20 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         }
       }
       let recordIds = [];
+      let writePrepared = false;
       const writeBatch = async (write) => {
+        options.assertActive?.();
+        if (!writePrepared) {
+          await options.onBeforeWrite?.();
+          writePrepared = true;
+        }
+        options.assertActive?.();
         const start = metrics ? performance.now() : 0;
         const result = await write();
         if (metrics) metrics.writeMs += performance.now() - start;
         return result;
       };
-      if (options.writeMode === 'upsert') {
+      if (options.writeMode === 'upsert' || options.reconcile) {
         const keyFields = keyConfigs.map(config => availableFieldList.find(item => item.config.key === config.key)?.field);
         if (!keyFields.every(Boolean)) {
           throw new Error(`未找到“${keyConfigs[0]?.name || uniqueKey}”字段，无法执行更新或新增`);
@@ -918,7 +978,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         const uniqueRecords = new Map();
         let skippedCount = 0;
         list.forEach((item, index) => {
-          const key = buildWorkUniqueKey(item?.[uniqueKey]);
+          const key = getUniqueKey(item?.[uniqueKey], item?.[fallbackUniqueKey]);
           if (!key) {
             skippedCount += 1;
             return;
@@ -930,15 +990,19 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         }
 
         const indexCache = options.upsertIndex || upsertIndexCache;
-        const cacheKey = `${options.upsertCacheKey || 'default'}:${activeTable.id}:${keyFields.map(field => field.id).join(':')}`;
-        let existingByKey = indexCache.get(cacheKey);
+        const fallbackFieldId = fallbackConfig && (explicitMappings.get(fallbackUniqueKey)?.target_field_id
+          || resolveFieldMetaByConfig(fieldMetaByName, fallbackConfig)?.fieldMeta?.id);
+        // Keep the same index across mixed batches once the fallback column exists.
+        const indexFields = fallbackUniqueKey ? [keyFields[0].id, fallbackFieldId || ''] : keyFields.map(field => field.id);
+        const cacheKey = `${options.upsertCacheKey || 'default'}:${activeTable.id}:${indexFields.join(':')}`;
+        let existingByKey = options.reconcile ? null : indexCache.get(cacheKey);
         if (!existingByKey) {
           existingByKey = new Map();
           let pageToken;
           do {
             const response = await activeTable.getRecordsByPage({ pageSize: 200, pageToken });
             (response.records || []).forEach(existing => {
-              const key = buildWorkUniqueKey(existing.fields?.[keyFields[0].id]);
+              const key = getUniqueKey(existing.fields?.[keyFields[0].id], existing.fields?.[fallbackFieldId]);
               if (key) existingByKey.set(key, existing.recordId);
             });
             pageToken = response.hasMore ? response.pageToken : undefined;
@@ -951,7 +1015,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         uniqueRecords.forEach(({ record, fields }, key) => {
           const recordId = existingByKey.get(key);
           if (recordId) {
-            pendingUpdates.push({ recordId, fields });
+            if (options.writeMode === 'upsert') pendingUpdates.push({ recordId, fields });
           } else {
             pendingCreates.push({ key, record });
           }
@@ -959,17 +1023,18 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
 
         for (const updates of chunkRecords(pendingUpdates)) {
           const updated = await writeBatch(() => activeTable.setRecords(updates));
-          recordIds = recordIds.concat(updated.map(record => record.recordId));
+          recordIds = recordIds.concat(updated);
         }
         for (const creates of chunkRecords(pendingCreates)) {
           const created = await writeBatch(() => activeTable.addRecords(creates.map(item => item.record)));
-          recordIds = recordIds.concat(created.map(record => record.recordId));
-          created.forEach((record, index) => existingByKey.set(creates[index].key, record.recordId));
+          recordIds = recordIds.concat(created);
+          created.forEach((recordId, index) => existingByKey.set(creates[index].key, recordId));
         }
       } else {
         recordIds = await writeBatch(() => activeTable.addRecords(records));
       }
 
+      options.assertActive?.();
       if (options.stopAfterCurrentBatch) {
         if (metrics) metrics.totalMs = performance.now() - startedAt;
         return { tableId: activeTable.id, recordIds, ...(metrics ? { metrics } : {}) };
@@ -983,6 +1048,11 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         resetParams();
       }
     } catch (error) {
+      if (options.stopAfterCurrentBatch) {
+        const writeError = new Error(`${error?.message || '写入失败'}；已暂停写入，请核对表格结果后再恢复任务`);
+        writeError.stopPolling = true;
+        throw writeError;
+      }
       if (options.measurePerformance) throw error;
       console.error("🚀 ~ createAndWriteData ~ error:", error)
       try {
