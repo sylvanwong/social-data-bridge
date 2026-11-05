@@ -1,4 +1,5 @@
 <script setup>
+import { getTaskStoppingText } from '@/utils/taskStopText';
 import { createTableConfigSaver } from '@/utils/tableOutputConfig.mjs';
 import InputFilterEditor from './InputFilterEditor.vue';
 import { cloneInputFilter, prepareInputFilter, filterRecordIds } from '@/utils/inputFilter.mjs';
@@ -6,6 +7,7 @@ import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request from '@/utils/request'
+import { useIncrementalTask } from '@/composables/useIncrementalTask'
 import { useSocialData, showErrorMsg, PROFILE_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 
 const props = defineProps({
@@ -20,9 +22,6 @@ const MANUAL_TABLE_BASE_NAME = '社媒数据助手';
 const STREAM_TASK_STORAGE_KEY = 'profile_fetch_stream_task_v1';
 const STREAM_RESULT_LIMIT = 40;
 const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
-const STREAM_ACTIVE_INTERVAL = 2000;
-const STREAM_MAX_INTERVAL = 30000;
-const STREAM_STALL_TIMEOUT = 10 * 60 * 1000;
 
 const formData = ref({
   mode: 'table',
@@ -158,7 +157,10 @@ const taskDialogForm = ref(getDefaultTaskDialogForm());
 const taskList = ref([]);
 const taskListLoading = ref(false);
 const taskManagerExpanded = ref(false);
-const isSubmitting = ref(false);
+const isSubmitting = ref(true);
+const hasRecoverableTask = ref(false);
+const recoveryRequiresReopen = ref(false);
+let componentUnmounted = false;
 const isCancelling = ref(false);
 const activeProfileTaskId = ref('');
 
@@ -443,9 +445,7 @@ const {
   validateTableFields,
 } = useSocialData(getTableName, props.api_key, PROFILE_FIELD_MAPPING);
 
-const streamTimer = ref(null);
 let activeStreamTask = null;
-let streamRequestInFlight = false;
 
 const ensureOption = (optionsRef, option) => {
   if (!option?.id) {
@@ -584,13 +584,6 @@ const unwrapApiData = (responseData) => {
   return responseData || {};
 };
 
-const clearStreamTimer = () => {
-  if (streamTimer.value) {
-    clearTimeout(streamTimer.value);
-    streamTimer.value = null;
-  }
-};
-
 const showToast = (text, isLoading = true) => {
   if (toastTimer) {
     clearTimeout(toastTimer);
@@ -620,23 +613,6 @@ const showCompletionToast = (text) => {
   toastTimer = setTimeout(hideToast, 3000);
 };
 
-const saveStreamTask = async (task) => {
-  await bitable.bridge.setData(STREAM_TASK_STORAGE_KEY, task);
-};
-
-const clearSavedStreamTask = async () => {
-  try {
-    await bitable.bridge.setData(STREAM_TASK_STORAGE_KEY, {});
-  } catch (error) {
-    console.error('清除博主作品采集恢复状态失败:', error);
-  }
-};
-
-const stopStreamTask = () => {
-  clearStreamTimer();
-  activeStreamTask = null;
-};
-
 const getStreamProgressText = (taskStatus, streamTask) => {
   const processed = Number(taskStatus.processed) || 0;
   const total = Number(taskStatus.total) || 0;
@@ -644,14 +620,7 @@ const getStreamProgressText = (taskStatus, streamTask) => {
   return `已处理 ${progress} 个主页，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`;
 };
 
-const getStoppingText = (streamTask) => {
-  const total = streamTask.totalPosts;
-  if (total === undefined || total === null) {
-    return '正在停止任务，等待剩余作品写入完成后停止，避免已获取数据丢失';
-  }
-  const remaining = Math.max(0, total - (streamTask.writtenCount || 0));
-  return `正在停止任务，剩余${remaining}条作品未写入，等待写入完成后停止，避免已获取数据丢失`;
-};
+const getStoppingText = task => getTaskStoppingText(task, '作品');
 
 const getProfileTaskStatus = async (taskId) => {
   const response = await request({
@@ -673,254 +642,98 @@ const readAvailablePosts = async (streamTask) => {
       limit: STREAM_RESULT_LIMIT,
     },
   });
-  const data = unwrapApiData(response.data);
-  if (data.count !== undefined && data.count !== null && data.count !== '') {
-    const total = Number(data.count);
-    if (Number.isSafeInteger(total) && total >= 0) {
-      streamTask.totalPosts = total;
-    }
-  }
-  return {
-    items: Array.isArray(data.data) ? data.data : (Array.isArray(data.items) ? data.items : []),
-    nextCursor: data.next_cursor || streamTask.cursor || '',
-    hasMore: !!data.has_more,
-  };
+  return response.data;
 };
 
-const drainAvailablePosts = async (streamTask) => {
-  let wroteData = false;
-
-  while (activeStreamTask === streamTask) {
-    const { items, nextCursor, hasMore } = await readAvailablePosts(streamTask);
-    if (items.length === 0) {
-      return wroteData;
-    }
-
-    if (!nextCursor || nextCursor === streamTask.cursor) {
-      throw new Error('结果接口未返回有效的 next_cursor');
-    }
-
-    showToast(isCancelling.value
-      ? getStoppingText(streamTask)
-      : `正在写入 ${items.length} 条作品，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true);
-    const result = await createAndWriteData(
-      items,
-      streamTask.targetTableId ? 'stream' : '',
-      streamTask.taskId,
-      streamTask.targetTableId || '',
-      streamTask.selectedFieldKeys,
-      {
-        stopAfterCurrentBatch: true,
-        attachmentPipeline: true,
-        uploadBatchSize: 5,
-        fieldMappings: streamTask.fieldMappings,
-        writeMode: streamTask.writeMode,
-        upsertCacheKey: streamTask.taskId,
-        onProgress: showProfileFieldProgress,
-        onTargetTableReady: async (tableId) => {
-          streamTask.targetTableId = tableId;
-          await saveStreamTask(streamTask);
-        },
-      }
-    );
-
-    streamTask.targetTableId = result?.tableId || streamTask.targetTableId;
-    streamTask.cursor = nextCursor;
-    streamTask.writtenCount = (streamTask.writtenCount || 0) + items.length;
-    streamTask.lastActivityAt = Date.now();
-    await saveStreamTask(streamTask);
-    wroteData = true;
-
-    if (!hasMore) {
-      return wroteData;
-    }
-  }
-
-  return wroteData;
-};
-
-const finishStreamTask = async (streamTask, taskStatus) => {
-  stopStreamTask();
-  loading.value = false;
-  isCancelling.value = false;
-  activeProfileTaskId.value = '';
-  await clearSavedStreamTask();
-
-  if (Number(taskStatus.status) === 2) {
-    showCompletionToast(taskStatus.reason || '任务失败，已写入任务完成前获取的数据');
-    showErrorMsg(taskStatus.reason || '获取数据失败，请稍后重试');
-    return;
-  }
-
-  if (Number(taskStatus.status) === 3) {
-    showCompletionToast(`任务已停止，已写入 ${streamTask.writtenCount || 0} 条作品`);
-    return;
-  }
-
-  showCompletionToast(`处理完成，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`);
-};
-
-const scheduleStreamPoll = (streamTask, delay) => {
-  clearStreamTimer();
-  streamTimer.value = setTimeout(() => {
-    pollStreamTask(streamTask);
-  }, delay);
-};
-
-const pollStreamTask = async (streamTask) => {
-  if (activeStreamTask !== streamTask || streamRequestInFlight) {
-    return;
-  }
-
-  streamRequestInFlight = true;
-  try {
-    const taskStatus = await getProfileTaskStatus(streamTask.taskId);
-    const processed = Number(taskStatus.processed) || 0;
-    const heartbeatAt = Number(taskStatus.heartbeat_at) || 0;
-    const progressed = processed !== streamTask.lastProcessed || heartbeatAt !== streamTask.lastHeartbeatAt;
-
-    if (progressed) {
-      streamTask.lastProcessed = processed;
-      streamTask.lastHeartbeatAt = heartbeatAt;
-      streamTask.lastActivityAt = Date.now();
-      streamTask.pollInterval = STREAM_ACTIVE_INTERVAL;
-    } else {
-      streamTask.pollInterval = Math.min(
-        Math.max(streamTask.pollInterval || STREAM_ACTIVE_INTERVAL, STREAM_ACTIVE_INTERVAL) * 2,
-        STREAM_MAX_INTERVAL
-      );
-    }
-
-    if (taskStatus.status_text === 'cancel_requested' || taskStatus.cancel_requested) {
-      isCancelling.value = true;
-    }
-    showToast(isCancelling.value ? getStoppingText(streamTask) : getStreamProgressText(taskStatus, streamTask), true);
-    const wroteData = await drainAvailablePosts(streamTask);
-    if (wroteData) {
-      streamTask.pollInterval = STREAM_ACTIVE_INTERVAL;
-      showToast(
-        isCancelling.value
-          ? getStoppingText(streamTask)
-          : getStreamProgressText(taskStatus, streamTask),
-        true
-      );
-    }
-
-    const isTerminal = [1, 2, 3].includes(Number(taskStatus.status));
-    if (isTerminal && !wroteData) {
-      await finishStreamTask(streamTask, taskStatus);
-      return;
-    }
-
-    if (Date.now() - (streamTask.lastActivityAt || Date.now()) >= STREAM_STALL_TIMEOUT) {
-      throw new Error('任务超过 10 分钟没有进度更新，请稍后重试');
-    }
-
-    await saveStreamTask(streamTask);
-    scheduleStreamPoll(streamTask, streamTask.pollInterval || STREAM_ACTIVE_INTERVAL);
-  } catch (error) {
-    console.error('轮询博主作品采集任务失败:', error);
-    streamTask.pollInterval = Math.min(
-      Math.max(streamTask.pollInterval || STREAM_ACTIVE_INTERVAL, STREAM_ACTIVE_INTERVAL) * 2,
-      STREAM_MAX_INTERVAL
-    );
-
-    if (Date.now() - (streamTask.lastActivityAt || Date.now()) >= STREAM_STALL_TIMEOUT) {
-      loading.value = false;
-      isCancelling.value = false;
-      activeProfileTaskId.value = '';
-      showCompletionToast(error.message || '任务长时间没有进度');
-      showErrorMsg(error.message || '任务长时间没有进度');
-      return;
-    }
-
-    await saveStreamTask(streamTask);
-    scheduleStreamPoll(streamTask, streamTask.pollInterval);
-  } finally {
-    streamRequestInFlight = false;
-  }
-};
-
-const startStreamTask = async (taskId, targetTableId = '', taskConfig = {}) => {
-  stopStreamTask();
-  const selection = await bitable.base.getSelection();
-  const streamTask = {
-    taskId,
-    cursor: '',
-    targetTableId,
-    selectedFieldKeys: [...(taskConfig.selectedFieldKeys || selectedFieldKeys.value)],
-    fieldMappings: cloneFieldMappings(taskConfig.fieldMappings || mappingDraft.value),
-    writeMode: taskConfig.writeMode || formData.value.writeMode || 'upsert',
-    writtenCount: 0,
-    lastProcessed: -1,
-    lastHeartbeatAt: 0,
-    lastActivityAt: Date.now(),
-    pollInterval: STREAM_ACTIVE_INTERVAL,
-    baseId: selection.baseId || '',
-  };
-
-  activeStreamTask = streamTask;
-  activeProfileTaskId.value = taskId;
+const restoreProfileTask = (task) => {
+  activeStreamTask = task;
+  activeProfileTaskId.value = task.taskId;
+  hasRecoverableTask.value = true;
   loading.value = true;
-  await saveStreamTask(streamTask);
-  await pollStreamTask(streamTask);
+  showToast('正在恢复未完成的作者作品获取任务...', true);
 };
 
+const profileStreamTask = useIncrementalTask({
+  storageKey: STREAM_TASK_STORAGE_KEY,
+  operationTimeoutMs: 180000,
+  isTerminal: status => [1, 2, 3].includes(Number(status.status)),
+  getStatus: task => getProfileTaskStatus(task.taskId),
+  getResults: readAvailablePosts,
+  writeBatch: async (items, task, controls) => {
+    const reconcile = task.pendingWrite ?? !!task.targetTableId;
+    task.pendingWrite = reconcile;
+    const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId,
+      task.targetTableId || '', task.selectedFieldKeys, {
+        stopAfterCurrentBatch: true,
+        initializingTableId: task.initializingTableId,
+        onTableInitialized: async () => {
+          controls.assertActive();
+          task.initializingTableId = '';
+          await controls.saveProgress();
+        },
+        attachmentPipeline: true, uploadBatchSize: 5,
+        writeMode: task.writeMode || 'upsert', fieldMappings: task.fieldMappings || [],
+        upsertCacheKey: task.taskId, reconcile, assertActive: controls.assertActive,
+        onProgress: message => { controls.assertActive(); showProfileFieldProgress(message); },
+        onBeforeWrite: async () => { controls.assertActive(); task.pendingWrite = true; await controls.saveProgress(); },
+        onTargetTableReady: async tableId => {
+          controls.assertActive();
+          task.targetTableId = tableId;
+          task.initializingTableId = tableId;
+          await controls.saveProgress();
+        },
+      });
+    task.targetTableId = result?.tableId || task.targetTableId;
+    task.pendingWrite = false;
+  },
+  onProgress: (status, task) => {
+    activeStreamTask = task;
+    if (Number(status.status) === 3 || status.cancel_requested || status.status_text === 'cancel_requested') isCancelling.value = true;
+    showToast(isCancelling.value ? getStoppingText(task) : getStreamProgressText(status, task), true);
+  },
+  onWriting: (items, task) => showToast(isCancelling.value ? getStoppingText(task) : `正在写入 ${items.length} 条作品`, true),
+  onFinish: (status, task) => {
+    loading.value = false; isCancelling.value = false; activeProfileTaskId.value = ''; activeStreamTask = null;
+    hasRecoverableTask.value = false; recoveryRequiresReopen.value = false;
+    showCompletionToast(Number(status.status) === 3 ? `任务已停止，已写入 ${task.writtenCount || 0} 条作品`
+      : Number(status.status) === 2 ? (status.reason || '任务失败，已写入已有结果') : `处理完成，已写入 ${task.writtenCount || 0} 条作品`);
+  },
+  onError: (error, task) => {
+    loading.value = false; isCancelling.value = false; activeProfileTaskId.value = ''; activeStreamTask = null;
+    hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
+    recoveryRequiresReopen.value = !!error.requiresReopen;
+    showCompletionToast(error.message || '任务已暂停'); showErrorMsg(error.message || '任务已暂停');
+  },
+});
+
+const stopStreamTask = () => { profileStreamTask.stop(); activeStreamTask = null; };
 const resumeSavedStreamTask = async () => {
+  if (componentUnmounted || isSubmitting.value || loading.value) return;
+  if (recoveryRequiresReopen.value) { showErrorMsg('上次操作尚未确认结束，请重新进入页面或重新打开插件'); return; }
+  isSubmitting.value = true;
   try {
-    const savedTask = await bitable.bridge.getData(STREAM_TASK_STORAGE_KEY);
-    if (!savedTask?.taskId || activeStreamTask) {
-      return;
-    }
-
-    const selection = await bitable.base.getSelection();
-    if (savedTask.baseId && selection.baseId && savedTask.baseId !== selection.baseId) {
-      return;
-    }
-
-    activeStreamTask = {
-      ...savedTask,
-      selectedFieldKeys: Array.isArray(savedTask.selectedFieldKeys)
-        ? savedTask.selectedFieldKeys
-        : [...selectedFieldKeys.value],
-      fieldMappings: cloneFieldMappings(Array.isArray(savedTask.fieldMappings)
-        ? savedTask.fieldMappings
-        : mappingDraft.value),
-      writeMode: savedTask.writeMode || formData.value.writeMode || 'upsert',
-      lastActivityAt: savedTask.lastActivityAt || Date.now(),
-      pollInterval: savedTask.pollInterval || STREAM_ACTIVE_INTERVAL,
-    };
-    activeProfileTaskId.value = activeStreamTask.taskId;
-    loading.value = true;
-    showToast(`正在恢复未完成的博主作品采集任务...${TASK_TOAST_SUFFIX}`, true);
-    await pollStreamTask(activeStreamTask);
+    const resumed = await profileStreamTask.resume(restoreProfileTask);
+    if (!componentUnmounted && !resumed && hasRecoverableTask.value) showErrorMsg('未读取到恢复进度，请重新打开插件重试');
   } catch (error) {
-    console.error('恢复博主作品采集任务失败:', error);
-  }
+    if (componentUnmounted) return;
+    hasRecoverableTask.value = true; recoveryRequiresReopen.value = !!error.requiresReopen;
+    loading.value = false; showErrorMsg(error.message || '恢复任务失败');
+  } finally { if (!componentUnmounted) isSubmitting.value = false; }
 };
 
-const postProfileTask = async (targetTableId = "", urlText = "", taskConfig = {}) => {
-  try {
-    const response = await request({
-    url: "/social/api/v1/feishu/social/task",
-    method: "post",
-    headers: { 'authorization': `Bearer ${props.api_key}` },
-    data: {
-      url: urlText,
-      work_fetch_range: normalizeWorkFetchRange(formData.value.workFetchRange),
-    },
-    });
+const postProfileTask = async (targetTableId = '', urlText = '', taskConfig = {}) => {
+  if (componentUnmounted) return;
+  const selectedFields = [...(taskConfig.selectedFieldKeys || selectedFieldKeys.value)];
+  const fieldMappings = cloneFieldMappings(taskConfig.fieldMappings || mappingDraft.value);
+  const writeMode = taskConfig.writeMode || formData.value.writeMode || 'upsert';
+  await profileStreamTask.submit(async () => {
+    const response = await request({ url: '/social/api/v1/feishu/social/task', method: 'post',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      data: { url: urlText, work_fetch_range: normalizeWorkFetchRange(formData.value.workFetchRange) } });
     const data = unwrapApiData(response.data);
-    if (!data.task_id) {
-      throw new Error('创建采集任务失败，未返回任务 ID');
-    }
-    await startStreamTask(data.task_id, targetTableId, taskConfig);
-  } catch (error) {
-    loading.value = false;
-    activeProfileTaskId.value = '';
-    console.error('创建博主作品采集任务失败:', error);
-    showErrorMsg(error.message || '创建采集任务失败');
-  }
+    return { taskId: data.task_id, targetTableId,
+      selectedFieldKeys: selectedFields, fieldMappings, writeMode, pendingWrite: false };
+  }, restoreProfileTask);
 };
 
 const cancelProfileTask = async () => {
@@ -943,7 +756,7 @@ const cancelProfileTask = async () => {
     }
   } catch (error) {
     isCancelling.value = false;
-    console.error('停止博主作品采集任务失败:', error);
+    console.error('停止博主作品获取任务失败:', error);
     showErrorMsg(error.message || '停止任务失败，请稍后重试');
   }
 };
@@ -1372,9 +1185,9 @@ const submitProfileUrls = async (urlList, targetTableId = "") => {
   const urlText = urlList.join('\n');
 
   try {
-    showToast('正在保存作者作品采集配置...', true);
+    showToast('正在保存作者作品获取配置...', true);
     await saveTableOutputConfig();
-    showToast('正在提交作者作品采集任务...', true);
+    showToast('正在提交作者作品获取任务...', true);
     await postProfileTask(targetTableId, urlText, {
       fieldMappings: cloneFieldMappings(mappingDraft.value),
       writeMode: formData.value.writeMode,
@@ -1386,6 +1199,7 @@ const submitProfileUrls = async (urlList, targetTableId = "") => {
 };
 
 const handleImmediateSubmit = async () => {
+  if (hasRecoverableTask.value) return resumeSavedStreamTask();
   if (isSubmitting.value || loading.value) {
     return;
   }
@@ -1449,7 +1263,7 @@ const handleImmediateSubmit = async () => {
 
     await submitProfileUrls(urlList, '');
   } catch (error) {
-    console.error('提交博主作品采集任务失败:', error);
+    console.error('提交博主作品获取任务失败:', error);
     showCompletionToast(`任务提交失败：${error.message || '请稍后重试'}`);
     showErrorMsg(error.message || '提交失败，请稍后重试');
   } finally {
@@ -1461,10 +1275,12 @@ const taskActionState = computed(() => {
   if (isCancelling.value) return 'stopping';
   if (loading.value && activeProfileTaskId.value) return 'running';
   if (loading.value || isSubmitting.value) return 'submitting';
+  if (hasRecoverableTask.value) return 'recoverable';
   return 'idle';
 });
 
 const handleTaskAction = () => {
+  if (taskActionState.value === 'recoverable') return resumeSavedStreamTask();
   if (taskActionState.value === 'running') {
     return cancelProfileTask();
   }
@@ -1862,17 +1678,17 @@ watch(
 );
 
 onMounted(async () => {
-  await loadFieldOptions({ silent: true });
-  await Promise.all([
-    loadSelectedFieldKeys(),
-    loadTaskList(),
-    loadTableOutputConfigs(),
-  ]);
-  fieldSelectionReady.value = true;
-  await resumeSavedStreamTask();
+  try {
+    await loadFieldOptions({ silent: true });
+    await Promise.all([loadSelectedFieldKeys(), loadTaskList(), loadTableOutputConfigs()]);
+    fieldSelectionReady.value = true;
+  } finally {
+    if (!componentUnmounted) { isSubmitting.value = false; await resumeSavedStreamTask(); }
+  }
 });
 
 onUnmounted(() => {
+  componentUnmounted = true;
   stopStreamTask();
   if (toastTimer) clearTimeout(toastTimer);
 });
@@ -2214,7 +2030,7 @@ watch(
           :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
           :disabled="taskActionState === 'submitting' || taskActionState === 'stopping'"
           @click="handleTaskAction"
-        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : '立即执行' }}</el-button>
+        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
       </div>
 
       <div v-else class="schedule-inline-panel">

@@ -1,8 +1,11 @@
 <script setup>
+import { getTaskStoppingText } from '@/utils/taskStopText';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request from '@/utils/request'
+import { useIncrementalTask } from '@/composables/useIncrementalTask'
+import { useSocialData } from '@/composables/useSocialData'
 
 const props = defineProps({
   api_key: String,
@@ -30,7 +33,6 @@ const isCancelling = ref(false);
 const activeSeriesTaskId = ref('');
 let activeSeriesTask = null;
 const profileProgress = ref({ text: "", done: false });
-const timer = ref(null);
 const listPageSize = 20;
 const toastVisible = ref(false);
 const toastText = ref('');
@@ -46,7 +48,10 @@ const mappingExpanded = ref(false);
 const tableConfigLoading = ref(false);
 const tableConfigApplying = ref(false);
 const tableConfigSaving = ref(false);
-const isSubmitting = ref(false);
+const isSubmitting = ref(true);
+const hasRecoverableTask = ref(false);
+const recoveryRequiresReopen = ref(false);
+let componentUnmounted = false;
 const TASK_PLUGIN_TYPE = 'series_fetch';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
@@ -95,6 +100,7 @@ const FIELD_MAPPING = [
   { key: 'share_url', name: '短剧链接', type: FieldType.Text, defaultSelected: true },
   { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
 ];
+const { createAndWriteData } = useSocialData(() => '博主短剧获取', props.api_key, FIELD_MAPPING);
 const allFieldKeys = FIELD_MAPPING.map(field => field.key);
 const isAllFieldsSelected = computed(() => allFieldKeys.every(key => selectedFieldKeys.value.includes(key)));
 const isFieldsIndeterminate = computed(() => {
@@ -238,9 +244,11 @@ const finishToast = (text) => {
   toastTimer = setTimeout(hideToast, 3000);
 };
 
+const getStoppingText = task => getTaskStoppingText(task, '短剧');
+
 const showFieldProgress = (message) => {
   showToast(isCancelling.value
-    ? `正在停止，已写入 ${activeSeriesTask?.writtenCount || 0} 条短剧`
+    ? getStoppingText(activeSeriesTask)
     : `${message}，请勿关闭插件，关闭将中断任务`, true);
 };
 
@@ -248,22 +256,7 @@ const showErrorMsg = (message) => {
   ElNotification({ message, type: "error", duration: 0 });
 };
 
-const closeInterval = () => {
-  if (timer.value) {
-    clearTimeout(timer.value);
-    timer.value = null;
-  }
-};
 
-const scheduleTaskPoll = (task, delay = 2000) => {
-  closeInterval();
-  timer.value = setTimeout(() => pollSeriesTask(task), delay);
-};
-
-const getFieldMetaMap = async (table) => {
-  const fieldMetaList = await table.getFieldMetaList();
-  return new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
-};
 
 const setupTableFields = async (tableId, isNewTable = false, onProgress = null) => {
   const activeFieldMapping = getActiveFieldMapping();
@@ -358,119 +351,11 @@ const validateTableFields = async (tableId, onProgress = null) => {
   }
 };
 
-const createSequentialTable = async (baseTableName) => {
-  const existingTables = await bitable.base.getTableMetaList();
-  const tableNames = existingTables.map(table => table.name);
-  const existsBaseTable = tableNames.includes(baseTableName);
-  const existsSequentialTable = tableNames.some(name => name.startsWith(`${baseTableName}`) && /\d+$/.test(name.slice(baseTableName.length)));
-  if (!existsBaseTable && !existsSequentialTable) {
-    return await bitable.base.addTable({ name: baseTableName });
-  }
 
-  const reg = new RegExp(`^${baseTableName}(\\d+)$`);
-  let maxIndex = 0;
-  tableNames.forEach(name => {
-    const match = name.match(reg);
-    if (match) {
-      const index = parseInt(match[1], 10);
-      if (index > maxIndex) maxIndex = index;
-    }
-  });
-  return await bitable.base.addTable({ name: `${baseTableName}${maxIndex + 1}` });
-};
 
-const normalizeValue = (value, config, fieldType) => {
-  if (config.isTimestamp && value) {
-    return value * 1000;
-  }
-  if ((config.key === 'nickname' || config.key === 'social_type') && fieldType === FieldType.SingleSelect) {
-    return value ? value : null;
-  }
-  if ((config.key === 'nickname' || config.key === 'social_type') && value && typeof value === 'string') {
-    return value;
-  }
-  if ((config.key === 'nickname' || config.key === 'social_type') && value !== undefined && value !== null) {
-    return value;
-  }
-  if (value === undefined || value === null) {
-    return null;
-  }
-  if (config.type === FieldType.Number && fieldType === FieldType.Text) {
-    return String(value);
-  }
-  return value;
-};
 
-const normalizeSeriesId = (value) => {
-  if (Array.isArray(value)) {
-    return value.map(normalizeSeriesId).join(',');
-  }
-  return String(value?.text ?? value?.name ?? value ?? '').trim();
-};
 
-const writeDataToTable = async (table, list, isExistingTable = false, offset = 0, totalCount = list.length) => {
-  const fieldMetaList = await table.getFieldMetaList();
-  const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta]));
-  const mappingBySource = new Map(mappingDraft.value
-    .filter(item => item.source_key && item.target_field_id)
-    .map(item => [item.source_key, item]));
-  const fieldList = [];
-  const activeFieldMapping = getActiveFieldMapping();
 
-  for (const config of activeFieldMapping) {
-    const targetMapping = mappingBySource.get(config.key);
-    const fieldMeta = targetMapping
-      ? fieldMetaList.find(meta => meta.id === targetMapping.target_field_id)
-      : fieldMetaMap.get(config.name);
-    if (!fieldMeta?.id) continue;
-    const field = await table.getFieldById(fieldMeta.id);
-    if (config.formatter && !isExistingTable && field.type === FieldType.Number) {
-      await field.setFormatter(config.formatter);
-    }
-    fieldList.push({ field, config });
-  }
-
-  const records = [];
-  const normalizedRecords = [];
-  for (const item of list) {
-    const record = [];
-    const fieldsById = {};
-    for (const { field, config } of fieldList) {
-      const fieldType = await field.getType();
-      const cell = await field.createCell(normalizeValue(item[config.key], config, fieldType));
-      record.push(cell);
-      fieldsById[field.id] = await cell.getValue();
-    }
-    records.push(record);
-    normalizedRecords.push(fieldsById);
-    showToast(`正在写入第 ${offset + records.length}/${totalCount} 条...`, true);
-  }
-  if (isExistingTable && formData.value.writeMode === 'upsert') {
-    const keyField = fieldList.find(item => item.config.key === 'series_id');
-    if (!keyField) throw new Error('更新或新增需要“短剧ID”字段');
-    const existingById = new Map();
-    let pageToken;
-    do {
-      const result = await table.getRecordsByPage({ pageSize: 200, pageToken });
-      for (const existing of result.records || []) {
-        const seriesId = normalizeSeriesId(existing.fields?.[keyField.field.id]);
-        if (seriesId) existingById.set(seriesId, existing.recordId);
-      }
-      pageToken = result.hasMore ? result.pageToken : undefined;
-    } while (pageToken !== undefined);
-    const updates = [];
-    const creates = [];
-    list.forEach((item, index) => {
-      const recordId = existingById.get(normalizeSeriesId(item?.series_id));
-      if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
-      else creates.push(records[index]);
-    });
-    if (updates.length) await table.setRecords(updates);
-    if (creates.length) await table.addRecords(creates);
-  } else {
-    await table.addRecords(records);
-  }
-};
 
 const getSeriesTask = async (taskId) => {
   const response = await request({
@@ -494,7 +379,7 @@ const getSeriesResults = async (task) => {
     headers: { authorization: `Bearer ${props.api_key}` },
     data: {
       task_id: task.taskId,
-      after_id: task.afterId || '',
+      after_id: task.cursor || '',
       limit: listPageSize,
     },
   });
@@ -506,142 +391,105 @@ const getSeriesResults = async (task) => {
   }
   const items = Array.isArray(result.data) ? result.data : (Array.isArray(result.items) ? result.items : []);
   return {
+    count: result.count,
     items,
-    nextCursor: result.next_cursor || '',
-    hasMore: Boolean(result.has_more),
+    next_cursor: result.next_cursor || '',
+    has_more: Boolean(result.has_more),
   };
 };
 
-const finishSeriesTask = (task, status) => {
-  closeInterval();
-  loading.value = false;
-  isCancelling.value = false;
-  activeSeriesTaskId.value = '';
-  activeSeriesTask = null;
-  const statusCode = Number(status.status);
-  const text = statusCode === 3
-    ? `任务已停止：已写入 ${task.writtenCount} 条短剧`
-    : statusCode === 2
-      ? `任务失败：已写入 ${task.writtenCount} 条短剧`
-      : `处理完成：成功 ${task.writtenCount} 条，失败 0 条`;
-  finishToast(text);
+const restoreSeriesTask = task => {
+  activeSeriesTask = task; activeSeriesTaskId.value = task.taskId;
+  hasRecoverableTask.value = true; loading.value = true;
+  showToast('正在恢复未完成的短剧获取任务...', true);
 };
-
-const drainSeriesResults = async (task) => {
-  let wroteData = false;
-
-  while (activeSeriesTask === task) {
-    const result = await getSeriesResults(task);
-    if (result.items.length === 0) {
-      return wroteData;
-    }
-    if (!result.nextCursor || result.nextCursor === task.afterId) {
-      throw new Error('短剧结果接口未返回有效的 next_cursor');
-    }
-
-    let tableId = task.targetTableId;
-    if (!tableId) {
-      showFieldProgress('正在创建短剧目标表...');
-      const created = await createSequentialTable('博主短剧获取');
-      tableId = created.tableId;
-      await setupTableFields(tableId, true, showFieldProgress);
-      showFieldProgress('正在切换到目标表...');
-      await bitable.ui.switchToTable(tableId);
-      task.targetTableId = tableId;
-    }
-
-    const table = await bitable.base.getTableById(tableId);
-    await writeDataToTable(table, result.items, Boolean(task.initialTargetTableId), task.writtenCount, task.writtenCount + result.items.length);
-    task.writtenCount += result.items.length;
-    task.afterId = result.nextCursor;
-    wroteData = true;
-
-    if (!result.hasMore) {
-      return wroteData;
-    }
-  }
-
-  return wroteData;
-};
-
-const pollSeriesTask = async (task) => {
-  if (activeSeriesTask !== task) return;
-  try {
-    console.log('[series] 查询任务状态:', task.taskId);
-    const status = await getSeriesTask(task.taskId);
-    console.log('[series] 任务状态:', status);
-    const statusCode = Number(status.status);
-    if (status.status_text === 'cancel_requested' || status.cancel_requested) {
-      isCancelling.value = true;
-      showToast(`正在停止，已写入 ${task.writtenCount} 条短剧`, true);
-    } else {
-      profileProgress.value = { text: status.current_page ? `已获取第${status.current_page}页` : '获取中', done: false };
-    }
-
-    const wrote = await drainSeriesResults(task);
-    console.log('[series] 读取结果完成:', { wrote, writtenCount: task.writtenCount, afterId: task.afterId });
-    if (wrote) {
-      showToast(`${isCancelling.value ? '正在停止' : '正在处理'}，已写入 ${task.writtenCount} 条短剧`, true);
-    }
-
-    if ([1, 2, 3].includes(statusCode) && !wrote) {
-      finishSeriesTask(task, status);
-      return;
-    }
-    scheduleTaskPoll(task, wrote ? 500 : 2000);
-  } catch (error) {
-    console.error('轮询博主短剧任务失败:', error);
-    if (activeSeriesTask === task) {
-      showToast(`任务连接异常，正在重试，已写入 ${task.writtenCount} 条短剧`, true);
-      scheduleTaskPoll(task, 3000);
-    }
-  }
-};
-
-const postSeriesTask = async (targetTableId = "", profileUrlText = "") => {
-  try {
-    showToast('正在提交博主短剧任务...请勿关闭插件，关闭将中断任务', true);
-    const response = await request({
-    url: "/social/api/v1/feishu/series/list",
-    method: "post",
-    headers: { 'authorization': `Bearer ${props.api_key}` },
-    data: {
-      profile_url: profileUrlText,
-      pages: Number(formData.value.pages),
-    },
-    });
-    const res = response.data || {};
-    console.log('[series] 创建任务响应:', res);
-    if (Number(res.sta) !== 0) {
-      throw new Error(res.msg || '创建短剧任务失败');
-    }
-    const taskId = res.data?.task_id || res.data?.data?.task_id || res.task_id;
-    if (!taskId) {
-      throw new Error('创建短剧任务成功但未返回任务 ID');
-    }
-    const task = {
-      taskId,
-      afterId: '',
-      targetTableId,
-      initialTargetTableId: targetTableId,
-      writtenCount: 0,
-    };
+const seriesStreamTask = useIncrementalTask({
+  storageKey: 'series_fetch_stream_task_v1', operationTimeoutMs: 180000,
+  isTerminal: status => [1, 2, 3].includes(Number(status.status)),
+  getStatus: task => getSeriesTask(task.taskId),
+  getResults: getSeriesResults,
+  writeBatch: async (items, task, controls) => {
+    const reconcile = task.pendingWrite ?? !!task.targetTableId;
+    task.pendingWrite = reconcile;
+    const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId,
+      task.targetTableId || '', task.selectedFieldKeys, {
+        stopAfterCurrentBatch: true,
+        initializingTableId: task.initializingTableId,
+        onTableInitialized: async () => {
+          controls.assertActive();
+          task.initializingTableId = '';
+          await controls.saveProgress();
+        },
+        uniqueKey: 'series_id', writeMode: task.writeMode || 'upsert',
+        fieldMappings: task.fieldMappings || [], upsertCacheKey: task.taskId,
+        reconcile, assertActive: controls.assertActive,
+        onProgress: message => { controls.assertActive(); showFieldProgress(message); },
+        onBeforeWrite: async () => { controls.assertActive(); task.pendingWrite = true; await controls.saveProgress(); },
+        onTargetTableReady: async tableId => {
+          controls.assertActive();
+          task.targetTableId = tableId;
+          task.initializingTableId = tableId;
+          await controls.saveProgress();
+        },
+      });
+    task.targetTableId = result?.tableId || task.targetTableId;
+    task.pendingWrite = false;
+  },
+  onProgress: (status, task) => {
     activeSeriesTask = task;
-    activeSeriesTaskId.value = task.taskId;
-    await pollSeriesTask(task);
+    if (Number(status.status) === 3 || status.cancel_requested || status.status_text === 'cancel_requested') isCancelling.value = true;
+    showToast(isCancelling.value ? getStoppingText(task)
+      : `正在获取数据，已写入 ${task.writtenCount || 0} 条短剧`, true);
+  },
+  onWriting: (items, task) => showToast(isCancelling.value ? getStoppingText(task) : `正在写入 ${items.length} 条短剧，已写入 ${task.writtenCount || 0} 条`, true),
+  onFinish: (status, task) => {
+    loading.value = false; isCancelling.value = false; activeSeriesTaskId.value = ''; activeSeriesTask = null;
+    hasRecoverableTask.value = false; recoveryRequiresReopen.value = false;
+    finishToast(Number(status.status) === 3 ? `任务已停止，已写入 ${task.writtenCount || 0} 条短剧`
+      : Number(status.status) === 2 ? (status.reason || '任务失败，已写入已有结果') : `处理完成，已写入 ${task.writtenCount || 0} 条短剧`);
+  },
+  onError: (error, task) => {
+    loading.value = false; isCancelling.value = false; activeSeriesTaskId.value = ''; activeSeriesTask = null;
+    hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
+    recoveryRequiresReopen.value = !!error.requiresReopen;
+    finishToast(error.message || '任务已暂停'); showErrorMsg(error.message || '任务已暂停');
+  },
+});
+const resumeSeriesTask = async () => {
+  if (componentUnmounted || isSubmitting.value || loading.value) return;
+  if (recoveryRequiresReopen.value) { showErrorMsg('上次操作尚未确认结束，请重新进入页面或重新打开插件'); return; }
+  isSubmitting.value = true;
+  try {
+    const resumed = await seriesStreamTask.resume(restoreSeriesTask);
+    if (!componentUnmounted && !resumed && hasRecoverableTask.value) showErrorMsg('未读取到恢复进度，请重新打开插件重试');
   } catch (error) {
-    loading.value = false;
-    activeSeriesTaskId.value = '';
-    console.error('创建博主短剧任务失败:', error);
-    finishToast(`任务提交失败：${error.message || '请求失败'}`);
-    showErrorMsg(error.message || '请求失败');
-  }
+    if (componentUnmounted) return;
+    hasRecoverableTask.value = true; recoveryRequiresReopen.value = !!error.requiresReopen;
+    loading.value = false; showErrorMsg(error.message || '恢复任务失败');
+  } finally { if (!componentUnmounted) isSubmitting.value = false; }
+};
+const postSeriesTask = async (targetTableId = '', profileUrlText = '') => {
+  if (componentUnmounted) return;
+  const fields = [...selectedFieldKeys.value];
+  const mappings = mappingDraft.value.map(item => ({ ...item }));
+  const writeMode = formData.value.writeMode;
+  showToast('正在提交短剧获取任务...', true);
+  await seriesStreamTask.submit(async () => {
+    const response = await request({ url: '/social/api/v1/feishu/series/list', method: 'post',
+      headers: { authorization: `Bearer ${props.api_key}` },
+      data: { profile_url: profileUrlText, pages: Number(formData.value.pages) } });
+    const res = response.data || {};
+    if (Number(res.sta) !== 0) throw new Error(res.msg || '创建短剧任务失败');
+    const data = res.data?.data || res.data || res;
+    return { taskId: data.task_id, targetTableId,
+      selectedFieldKeys: fields, fieldMappings: mappings, writeMode, pendingWrite: false };
+  }, restoreSeriesTask);
 };
 
 const cancelSeriesTask = async () => {
   if (!activeSeriesTaskId.value || isCancelling.value) return;
   isCancelling.value = true;
-  showToast(`正在停止，已写入 ${activeSeriesTask?.writtenCount || 0} 条短剧`, true);
+  showToast(getStoppingText(activeSeriesTask), true);
   try {
     const response = await request({
       url: '/social/api/v1/feishu/series/list/cancel',
@@ -907,18 +755,22 @@ watch(
 );
 
 onMounted(async () => {
-  await loadFieldOptions({ silent: true });
-  await loadSelectedFieldKeys();
-  await loadTableOutputConfigs();
-  fieldSelectionReady.value = true;
+  try {
+    await loadFieldOptions({ silent: true });
+    await loadSelectedFieldKeys(); await loadTableOutputConfigs(); fieldSelectionReady.value = true;
+  } finally {
+    if (!componentUnmounted) { isSubmitting.value = false; await resumeSeriesTask(); }
+  }
 });
 
 onUnmounted(() => {
-  closeInterval();
+  componentUnmounted = true;
+  seriesStreamTask.stop();
   if (toastTimer) clearTimeout(toastTimer);
 });
 
 const commit = async () => {
+  if (hasRecoverableTask.value) return resumeSeriesTask();
   if (isSubmitting.value || loading.value) {
     return;
   }
@@ -990,10 +842,12 @@ const taskActionState = computed(() => {
   if (isCancelling.value) return 'stopping';
   if (loading.value && activeSeriesTaskId.value) return 'running';
   if (loading.value || isSubmitting.value) return 'submitting';
+  if (hasRecoverableTask.value) return 'recoverable';
   return 'idle';
 });
 
 const handleTaskAction = () => {
+  if (taskActionState.value === 'recoverable') return resumeSeriesTask();
   if (taskActionState.value === 'running') {
     return cancelSeriesTask();
   }
@@ -1022,7 +876,7 @@ watch(selectedFieldKeys, (keys) => {
 <template>
   <div class="sub-page">
     <div class="sub-page-header">
-      <span class="sub-page-back" :aria-disabled="taskActionState !== 'idle'" :title="(taskActionState !== 'idle') ? '请等待任务结束后返回' : '返回'" @click="!(taskActionState !== 'idle') && emit('back')">
+      <span class="sub-page-back" :aria-disabled="!['idle', 'recoverable'].includes(taskActionState)" :title="(!['idle', 'recoverable'].includes(taskActionState)) ? '请等待任务结束后返回' : '返回'" @click="['idle', 'recoverable'].includes(taskActionState) && emit('back')">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="16" height="16">
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
@@ -1247,7 +1101,7 @@ watch(selectedFieldKeys, (keys) => {
           :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
           :disabled="taskActionState === 'submitting' || taskActionState === 'stopping'"
           @click="handleTaskAction"
-        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : '立即执行' }}</el-button>
+        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
       </div>
       <div v-if="profileProgress.text" class="profile-progress" :class="{ 'profile-progress--done': profileProgress.done }">
         <span v-if="profileProgress.done" class="profile-progress-check">✓</span>

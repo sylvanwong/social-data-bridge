@@ -39,7 +39,7 @@ Content-Type: application/json
 ### 查询状态
 
 ```http
-GET /social/api/v1/feishu/comment/task?task_id=comment_task_xxx
+GET /social/api/v1/feishu/comment/task?task_id=comment_task_xxx&supports_partial_results=1
 Authorization: Bearer <api_key>
 ```
 
@@ -124,7 +124,7 @@ Content-Type: application/json
 
 ## 状态约定
 
-保持原有数字状态兼容，并新增 `3`：
+支持失败、停止后读取部分结果的前端，在状态查询中传入 `supports_partial_results=1`，按以下真实状态处理：
 
 | `status` | `status_text` | 含义 | 前端行为 |
 | --- | --- | --- | --- |
@@ -142,6 +142,7 @@ Content-Type: application/json
   "data": {
     "task_id": "comment_task_xxx",
     "status": 3,
+    "actual_status": 3,
     "status_text": "cancelled",
     "cancel_requested": true,
     "processed": 42,
@@ -153,6 +154,8 @@ Content-Type: application/json
 ```
 
 `status_text` 与 `cancel_requested` 为推荐新增字段，便于前端展示；前端终态判断仍以 `status` 为准。
+
+未声明该能力的老页面仍只在 `status=1` 时读取结果。为避免丢失已采集评论，后端对失败或停止且已有评论的任务返回兼容 `status=1`，无评论则返回 `status=2`；`actual_status`、`status_text`、原因与失败计数保留真实结果，数据库状态不改写。老页面原有的完成文案不会随此兼容响应自动更新。
 
 ## 后端处理要求
 

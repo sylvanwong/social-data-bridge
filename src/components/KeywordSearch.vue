@@ -1,4 +1,5 @@
 <script setup>
+import { getTaskStoppingText } from '@/utils/taskStopText';
 import { bitable } from "@lark-base-open/js-sdk";
 import { ElNotification } from "element-plus";
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
@@ -347,47 +348,76 @@ const saveSelectedFieldKeys = async (keys) => {
   }
 };
 
-const getStoppingText = (task) => {
-  if (task.totalPosts === undefined || task.totalPosts === null) {
-    return '正在停止任务，等待剩余作品写入完成后停止，避免已获取数据丢失';
+const getStoppingText = task => getTaskStoppingText(task, '作品');
+
+const hasRecoverableTask = ref(false);
+const requiresReopen = ref(false);
+let componentUnmounted = false;
+const restoreTask = (task) => {
+  hasRecoverableTask.value = true;
+  loading.value = true;
+  activeKeywordTaskId.value = task.taskId;
+  showToast('正在恢复未完成的数据获取任务…');
+};
+const resumeSavedTask = async () => {
+  if (requiresReopen.value || componentUnmounted) return;
+  loading.value = true;
+  try {
+    const resumed = await keywordStreamTask.resume(restoreTask);
+    if (!resumed) loading.value = false;
+  } catch (error) {
+    hasRecoverableTask.value = true;
+    requiresReopen.value = !!error.requiresReopen;
+    loading.value = false;
+    showErrorMsg(error.message || '恢复任务失败，请重试');
   }
-  const remaining = Math.max(0, task.totalPosts - (task.writtenCount || 0));
-  return `正在停止任务，剩余${remaining}条作品未写入，等待写入完成后停止，避免已获取数据丢失`;
 };
 
 const keywordStreamTask = useIncrementalTask({
   storageKey: STREAM_TASK_STORAGE_KEY,
+  operationTimeoutMs: 180000,
   isTerminal: (status) => [1, 2, 3].includes(Number(status.status)),
   getStatus: async (task) => (await request({ url: `/social/api/v1/feishu/keyword/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', headers: { authorization: `Bearer ${props.api_key}` } })).data,
-  getResults: async (task) => {
-    const response = await request({ url: '/social/api/v1/feishu/post/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 } });
-    const res = response.data;
-    const data = res?.sta !== undefined ? (res.sta === 0 ? res.data : null) : res;
-    if (data?.count !== undefined && data.count !== null && data.count !== '') {
-      const total = Number(data.count);
-      if (Number.isSafeInteger(total) && total >= 0) {
-        task.totalPosts = total;
-      }
-    }
-    return res;
-  },
-  writeBatch: async (items, task) => {
+  getResults: async (task) => (await request({ url: '/social/api/v1/feishu/post/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 } })).data,
+  writeBatch: async (items, task, controls) => {
+    const reconcile = task.pendingWrite ?? !!task.targetTableId;
+    task.pendingWrite = reconcile;
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', task.selectedFieldKeys, {
       stopAfterCurrentBatch: true,
+      initializingTableId: task.initializingTableId,
+      onTableInitialized: async () => {
+        controls.assertActive();
+        task.initializingTableId = '';
+        await controls.saveProgress();
+      },
       attachmentPipeline: true,
       uploadBatchSize: 5,
       writeMode: task.writeMode || 'upsert',
+      uniqueKey: 'aweme_id',
+      reconcile,
+      assertActive: controls.assertActive,
+      onBeforeWrite: async () => {
+        controls.assertActive();
+        task.pendingWrite = true;
+        await controls.saveProgress();
+      },
       upsertCacheKey: task.taskId,
       fieldMappings: task.fieldMappings || [],
-      onProgress: showFieldProgress,
-      onTargetTableReady: async (tableId) => { task.targetTableId = tableId; },
+      onTargetTableReady: async (tableId) => {
+        controls.assertActive();
+        task.targetTableId = tableId;
+        task.initializingTableId = tableId;
+        await controls.saveProgress();
+      },
     });
+    controls.assertActive();
     task.targetTableId = result?.tableId || task.targetTableId;
+    task.pendingWrite = false;
   },
   onProgress: (status, task) => {
     const processed = Number(status.processed) || 0;
     const total = Number(status.total) || 0;
-    if (status.status_text === 'cancel_requested' || status.cancel_requested) {
+    if (Number(status.status) === 3 || status.status_text === 'cancel_requested' || status.cancel_requested) {
       isCancelling.value = true;
     }
     showToast(
@@ -401,6 +431,7 @@ const keywordStreamTask = useIncrementalTask({
     ? getStoppingText(task)
     : `正在写入 ${items.length} 条作品，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true),
   onFinish: async (status, task) => {
+    hasRecoverableTask.value = false;
     loading.value = false;
     isCancelling.value = false;
     activeKeywordTaskId.value = '';
@@ -408,10 +439,12 @@ const keywordStreamTask = useIncrementalTask({
       showCompletionToast(`任务已停止，已写入 ${task.writtenCount || 0} 条作品`);
       return;
     }
-    showCompletionToast(Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`);
+    showCompletionToast(Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条作品`);
     if (Number(status.status) === 2) showErrorMsg(status.reason || '获取数据失败，请稍后重试');
   },
-  onError: async (error) => {
+  onError: async (error, task) => {
+    hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
+    requiresReopen.value = !!error.requiresReopen;
     loading.value = false;
     isCancelling.value = false;
     activeKeywordTaskId.value = '';
@@ -443,6 +476,11 @@ const cancelKeywordTask = async () => {
 };
 
 const postSearchTask = async (targetTableId = "") => {
+  const outputSnapshot = {
+    targetTableId, selectedFieldKeys: [...selectedFieldKeys.value],
+    writeMode: formData1.value.writeMode,
+    fieldMappings: mappingDraft.value.map(item => ({ ...item })),
+  };
   let filter_config = {};
   const socialType = formData1.value.social_type;
   if (socialType === 'xhs') {
@@ -492,7 +530,8 @@ const postSearchTask = async (targetTableId = "") => {
     filter_config = { content_type: formData1.value.content_type };
   }
   showToast(`正在提交关键词搜索任务...${TASK_TOAST_SUFFIX}`, true);
-  await request({
+  await keywordStreamTask.submit(async () => {
+    const response = await request({
     url: "/social/api/v1/feishu/keyword/task",
     method: "post",
     headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -505,36 +544,18 @@ const postSearchTask = async (targetTableId = "") => {
       work_fetch_range: normalizeWorkFetchRange(),
       filter_config,
     },
-  })
-    .then(function (response) {
-      let res = response.data;
-      if (res.sta == 0) {
-        const data = res.data;
-        activeKeywordTaskId.value = data.task_id;
-        keywordStreamTask.start({
-          taskId: data.task_id,
-          targetTableId,
-          selectedFieldKeys: [...selectedFieldKeys.value],
-          writeMode: formData1.value.writeMode,
-          fieldMappings: mappingDraft.value.map(item => ({ ...item })),
-        });
-      } else {
-        loading.value = false;
-        activeKeywordTaskId.value = '';
-        showCompletionToast(res.msg || '提交任务失败');
-        showErrorMsg(res.msg);
-      }
-    })
-    .catch(function (error) {
-      loading.value = false;
-      activeKeywordTaskId.value = '';
-      console.log(error);
-      showCompletionToast(error.message || '提交任务失败');
-      showErrorMsg(error.message || '请求失败');
-    });
+  });
+    const res = response.data;
+    if (res?.sta !== 0 || !res.data?.task_id) throw new Error(res?.msg || '创建任务未返回任务ID');
+    return {
+      taskId: res.data.task_id, pendingWrite: false,
+      ...outputSnapshot,
+    };
+  }, restoreTask);
 };
 
 const getSearchData = async (targetTableId = "") => {
+  if (componentUnmounted) return;
   loading.value = true;
   currentTableName.value = getFirstKeyword(formData1.value.keyword) || '社媒数据助手';
   await postSearchTask(targetTableId);
@@ -644,32 +665,36 @@ watch(
 );
 
 onMounted(async () => {
-  const search_platform = await bitable.bridge.getData("search_platform");
-  const search_keyword = await bitable.bridge.getData("search_keyword");
-  if (search_keyword && typeof search_keyword == "string") {
-    formData1.value.keyword = search_keyword;
-  }
-  if (search_platform && typeof search_platform == "string" && props.social_type_options.some(opt => opt.value === search_platform)) {
-    formData1.value.social_type = search_platform;
-  } else {
-    formData1.value.social_type = props.social_type_options[0]?.value || "";
-  }
-  await loadSelectedFieldKeys();
-  await loadTableOutputConfigs();
-  fieldSelectionReady.value = true;
-  await keywordStreamTask.resume((task) => {
-    activeKeywordTaskId.value = task.taskId;
-    loading.value = true;
-    showToast(`正在恢复未完成的关键词采集任务...${TASK_TOAST_SUFFIX}`, true);
-  });
+  isSubmitting.value = true;
+  try {
+    const search_platform = await bitable.bridge.getData("search_platform");
+    const search_keyword = await bitable.bridge.getData("search_keyword");
+    if (search_keyword && typeof search_keyword == "string") {
+      formData1.value.keyword = search_keyword;
+    }
+    if (search_platform && typeof search_platform == "string" && props.social_type_options.some(opt => opt.value === search_platform)) {
+      formData1.value.social_type = search_platform;
+    } else {
+      formData1.value.social_type = props.social_type_options[0]?.value || "";
+    }
+    await loadSelectedFieldKeys();
+    await loadTableOutputConfigs();
+    fieldSelectionReady.value = true;
+    await resumeSavedTask();
+  } catch (error) {
+    hasRecoverableTask.value = true;
+    showErrorMsg(error.message || '读取任务状态失败，请重试恢复');
+  } finally { isSubmitting.value = false; }
 });
 
 onUnmounted(() => {
+  componentUnmounted = true;
   keywordStreamTask.stop();
   if (toastTimer) clearTimeout(toastTimer);
 });
 
 const commit = async () => {
+  if (hasRecoverableTask.value) return resumeSavedTask();
   if (isSubmitting.value || loading.value) {
     return;
   }
@@ -740,10 +765,13 @@ const taskActionState = computed(() => {
   if (isCancelling.value) return 'stopping';
   if (loading.value && activeKeywordTaskId.value) return 'running';
   if (loading.value || isSubmitting.value) return 'submitting';
+  if (requiresReopen.value) return 'reopen';
+  if (hasRecoverableTask.value) return 'recoverable';
   return 'idle';
 });
 
 const handleTaskAction = () => {
+  if (taskActionState.value === 'recoverable') return resumeSavedTask();
   if (taskActionState.value === 'running') {
     return cancelKeywordTask();
   }
@@ -1117,9 +1145,9 @@ watch(selectedFieldKeys, (keys) => {
         class="commit-btn"
         :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
         :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
-        :disabled="taskActionState === 'submitting' || taskActionState === 'stopping'"
+        :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'reopen'"
         @click="handleTaskAction"
-      >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : '立即执行' }}</el-button>
+      >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">

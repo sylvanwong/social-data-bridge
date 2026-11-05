@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { nextTick } from 'vue';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { createTableConfigSaver } from '../src/utils/tableOutputConfig.mjs';
@@ -8,13 +9,24 @@ import { bitable, FieldType, DateFormatter, NumberFormatter } from '@lark-base-o
 
 // Exercise the real page handlers, substituting only their SDK and external dependencies.
 function pageHandler(page, name, bindings) {
-  bindings = { formData: { value: {} }, fieldListLoading: { value: false }, linkFieldContext: { tableId: '', viewId: '', fieldName: '', pendingSelection: null }, writeMode: { value: 'upsert' }, editingTaskId: { value: null }, taskMappingDraft: { value: [] }, mappingDraft: { value: [] }, taskOutputLoading: { value: false }, taskOutputError: { value: '' }, taskOutputTableId: { value: '' }, taskOutputConfigReady: { value: true }, taskDialogVisible: { value: false }, tableConfigApplying: { value: false }, mainOutputTableId: { value: '' }, mainConfigReadId: { value: 0 }, taskConfigReadId: { value: 0 }, fieldReadRequests: new WeakMap(), taskTableFieldOptions: { value: [] }, tableFieldOptions: { value: [] }, ...bindings };
+  bindings = { hasRecoverableTask: { value: false }, componentUnmounted: false, formData: { value: {} }, fieldListLoading: { value: false }, linkFieldContext: { tableId: '', viewId: '', fieldName: '', pendingSelection: null }, writeMode: { value: 'upsert' }, editingTaskId: { value: null }, taskMappingDraft: { value: [] }, mappingDraft: { value: [] }, taskOutputLoading: { value: false }, taskOutputError: { value: '' }, taskOutputTableId: { value: '' }, taskOutputConfigReady: { value: true }, taskDialogVisible: { value: false }, tableConfigApplying: { value: false }, mainOutputTableId: { value: '' }, mainConfigReadId: { value: 0 }, taskConfigReadId: { value: 0 }, fieldReadRequests: new WeakMap(), taskTableFieldOptions: { value: [] }, tableFieldOptions: { value: [] }, ...bindings };
   if (name === 'saveTableOutputConfig' && !bindings.persistTableOutputConfig) {
     bindings.persistTableOutputConfig = pageHandler(page, 'persistTableOutputConfig', { ...bindings, createTableConfigSaver });
   }
   const source = parse(fs.readFileSync(new URL(`../src/components/${page}.vue`, import.meta.url), 'utf8')).descriptor.scriptSetup.content;
   const declarations = parseJS(source, { sourceType: 'module' }).program.body
     .filter(node => node.type === 'VariableDeclaration').flatMap(node => node.declarations);
+  if (['handleTableModeSubmit', 'handleManualModeSubmit', 'handleImmediateSubmit'].includes(name)) {
+    // Submission now reports progress before SDK work. Keep the real toast
+    // helpers, while replacing rendering and timers in these isolated tests.
+    bindings = { nextTick, TASK_TOAST_SUFFIX: '', toastTimer: null,
+      showToast() {}, hideToast() {}, setTimeout() {}, ...bindings };
+    for (const helper of ['finishToast', 'showCompletionToast', 'showExecutionProgress']) {
+      if (!bindings[helper] && declarations.some(node => node.id.name === helper)) {
+        bindings[helper] = pageHandler(page, helper, bindings);
+      }
+    }
+  }
   if (name !== 'cloneFieldMappings' && !bindings.cloneFieldMappings && declarations.some(node => node.id.name === 'cloneFieldMappings')) {
     bindings.cloneFieldMappings = pageHandler(page, 'cloneFieldMappings', bindings);
   }

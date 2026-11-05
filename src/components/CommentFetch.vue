@@ -1,4 +1,10 @@
+<script>
+// 跨页面实例等待正在提交的任务落盘，避免新页面抢先创建并覆盖恢复进度。
+const commentSubmission = { pending: null };
+</script>
+
 <script setup>
+import { getTaskStoppingText } from '@/utils/taskStopText';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage, ElNotification } from "element-plus";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
@@ -40,7 +46,10 @@ const tableConfigLoading = ref(false);
 const tableConfigApplying = ref(false);
 const tableConfigSaving = ref(false);
 const loading = ref(false);
-const isSubmitting = ref(false);
+const isSubmitting = ref(true);
+const hasRecoverableTask = ref(false);
+const recoveryRequiresReopen = ref(false);
+let componentUnmounted = false;
 const isCancelling = ref(false);
 const activeCommentTaskId = ref('');
 const profileProgress = ref({ text: "", done: false });
@@ -172,11 +181,13 @@ const pages_options = [
   { value: 30, label: "获取前30页" },
   { value: 50, label: "获取前50页" },
 ];
-const xhsCommentSortOptions = [
-  { value: 'default', label: '默认排序' },
-  { value: 'time_descending', label: '最新评论优先' },
-  { value: 'like_count_descending', label: '点赞最多优先' },
+const commentSortOptions = [
+  { value: 'default', label: '平台默认排序', platforms: [] },
+  { value: 'time_descending', label: '最新评论优先', platforms: ['小红书', '微博', 'B站', '知乎', 'YouTube', '百度贴吧'] },
+  { value: 'like_count_descending', label: '点赞最多优先（仅小红书）', platforms: ['小红书'] },
+  { value: 'oldest', label: '最早评论优先（仅贴吧）', platforms: ['百度贴吧'] },
 ];
+const commentSortPlatforms = computed(() => commentSortOptions.find(option => option.value === formData.value.sortType)?.platforms || []);
 const writeModeOptions = [
   { value: 'upsert', label: '更新或新增' },
   { value: 'append', label: '始终新增' },
@@ -237,10 +248,14 @@ const showCompletionToast = (text) => {
   toastTimer = setTimeout(hideToast, 3000);
 };
 
+const stoppedCommentProgress = task => getTaskStoppingText(task, '评论');
+
 const showFieldProgress = (message) => {
-  showToast(isCancelling.value
-    ? `正在停止任务，已写入 ${commentStreamTask.getActiveTask()?.writtenCount || 0} 条评论`
-    : `${message}，请勿关闭插件，关闭将中断任务`, true);
+  const task = commentStreamTask.getActiveTask();
+  showToast(Number(task?.latestStatus?.status) === 3 ? stoppedCommentProgress(task)
+    : isCancelling.value
+      ? stoppedCommentProgress(task)
+      : `${message}，请勿关闭插件，关闭将中断任务`, true);
 };
 
 const getDefaultSelectedFieldKeys = () => FIELD_CONFIG
@@ -339,18 +354,32 @@ const closeNoteInterval = () => {
 };
 
 onMounted(async () => {
-  await loadFieldOptions({ silent: true });
-  await loadSelectedFieldKeys();
-  await loadTableOutputConfigs();
-  fieldSelectionReady.value = true;
-  await commentStreamTask.resume((task) => {
-    activeCommentTaskId.value = task.taskId;
-    loading.value = true;
-    showToast('正在恢复未完成的评论采集任务...', true);
-  });
+  try {
+    await loadFieldOptions({ silent: true });
+    await loadSelectedFieldKeys();
+    await loadTableOutputConfigs();
+    fieldSelectionReady.value = true;
+  } finally {
+    try {
+      await commentSubmission.pending;
+    } catch (error) {
+      if (!componentUnmounted && error.taskCreated && error.requiresReopen) {
+        hasRecoverableTask.value = true;
+        recoveryRequiresReopen.value = !!error.requiresReopen;
+        isSubmitting.value = false;
+        showErrorMsg(error.message || '保存任务恢复信息失败，请重新打开插件重试');
+        return;
+      }
+    }
+    if (!componentUnmounted) {
+      isSubmitting.value = false;
+      await resumeCommentTask();
+    }
+  }
 });
 
 onUnmounted(() => {
+  componentUnmounted = true;
   closeNoteInterval();
   commentStreamTask.stop();
   if (toastTimer) clearTimeout(toastTimer);
@@ -652,9 +681,10 @@ watch(
   }
 );
 
-const createSequentialTable = async (baseTableName) => {
+const createSequentialTable = async (baseTableName, assertActive = () => {}) => {
   try {
     const existingTables = await bitable.base.getTableMetaList();
+    assertActive();
     const tableNames = existingTables.map(table => table.name);
     const existsBaseTable = tableNames.includes(baseTableName);
     const existsSequentialTable = tableNames.some(name => name.startsWith(`${baseTableName}`) && /\d+$/.test(name.slice(baseTableName.length)));
@@ -692,9 +722,11 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
     const ensureFieldDisplayConfig = async (field, config) => {
       const fieldType = await field.getType();
       if (config.formatter && fieldType === FieldType.Number) {
+        options.assertActive?.();
         await field.setFormatter(config.formatter);
       }
       if (config.dateFormat && fieldType === FieldType.DateTime) {
+        options.assertActive?.();
         await field.setDateFormat(config.dateFormat);
       }
     };
@@ -703,22 +735,26 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
     if (!type && !resolvedTargetTableId) {
       const tableName = '社媒评论加载工具';
       options.onProgress?.('正在创建评论目标表...');
-      const { tableId } = await createSequentialTable(tableName);
+      const { tableId } = await createSequentialTable(tableName, options.assertActive);
+      options.assertActive?.();
+      resolvedTargetTableId = tableId;
+      await options.onTargetTableReady?.(tableId);
       const newTable = await bitable.base.getTable(tableId);
+      options.assertActive?.();
       await bitable.ui.switchToTable(tableId);
       const fieldMetaList = await newTable.getFieldMetaList();
       const firstFieldId = fieldMetaList[0]?.id;
       if (firstFieldId) {
         options.onProgress?.(`正在创建字段 1/${fields.length}：${activeFieldConfigs[0].name}...`);
+        options.assertActive?.();
         await newTable.setField(firstFieldId, { ...fields[0] });
       }
       for (let i = 1; i < fields.length; i++) {
         options.onProgress?.(`正在创建字段 ${i + 1}/${fields.length}：${activeFieldConfigs[i].name}...`);
+        options.assertActive?.();
         await newTable.addField({ ...fields[i] });
       }
       options.onProgress?.('正在设置字段格式...');
-      resolvedTargetTableId = tableId;
-      await options.onTargetTableReady?.(tableId);
     }
 
     const activeTable = resolvedTargetTableId
@@ -733,6 +769,9 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
           .map(item => [item.source_key, item.target_field_id])
       );
 
+      if (options.reconcile && !mappingBySource.has('cid') && !existingFieldMap.has('评论ID')) {
+        throw new Error('评论ID字段不可用，无法核对已写入结果，请恢复字段后重试');
+      }
       const missingFields = activeFieldConfigs.filter(config =>
         !mappingBySource.has(config.key) && !existingFieldMap.has(config.name)
       );
@@ -741,6 +780,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
       }
       for (const [index, config] of missingFields.entries()) {
         options.onProgress?.(`正在创建字段 ${index + 1}/${missingFields.length}：${config.name}...`);
+        options.assertActive?.();
         await activeTable.addField(buildFieldPayload(config));
       }
 
@@ -763,6 +803,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
       const records = [];
       const normalizedRecords = [];
       for (const item of list) {
+        options.assertActive?.();
         const record = [];
         const fieldsById = {};
         for (const config of activeFieldConfigs) {
@@ -782,7 +823,8 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
         records.push(record);
         normalizedRecords.push(fieldsById);
       }
-      if (options.writeMode === 'upsert') {
+      await options.onBeforeWrite?.();
+      if (options.writeMode === 'upsert' || options.reconcile) {
         const keyFieldId = mappingBySource.get('cid') || existingFieldMap.get('评论ID')?.id;
         if (!keyFieldId) throw new Error('更新或新增需要“评论ID”字段');
 
@@ -802,11 +844,13 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
 
         const indexCache = options.upsertIndex || commentUpsertIndexCache;
         const cacheKey = `${options.upsertCacheKey || 'default'}:${activeTable.id}:${keyFieldId}`;
-        let existingByCid = indexCache.get(cacheKey);
+        // 异常批次可能已部分写入，必须重新查表，不能沿用失败前的索引。
+        let existingByCid = options.reconcile ? null : indexCache.get(cacheKey);
         if (!existingByCid) {
           existingByCid = new Map();
           let pageToken;
           do {
+            options.assertActive?.();
             const result = await activeTable.getRecordsByPage({ pageSize: 200, pageToken });
             for (const record of result.records || []) {
               const cid = normalizeCommentId(record.fields?.[keyFieldId]);
@@ -822,20 +866,23 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
         uniqueRecords.forEach(({ record, fields }, cid) => {
           const recordId = existingByCid.get(cid);
           if (recordId) {
-            pendingUpdates.push({ recordId, fields });
+            if (!options.reconcile || options.writeMode === 'upsert') pendingUpdates.push({ recordId, fields });
           } else {
             pendingCreates.push({ cid, record });
           }
         });
 
         for (const updates of chunkRecords(pendingUpdates)) {
+          options.assertActive?.();
           await activeTable.setRecords(updates);
         }
         for (const creates of chunkRecords(pendingCreates)) {
+          options.assertActive?.();
           const created = await activeTable.addRecords(creates.map(item => item.record));
-          created.forEach((record, index) => existingByCid.set(creates[index].cid, record.recordId));
+          created.forEach((recordId, index) => existingByCid.set(creates[index].cid, recordId));
         }
       } else {
+        options.assertActive?.();
         await activeTable.addRecords(records);
       }
       if (options.stopAfterCurrentBatch) return { tableId: activeTable.id };
@@ -851,6 +898,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
     }
     let records = [];
     for (const item of list) {
+      options.assertActive?.();
       let record = [];
       for (let i = 0; i < fields.length; i++) {
         const mapping = activeFieldConfigs[i];
@@ -860,6 +908,8 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
       }
       records.push(record);
     }
+    await options.onBeforeWrite?.();
+    options.assertActive?.();
     await activeTable.addRecords(records);
     if (options.stopAfterCurrentBatch) return { tableId: activeTable.id };
     resetParams();
@@ -874,32 +924,62 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
 
 const commentStreamTask = useIncrementalTask({
   storageKey: STREAM_TASK_STORAGE_KEY,
+  operationTimeoutMs: 180000,
   isTerminal: (status) => [1, 2, 3].includes(Number(status.status)),
-  getStatus: async (task) => (await request({ url: `/social/api/v1/feishu/comment/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', headers: { authorization: `Bearer ${props.api_key}` } })).data,
-  getResults: async (task) => (await request({ url: '/social/api/v1/feishu/comment/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 20 } })).data,
-  writeBatch: async (items, task) => {
+  getStatus: async (task) => (await request({ url: `/social/api/v1/feishu/comment/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', params: { supports_partial_results: 1 }, headers: { authorization: `Bearer ${props.api_key}` } })).data,
+  getResults: async (task) => (await request({ url: '/social/api/v1/feishu/comment/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 20, include_count: Number(task.latestStatus?.status) === 3 } })).data,
+  writeBatch: async (items, task, controls) => {
+    if (items.some(item => !normalizeCommentId(item?.cid))) {
+      throw new Error('评论ID缺失，已暂停写入，剩余结果仍保留');
+    }
+    // 旧任务没有标记：已有目标表时首批核对；尚未建表则可以正常初始化。
+    const reconcile = task.pendingCommentWrite ?? !!task.targetTableId;
+    task.pendingCommentWrite = reconcile;
+    if (reconcile) showFieldProgress('正在按评论ID核对已写入结果...');
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', {
       stopAfterCurrentBatch: true,
       writeMode: task.writeMode || 'upsert',
+      reconcile,
+      onBeforeWrite: async () => {
+        // 字段准备完成后、写记录前保存；成功后随结果游标一起清除。
+        controls.assertActive();
+        task.pendingCommentWrite = true;
+        await controls.saveProgress();
+      },
       fieldMappings: task.fieldMappings || [],
       upsertCacheKey: task.taskId,
-      onProgress: showFieldProgress,
-      onTargetTableReady: async (tableId) => { task.targetTableId = tableId; },
+      assertActive: controls.assertActive,
+      onProgress: (message) => { controls.assertActive(); showFieldProgress(message); },
+      onTargetTableReady: async (tableId) => {
+        controls.assertActive();
+        task.targetTableId = tableId;
+        await controls.saveProgress();
+      },
     });
     task.targetTableId = result?.tableId || task.targetTableId;
+    task.pendingCommentWrite = false;
   },
   onProgress: (status, task) => {
+    if (Number(status.status) === 3) {
+      isCancelling.value = true;
+      showToast(stoppedCommentProgress(task), true);
+      return;
+    }
     if (status.status_text === 'cancel_requested' || status.cancel_requested) {
       isCancelling.value = true;
-      showToast(`正在停止任务，已写入 ${task.writtenCount || 0} 条评论`, true);
+      showToast(stoppedCommentProgress(task), true);
       return;
     }
     const processed = Number(status.processed) || 0;
     const totalCount = Number(status.total) || 0;
     showToast(`已处理 ${totalCount ? `${processed}/${totalCount}` : processed} 个作品，已写入 ${task.writtenCount || 0} 条评论`, true);
   },
-  onWriting: (items) => showToast(`正在写入 ${items.length} 条评论...`, true),
+  onWriting: (items, task) => showToast(isCancelling.value
+    ? stoppedCommentProgress(task)
+    : `正在写入 ${items.length} 条评论，已写入 ${task.writtenCount || 0} 条`, true),
   onFinish: async (status, task) => {
+    hasRecoverableTask.value = false;
+    recoveryRequiresReopen.value = false;
     loading.value = false;
     isCancelling.value = false;
     activeCommentTaskId.value = '';
@@ -907,10 +987,14 @@ const commentStreamTask = useIncrementalTask({
       showCompletionToast(`任务已停止，已写入 ${task.writtenCount || 0} 条评论`);
       return;
     }
-    showCompletionToast(Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条评论`);
+    const fallbackCount = Number(status.sort_fallback_count) || 0;
+    const sortMessage = fallbackCount > 0 ? `，其中 ${fallbackCount} 个作品使用了默认排序` : '';
+    showCompletionToast((Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条评论`) + sortMessage);
     if (Number(status.status) === 2) showErrorMsg(status.reason || '获取数据失败，请稍后重试');
   },
   onError: async (error) => {
+    hasRecoverableTask.value = true;
+    recoveryRequiresReopen.value = !!error.requiresReopen;
     loading.value = false;
     isCancelling.value = false;
     activeCommentTaskId.value = '';
@@ -919,6 +1003,56 @@ const commentStreamTask = useIncrementalTask({
   },
 });
 
+const resumeCommentTask = async () => {
+  if (componentUnmounted || isSubmitting.value || loading.value) return;
+  if (recoveryRequiresReopen.value) {
+    showErrorMsg('上次操作尚未确认结束，请关闭插件后重新打开以恢复任务');
+    return;
+  }
+  isSubmitting.value = true;
+  try {
+    let unsavedTask;
+    try {
+      await commentSubmission.pending;
+    } catch (error) {
+      if (error.requiresReopen) throw error;
+      unsavedTask = error.createdTask;
+    }
+    if (componentUnmounted) return;
+    if (unsavedTask) {
+      hasRecoverableTask.value = true;
+      // 其他页面实例也等待本次补存，不能同时恢复或创建新任务。
+      const saving = commentStreamTask.saveForResume(unsavedTask).catch(error => {
+        error.taskCreated = true;
+        error.createdTask = unsavedTask;
+        throw error;
+      });
+      commentSubmission.pending = saving;
+      await saving;
+      if (commentSubmission.pending === saving) commentSubmission.pending = null;
+      if (componentUnmounted) return;
+    }
+    const resumed = await commentStreamTask.resume((task) => {
+      hasRecoverableTask.value = true;
+      activeCommentTaskId.value = task.taskId;
+      loading.value = true;
+      showToast('正在恢复未完成的评论数据获取任务...', true);
+    });
+    if (!componentUnmounted && !resumed && hasRecoverableTask.value) {
+      showErrorMsg('未读取到当前表格的恢复进度，请重新打开插件重试');
+    }
+    return resumed;
+  } catch (error) {
+    if (componentUnmounted) return;
+    hasRecoverableTask.value = true;
+    if (error.taskCreated || error.pendingClear || error.pendingMutation) recoveryRequiresReopen.value = !!error.requiresReopen;
+    loading.value = false;
+    showErrorMsg(error.message || '读取恢复进度失败，请重试');
+  } finally {
+    if (!componentUnmounted) isSubmitting.value = false;
+  }
+};
+
 const cancelCommentTask = async () => {
   const task = commentStreamTask.getActiveTask();
   if (!task?.taskId || isCancelling.value) {
@@ -926,7 +1060,7 @@ const cancelCommentTask = async () => {
   }
 
   isCancelling.value = true;
-  showToast(`正在停止任务，已写入 ${task.writtenCount || 0} 条评论`, true);
+  showToast(stoppedCommentProgress(task), true);
   try {
     const response = await request({
       url: '/social/api/v1/feishu/comment/task/cancel',
@@ -940,49 +1074,77 @@ const cancelCommentTask = async () => {
     }
   } catch (error) {
     isCancelling.value = false;
-    console.error('停止评论采集任务失败:', error);
+    console.error('停止评论数据获取任务失败:', error);
     showErrorMsg(error.message || '停止任务失败，请稍后重试');
   }
 };
 
 const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {}) => {
-  showToast('正在提交评论采集任务...请勿关闭插件，关闭将中断任务', true);
-  await request({
-    url: "/social/api/v1/feishu/comment/task",
-    method: "post",
-    headers: { 'authorization': `Bearer ${props.api_key}` },
-    data: {
-      url: urlText,
-      pages: Number(formData.value.pages),
-      reply_pages: Number(formData.value.reply_pages),
-      ...extraPayload,
-    },
-  })
-    .then(function (response) {
-      let res = response.data;
-      if (res.sta == 0) {
-        const data = res.data;
-        activeCommentTaskId.value = data.task_id;
-        commentStreamTask.start({
-          taskId: data.task_id,
-          targetTableId,
-          writeMode: formData.value.writeMode,
-          fieldMappings: mappingDraft.value.map(item => ({ ...item })),
-        });
-      } else {
-        loading.value = false;
-        activeCommentTaskId.value = '';
-        showCompletionToast(res.msg || '提交任务失败');
-        showErrorMsg(res.msg);
-      }
-    })
-    .catch(function (error) {
+  if (componentUnmounted) return;
+  showToast('正在提交评论数据获取任务...请勿关闭插件，关闭将中断任务', true);
+  const pending = (async () => {
+    const response = await request({
+      url: "/social/api/v1/feishu/comment/task",
+      method: "post",
+      headers: { 'authorization': `Bearer ${props.api_key}` },
+      data: {
+        url: urlText,
+        pages: Number(formData.value.pages),
+        reply_pages: Number(formData.value.reply_pages),
+        ...extraPayload,
+      },
+    });
+    const res = response.data;
+    if (res.sta != 0) throw new Error(res.msg || '提交任务失败');
+    const data = res.data;
+    const task = {
+      taskId: data.task_id,
+      targetTableId,
+      pendingCommentWrite: false,
+      writeMode: formData.value.writeMode,
+      fieldMappings: mappingDraft.value.map(item => ({ ...item })),
+    };
+    try {
+      await commentStreamTask.saveForResume(task);
+    } catch (error) {
+      // 保留完整身份，页面重新进入后可补存同一任务，无需再次创建。
+      error.taskCreated = true;
+      error.createdTask = task;
+      throw error;
+    }
+    return data;
+  })();
+  commentSubmission.pending = pending;
+  let preserveSubmission = false;
+  try {
+    const data = await pending;
+    if (componentUnmounted) return;
+    hasRecoverableTask.value = true;
+    activeCommentTaskId.value = data.task_id;
+    const resumed = await commentStreamTask.resume();
+    if (!componentUnmounted && !resumed) {
       loading.value = false;
       activeCommentTaskId.value = '';
-      console.log(error);
-      showCompletionToast(error.message || '提交任务失败');
-      showErrorMsg(error.message || '请求失败');
-    });
+      showErrorMsg('未读取到当前表格的恢复进度，请重新打开插件重试');
+    }
+  } catch (error) {
+    preserveSubmission = !!error.taskCreated;
+    if (componentUnmounted) return;
+    if (error.taskCreated) {
+      hasRecoverableTask.value = true;
+      recoveryRequiresReopen.value = !!error.requiresReopen;
+    }
+    loading.value = false;
+    activeCommentTaskId.value = '';
+    console.log(error);
+    const message = error.taskCreated
+      ? `任务已创建，保存恢复信息失败：${error.message || '请稍后恢复任务'}`
+      : (error.message || '提交任务失败');
+    showCompletionToast(message);
+    showErrorMsg(message);
+  } finally {
+    if (!preserveSubmission && commentSubmission.pending === pending) commentSubmission.pending = null;
+  }
 };
 
 const getNoteData = async (targetTableId = "", urlList = []) => {
@@ -1021,6 +1183,7 @@ const validateTableFields = async (tableId) => {
 };
 
 const commit = async () => {
+  if (hasRecoverableTask.value) return resumeCommentTask();
   if (isSubmitting.value || loading.value) {
     return;
   }
@@ -1081,7 +1244,7 @@ const commit = async () => {
 
     await getNoteData("", urlList);
   } catch (error) {
-    console.error("提交评论采集任务失败:", error);
+    console.error("提交评论数据获取任务失败:", error);
     showCompletionToast(`任务提交失败：${error.message || '请稍后重试'}`);
     showErrorMsg(error.message || "提交失败，请稍后重试");
   } finally {
@@ -1093,10 +1256,12 @@ const taskActionState = computed(() => {
   if (isCancelling.value) return 'stopping';
   if (loading.value && activeCommentTaskId.value) return 'running';
   if (loading.value || isSubmitting.value) return 'submitting';
+  if (hasRecoverableTask.value) return 'recoverable';
   return 'idle';
 });
 
 const handleTaskAction = () => {
+  if (taskActionState.value === 'recoverable') return resumeCommentTask();
   if (taskActionState.value === 'running') {
     return cancelCommentTask();
   }
@@ -1307,10 +1472,19 @@ watch(selectedFieldKeys, (keys) => {
           </el-radio-group>
         </el-form-item>
         <el-form-item label="">
-          <div slot="label" class="c-label">评论排序（仅小红书）</div>
-          <el-select v-model="formData.sortType" placeholder="请选择" style="width: 100%">
-            <el-option v-for="option in xhsCommentSortOptions" :key="option.value" :label="option.label" :value="option.value" />
-          </el-select>
+          <div class="field-stack">
+            <div class="c-label">评论排序</div>
+            <el-select v-model="formData.sortType" aria-label="评论排序" aria-describedby="comment-sort-help" style="width: 100%">
+              <el-option v-for="option in commentSortOptions" :key="option.value" :label="option.label" :value="option.value" />
+            </el-select>
+            <div id="comment-sort-help" class="comment-sort-help" aria-live="polite">
+              <template v-if="commentSortPlatforms.length">
+                <p>支持平台：{{ commentSortPlatforms.join('、') }}</p>
+                <p>其余平台按默认顺序获取。</p>
+              </template>
+              <p v-else>各平台按自身默认顺序获取评论。</p>
+            </div>
+          </div>
         </el-form-item>
 
         <div class="section-heading output-heading"><span class="section-step">2</span><span>输出设置</span></div>
@@ -1399,7 +1573,7 @@ watch(selectedFieldKeys, (keys) => {
         :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
         :disabled="taskActionState === 'submitting' || taskActionState === 'stopping'"
         @click="handleTaskAction"
-      >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : '立即执行' }}</el-button>
+      >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
     </div>
 
     <div class="toast-wrap" :class="{ show: toastVisible }">
@@ -1554,9 +1728,10 @@ watch(selectedFieldKeys, (keys) => {
   color: #86909c;
   cursor: not-allowed;
 }
-.toast-wrap { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.95); z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; }
+.toast-wrap { position: fixed; top: 50%; left: 50%; width: max-content; max-width: calc(100% - 32px); transform: translate(-50%, -50%) scale(0.95); z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; }
 .toast-wrap.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-.toast { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; background: #FFFFFF; border: 1px solid #E5E6EB; border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); font-size: 14px; font-weight: 500; color: #1D2129; white-space: nowrap; }
+.toast { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; box-sizing: border-box; padding: 10px 18px; background: #FFFFFF; border: 1px solid #E5E6EB; border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); font-size: 14px; font-weight: 500; color: #1D2129; white-space: normal; }
+.toast > span { min-width: 0; overflow-wrap: anywhere; }
 .toast-icon { width: 18px; height: 18px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
 .toast-icon svg { width: 100%; height: 100%; }
 .toast-loading .toast-icon { animation: spin 0.8s linear infinite; color: #A8071A; }
@@ -1572,6 +1747,15 @@ watch(selectedFieldKeys, (keys) => {
 }
 .field-stack {
   width: 100%;
+}
+.comment-sort-help {
+  margin-top: 8px;
+  color: #646a73;
+  font-size: 12px;
+  line-height: 20px;
+}
+.comment-sort-help p {
+  margin: 0;
 }
 .radio-block {
   width: 100%;
