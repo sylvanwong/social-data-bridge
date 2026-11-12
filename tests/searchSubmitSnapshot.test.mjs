@@ -1,3 +1,4 @@
+import { nextTick } from 'vue';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,13 +15,14 @@ for (const [page, handler, engineName] of [['KeywordSearch', 'postSearchTask', '
     const fields = { value: ['user_id'] }, mappings = { value: [{ source_key: 'user_id', target_field_id: 'original-field' }] };
     let finishRequest, saved;
     const bindings = {
+      feedback: { begin() {}, fail: e => assert.fail(e?.message || e) }, nextTick, requiresReopen: { value: false },
       form, formData1: form, selectedFieldKeys: fields, mappingDraft: mappings,
       props: { api_key: 'test' }, [engineName]: { submit: async create => { saved = await create(); } },
       request: () => new Promise(resolve => { finishRequest = resolve; }),
       restoreTask() {}, auth: () => ({}), showToast() {}, TASK_TOAST_SUFFIX: '',
       normalizeWorkFetchRange: () => ({}), parseKeywords: value => [value],
       hasRecoverableTask: { value: false }, submitting: { value: false }, loading: { value: false },
-      componentUnmounted: false, mappingLoading: { value: false }, isDouyin: { value: false },
+      componentUnmounted: false, tableFieldsError: null, tableConfigsLoaded: { value: true }, mappingLoading: { value: false }, isDouyin: { value: false },
       validateTableFields: async (table, selected, options) => {
         assert.equal(table, 'original-table'); assert.equal(options.writeMode, 'upsert'); return true;
       }, showErrorMsg: message => assert.fail(message),

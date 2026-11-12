@@ -1,10 +1,14 @@
 <script setup>
+import { parseManualUrls } from '../utils/sourceLinks.mjs';
+import { readRecordIds, readUniqueSourceLinks } from '../utils/sourceTableRows.mjs';
+import TaskFeedback from './TaskFeedback.vue';
+import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { getTaskStoppingText } from '@/utils/taskStopText';
-import { createTableConfigSaver } from '@/utils/tableOutputConfig.mjs';
+import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import InputFilterEditor from './InputFilterEditor.vue';
 import { cloneInputFilter, prepareInputFilter, filterRecordIds } from '@/utils/inputFilter.mjs';
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
-import { ElNotification } from "element-plus";
+import { ElMessage } from "element-plus";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
@@ -58,17 +62,17 @@ const fieldReadRequests = new WeakMap();
 const tableConfigLoading = ref(false);
 const tableConfigsLoaded = ref(false);
 const tableConfigApplying = ref(false);
+const outputConfigReady = computed(() => tableConfigsLoaded.value && !tableConfigLoading.value && !tableConfigApplying.value && !!mainOutputTableId.value && (formData.value.targetType !== 'existing' || mainOutputTableId.value === formData.value.targetTableId));
 const tableConfigSaving = ref(false);
+const tableConfigSaves = new Map();
 const tableConfigSaveStatus = ref('');
 const mappingDraft = ref([]);
 const taskMappingDraft = ref([]);
 const mappingExpanded = ref(false);
 const taskMappingExpanded = ref(false);
 const fieldSelectionReady = ref(false);
-const toastVisible = ref(false);
-const toastText = ref('');
-const toastLoading = ref(false);
-let toastTimer = null;
+const feedback = useTaskFeedback();
+const { toastVisible, toastText, toastType, toastLoading, taskNotice } = feedback;
 
 const getDefaultDeadlineDate = () => {
   const date = new Date();
@@ -159,6 +163,7 @@ const taskListLoading = ref(false);
 const taskManagerExpanded = ref(false);
 const isSubmitting = ref(true);
 const hasRecoverableTask = ref(false);
+const clearing = ref(false);
 const recoveryRequiresReopen = ref(false);
 let componentUnmounted = false;
 const isCancelling = ref(false);
@@ -224,18 +229,19 @@ const applyTableConfig = async (tableId, target = formData.value) => {
   if (!tableConfigsLoaded.value) return;
   tableConfigApplying.value = true;
   try {
-    const config = getTableConfig(tableId);
+    const pendingConfig = tableConfigSaves.get(tableId)?.config;
+    const config = pendingConfig || getTableConfig(tableId);
     target.writeMode = config.write_mode || 'upsert';
     if (target === formData.value) mappingDraft.value = Array.isArray(config.field_mappings) ? cloneFieldMappings(config.field_mappings) : [];
     mainOutputTableId.value = tableId;
     await loadTargetFieldOptions(tableId);
-    if (requestId === mainConfigReadId.value) tableConfigSaveStatus.value = '';
+    if (requestId === mainConfigReadId.value && !pendingConfig) tableConfigSaveStatus.value = '';
   } finally {
     if (requestId === mainConfigReadId.value) tableConfigApplying.value = false;
   }
 };
 
-const loadTableOutputConfigs = async () => {
+const loadTableOutputConfigs = async ({ throwOnError = false } = {}) => {
   tableConfigsLoaded.value = false;
   if (!props.api_key) return;
   tableConfigLoading.value = true;
@@ -248,21 +254,22 @@ const loadTableOutputConfigs = async () => {
       params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId },
     });
     const data = unwrapApiData(response.data);
-    const list = Array.isArray(data) ? data : (data.list || data.items || []);
+    const list = parseTableConfigList(data);
     tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
     tableConfigsLoaded.value = true;
     if (formData.value.targetType === 'existing' && formData.value.targetTableId) {
       await applyTableConfig(formData.value.targetTableId);
     }
   } catch (error) {
+    if (throwOnError) throw error;
     console.error('读取目标表配置失败:', error);
-    ElNotification({ message: error.message || '读取目标表配置失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '读取目标表配置失败', type: 'error', duration: 5000 });
   } finally {
     tableConfigLoading.value = false;
   }
 };
 
-const loadTargetFieldOptions = async (tableId, targetFields = tableFieldOptions) => {
+const loadTargetFieldOptions = async (tableId, targetFields = tableFieldOptions, { throwOnError = false } = {}) => {
   const requestId = Symbol();
   fieldReadRequests.set(targetFields, requestId);
   if (!tableId) { targetFields.value = []; return; }
@@ -276,6 +283,7 @@ const loadTargetFieldOptions = async (tableId, targetFields = tableFieldOptions)
     if (fieldReadRequests.get(targetFields) !== requestId) return;
     targetFields.value = [];
     console.error('读取目标表字段失败:', error);
+    if (throwOnError) throw error;
     return false;
   }
 };
@@ -326,13 +334,13 @@ const saveTableOutputConfig = async (outputConfig = null) => {
   if (!targetTableId || (!outputConfig && source.targetType === 'existing' && targetTableId !== formData.value.targetTableId)) {
     throw new Error('输出表配置尚未成功读取，请重新选择目标表后再保存');
   }
-  if (!tableConfigsLoaded.value) throw new Error('输出表配置尚未成功读取，请重新打开页面后再保存');
+  if (!tableConfigsLoaded.value) throw new Error('输出表配置尚未成功读取，请重试加载后再保存');
   const targetFields = source.targetFieldOptions || tableFieldOptions.value;
   const fieldMappings = (source.fieldMappings || []).map(item => ({ ...item }));
   if (fieldMappings.some(item => !item.source_key || !item.target_field_id)) {
     throw new Error('请完成字段映射后再保存');
   }
-  return persistTableOutputConfig({
+  const config = {
     targetTableId,
     writeMode: source.writeMode || 'upsert',
     fieldMappings: fieldMappings.map(item => ({
@@ -341,11 +349,16 @@ const saveTableOutputConfig = async (outputConfig = null) => {
       target_field_name: targetFields.find(field => field.id === item.target_field_id)?.name || item.target_field_name || '',
       target_field_type: targetFields.find(field => field.id === item.target_field_id)?.type ?? item.target_field_type,
     })),
-  });
+  };
+  const saving = persistTableOutputConfig(config);
+  tableConfigSaves.set(targetTableId, { saving, config: { write_mode: config.writeMode, field_mappings: config.fieldMappings } });
+  try { return await saving; }
+  finally { if (tableConfigSaves.get(targetTableId)?.saving === saving) tableConfigSaves.delete(targetTableId); }
 };
 
 const applyTaskTableConfig = async (tableId) => {
   const requestId = ++taskConfigReadId.value;
+  const pendingConfig = tableConfigSaves.get(tableId)?.config;
   taskOutputTableId.value = '';
   taskOutputLoading.value = false;
   taskOutputError.value = '';
@@ -357,13 +370,13 @@ const applyTaskTableConfig = async (tableId) => {
   }
   taskOutputLoading.value = true;
   try {
-    const fieldsLoaded = await loadTargetFieldOptions(tableId, taskTableFieldOptions);
+    const fieldsLoaded = await loadTargetFieldOptions(tableId, taskTableFieldOptions, { throwOnError: true });
     if (requestId !== taskConfigReadId.value) return;
     if (fieldsLoaded === false) throw new Error('读取目标表字段失败');
-    if (!tableConfigsLoaded.value) await loadTableOutputConfigs();
+    if (!tableConfigsLoaded.value) await loadTableOutputConfigs({ throwOnError: true });
     if (requestId !== taskConfigReadId.value) return;
     if (!tableConfigsLoaded.value) throw new Error('读取输出表配置失败');
-    const config = getTableConfig(tableId);
+    const config = tableConfigSaves.get(tableId)?.config || pendingConfig || getTableConfig(tableId);
     taskDialogForm.value.writeMode = config.write_mode || 'upsert';
     taskMappingDraft.value = cloneFieldMappings(config.field_mappings || []);
     taskOutputTableId.value = tableId;
@@ -584,33 +597,16 @@ const unwrapApiData = (responseData) => {
   return responseData || {};
 };
 
-const showToast = (text, isLoading = true) => {
-  if (toastTimer) {
-    clearTimeout(toastTimer);
-    toastTimer = null;
-  }
-  toastText.value = text;
-  toastLoading.value = isLoading;
-  toastVisible.value = true;
+const showToast = (text, isLoading = true, options = {}) => {
+  if (isLoading) feedback.progress(text, { stopping: isCancelling.value });
+  else feedback.finish(text, options);
 };
 
-const hideToast = () => {
-  if (toastTimer) {
-    clearTimeout(toastTimer);
-    toastTimer = null;
-  }
-  toastVisible.value = false;
-};
+const hideToast = () => feedback.hide();
+const showCompletionToast = (text, options = {}) => feedback.finish(text, options);
 
 const showProfileFieldProgress = (message) => {
-  showToast(isCancelling.value
-    ? getStoppingText(activeStreamTask)
-    : `${message}${TASK_TOAST_SUFFIX}`, true);
-};
-
-const showCompletionToast = (text) => {
-  showToast(text, false);
-  toastTimer = setTimeout(hideToast, 3000);
+  showToast(isCancelling.value ? getStoppingText(activeStreamTask) : message, true);
 };
 
 const getStreamProgressText = (taskStatus, streamTask) => {
@@ -645,12 +641,14 @@ const readAvailablePosts = async (streamTask) => {
   return response.data;
 };
 
-const restoreProfileTask = (task) => {
+const restoreProfileTask = (task, progressText = '正在恢复未完成的作者作品获取任务...') => {
   activeStreamTask = task;
   activeProfileTaskId.value = task.taskId;
   hasRecoverableTask.value = true;
   loading.value = true;
-  showToast('正在恢复未完成的作者作品获取任务...', true);
+  const status = task.latestStatus;
+  isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
+  showToast(isCancelling.value ? getStoppingText(task) : progressText, true);
 };
 
 const profileStreamTask = useIncrementalTask({
@@ -686,38 +684,57 @@ const profileStreamTask = useIncrementalTask({
     task.targetTableId = result?.tableId || task.targetTableId;
     task.pendingWrite = false;
   },
-  onProgress: (status, task) => {
+  onProgress: (status, task, phase) => {
+    clearing.value = phase === 'clearing';
+    if (clearing.value) {
+      feedback.progress('正在清理任务进度…');
+      return;
+    }
     activeStreamTask = task;
     if (Number(status.status) === 3 || status.cancel_requested || status.status_text === 'cancel_requested') isCancelling.value = true;
     showToast(isCancelling.value ? getStoppingText(task) : getStreamProgressText(status, task), true);
   },
   onWriting: (items, task) => showToast(isCancelling.value ? getStoppingText(task) : `正在写入 ${items.length} 条作品`, true),
   onFinish: (status, task) => {
+    clearing.value = false;
     loading.value = false; isCancelling.value = false; activeProfileTaskId.value = ''; activeStreamTask = null;
     hasRecoverableTask.value = false; recoveryRequiresReopen.value = false;
-    showCompletionToast(Number(status.status) === 3 ? `任务已停止，已写入 ${task.writtenCount || 0} 条作品`
-      : Number(status.status) === 2 ? (status.reason || '任务失败，已写入已有结果') : `处理完成，已写入 ${task.writtenCount || 0} 条作品`);
+    const stopped = Number(status.status) === 3;
+    const failed = Number(status.status) === 2;
+    showCompletionToast(stopped ? `任务已停止，已写入 ${task.writtenCount || 0} 条作品`
+      : failed ? (status.reason || '任务失败，已写入已有结果') : `处理完成，已写入 ${task.writtenCount || 0} 条作品`,
+      { stopped, type: failed ? 'error' : undefined, empty: !task.writtenCount });
   },
   onError: (error, task) => {
+    clearing.value = false;
     loading.value = false; isCancelling.value = false; activeProfileTaskId.value = ''; activeStreamTask = null;
     hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
     recoveryRequiresReopen.value = !!error.requiresReopen;
-    showCompletionToast(error.message || '任务已暂停'); showErrorMsg(error.message || '任务已暂停');
+    feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: recoveryRequiresReopen.value });
   },
 });
 
 const stopStreamTask = () => { profileStreamTask.stop(); activeStreamTask = null; };
 const resumeSavedStreamTask = async () => {
   if (componentUnmounted || isSubmitting.value || loading.value) return;
-  if (recoveryRequiresReopen.value) { showErrorMsg('上次操作尚未确认结束，请重新进入页面或重新打开插件'); return; }
+  if (recoveryRequiresReopen.value) return;
   isSubmitting.value = true;
+  loading.value = true;
+  feedback.begin('正在检查未完成任务…');
+  await nextTick();
   try {
     const resumed = await profileStreamTask.resume(restoreProfileTask);
-    if (!componentUnmounted && !resumed && hasRecoverableTask.value) showErrorMsg('未读取到恢复进度，请重新打开插件重试');
+    if (!componentUnmounted && !resumed) {
+      loading.value = false;
+      if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
+      else hideToast();
+    }
+    return resumed;
   } catch (error) {
     if (componentUnmounted) return;
     hasRecoverableTask.value = true; recoveryRequiresReopen.value = !!error.requiresReopen;
-    loading.value = false; showErrorMsg(error.message || '恢复任务失败');
+    loading.value = false;
+    feedback.fail(error, { persist: true, requiresReopen: recoveryRequiresReopen.value });
   } finally { if (!componentUnmounted) isSubmitting.value = false; }
 };
 
@@ -733,29 +750,33 @@ const postProfileTask = async (targetTableId = '', urlText = '', taskConfig = {}
     const data = unwrapApiData(response.data);
     return { taskId: data.task_id, targetTableId,
       selectedFieldKeys: selectedFields, fieldMappings, writeMode, pendingWrite: false };
-  }, restoreProfileTask);
+  }, task => restoreProfileTask(task, '任务已创建，正在准备获取作者作品…'));
 };
 
 const cancelProfileTask = async () => {
-  if (!activeStreamTask?.taskId || isCancelling.value) {
+  const task = profileStreamTask.getActiveTask();
+  if (!task?.taskId || isCancelling.value || clearing.value) {
     return;
   }
 
   isCancelling.value = true;
-  showToast(getStoppingText(activeStreamTask), true);
+  showToast(getStoppingText(task), true);
   try {
     const response = await request({
       url: '/social/api/v1/feishu/social/task/cancel',
       method: 'post',
       headers: { authorization: `Bearer ${props.api_key}` },
-      data: { task_id: activeStreamTask.taskId },
+      data: { task_id: task.taskId },
     });
     const data = response.data;
     if (data?.sta !== 0) {
       throw new Error(data?.msg || '停止任务失败');
     }
   } catch (error) {
-    isCancelling.value = false;
+    if (profileStreamTask.getActiveTask() !== task || clearing.value) return;
+    const status = task.latestStatus;
+    isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
+    showToast(isCancelling.value ? getStoppingText(task) : `任务继续执行，已写入 ${task.writtenCount || 0} 条作品`, true);
     console.error('停止博主作品获取任务失败:', error);
     showErrorMsg(error.message || '停止任务失败，请稍后重试');
   }
@@ -836,161 +857,53 @@ const getFieldNameById = async (tableId, fieldId) => {
   return await field.getName();
 };
 
-const parseManualUrls = (text) => {
-  if (!text || typeof text !== 'string') {
-    return [];
-  }
-
-  return [...new Set(
-    text
-      .split(/[\n,，]+/)
-      .map(item => item.trim())
-      .filter(Boolean)
-  )];
-};
-
 const validateBaseForm = (config) => {
   if (!props.api_key) {
-    showErrorMsg('请输入API key');
+    showErrorMsg('请输入 API Key');
     return false;
   }
 
   if (config.mode === 'manual') {
     if (!config.manualUrls || !config.manualUrls.trim()) {
-      ElNotification({ message: '请输入博主主页链接', type: 'warning', duration: 0 });
+      showErrorMsg('请输入作者主页链接');
       return false;
     }
 
     const urlList = parseManualUrls(config.manualUrls);
     if (urlList.length === 0) {
-      ElNotification({ message: '请至少输入一个有效的博主主页链接', type: 'warning', duration: 0 });
+      showErrorMsg('请至少输入一个有效的作者主页链接');
       return false;
     }
   } else {
     if (!config.profileLinkFieldId) {
-      ElNotification({ message: '请选择博主主页链接字段', type: 'warning', duration: 0 });
+      showErrorMsg('请选择作者主页链接字段');
       return false;
     }
 
     if (config.profileLinkFieldId === 'nodata') {
-      ElNotification({ message: '未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
+      showErrorMsg('未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。');
       return false;
     }
   }
 
   if (normalizeTargetType(config.targetType) === 'existing' && !config.targetTableId) {
-    ElNotification({ message: '请选择现有表格', type: 'warning', duration: 0 });
+    showErrorMsg('请选择现有表格');
     return false;
   }
 
   if (getActiveFieldConfigs(config.selectedFieldKeys || selectedFieldKeys.value).length === 0) {
-    ElNotification({ message: '请至少选择一个需要的字段', type: 'warning', duration: 0 });
+    showErrorMsg('请至少选择一个需要的字段');
     return false;
   }
 
   return true;
 };
 
-const extractProfileLink = (value) => {
-  if (!value) return null;
+const getRecordIdListByScope = (table, scope, rowCount) =>
+  readRecordIds(table, scope, rowCount, ElMessage);
 
-  if (typeof value === 'string') {
-    return value.trim() || null;
-  }
-
-  if (typeof value === 'object') {
-    const keys = ['link', 'url', 'text', 'content', 'value', 'displayText'];
-    for (const key of keys) {
-      const nested = extractProfileLink(value[key]);
-      if (nested) return nested;
-    }
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const nested = extractProfileLink(item);
-      if (nested) return nested;
-    }
-  }
-
-  return null;
-};
-
-const getAllVisibleRecordIdList = async (view, limit = Infinity) => {
-  const pageSize = 200;
-  let pageToken = undefined;
-  let allRecordIdList = [];
-  let loopCount = 0;
-  const maxLoops = 100;
-
-  while (loopCount < maxLoops) {
-    loopCount++;
-    const result = await view.getVisibleRecordIdListByPage({
-      pageSize,
-      pageToken
-    });
-
-    let recordIds = [];
-    let hasMore = false;
-
-    if (Array.isArray(result)) {
-      recordIds = result;
-      hasMore = result.length === pageSize;
-    } else if (result && typeof result === 'object') {
-      recordIds = result.recordIds || result.records || result.data || result.list || [];
-      hasMore = result.hasMore || result.hasNext || result.has_next || false;
-      pageToken = result.pageToken || result.nextPageToken || result.next_token;
-    }
-
-    if (recordIds.length > 0) {
-      allRecordIdList = allRecordIdList.concat(recordIds);
-    }
-
-    if (allRecordIdList.length >= limit || !hasMore || recordIds.length === 0) {
-      break;
-    }
-  }
-
-  return allRecordIdList;
-};
-
-const getRecordIdListByScope = async (table, scope, rowCount) => {
-  const view = await table.getActiveView();
-
-  if (scope === 'all') {
-    return await getAllVisibleRecordIdList(view);
-  }
-
-  if (scope === 'selected') {
-    const recordIdList = await view.getSelectedRecordIdList();
-    if (recordIdList.length === 0) {
-      ElNotification({ message: '请先在表格中选择至少一行数据', type: 'warning', duration: 0 });
-      return null;
-    }
-    return recordIdList;
-  }
-
-  const allRecordIdList = await getAllVisibleRecordIdList(view, rowCount);
-  return allRecordIdList.slice(0, rowCount);
-};
-
-const getProfileUrlsByFieldId = async (table, recordIdList, fieldId) => {
-  const field = await table.getFieldById(fieldId);
-
-  const rows = await Promise.all(
-    recordIdList.map(async (recordId) => {
-      try {
-        const cell = await field.getCell(recordId);
-        const value = await cell.getValue();
-        return extractProfileLink(value);
-      } catch (error) {
-        return null;
-      }
-    })
-  );
-
-  return [...new Set(rows.filter(item => typeof item === 'string' && item.trim()))];
-};
+const getProfileUrlsByFieldId = (table, recordIds, fieldId) =>
+  readUniqueSourceLinks(table, recordIds, fieldId);
 
 const ensureScheduleTableContext = async (config) => {
   if (config.mode !== 'table') {
@@ -1006,12 +919,12 @@ const ensureScheduleTableContext = async (config) => {
     return true;
   } catch (error) {
     console.error('读取定时任务表格上下文失败:', error);
-    ElNotification({
+    ElMessage({ plain: true,
       message: config.sourceTableId && taskDialogMode.value === 'edit'
         ? `无法访问任务来源表「${config.sourceTableName || config.sourceTableId}」，请检查该表是否存在及访问权限。`
         : '请先打开目标数据表，再保存定时任务。',
       type: 'error',
-      duration: 0,
+      duration: 5000,
     });
     return false;
   }
@@ -1069,27 +982,27 @@ const buildTaskPayload = async (inputFilter, config = taskDialogForm.value) => {
   }
 
   if (!config.personalBaseToken.trim()) {
-    ElNotification({ message: '请输入授权码', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请输入授权码', type: 'warning', duration: 3000 });
     return null;
   }
 
   if (!config.triggerTime) {
-    ElNotification({ message: '请选择触发时间', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请选择触发时间', type: 'warning', duration: 3000 });
     return null;
   }
 
   if (config.repeatType !== 'hourly' && !config.triggerDate) {
-    ElNotification({ message: '请选择触发日期', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请选择触发日期', type: 'warning', duration: 3000 });
     return null;
   }
 
   if (config.repeatType === 'custom' && config.deadlineType === 'date' && !config.deadlineDate) {
-    ElNotification({ message: '请选择截止日期', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请选择截止日期', type: 'warning', duration: 3000 });
     return null;
   }
 
   if (config.mode === 'table' && config.scope === 'selected') {
-    ElNotification({ message: '定时任务不支持“选中行”，请改为“所有行”或“前N行”', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '定时任务不支持“选中行”，请改为“所有行”或“前N行”', type: 'warning', duration: 3000 });
     return null;
   }
 
@@ -1177,7 +1090,8 @@ const buildTaskPayload = async (inputFilter, config = taskDialogForm.value) => {
 
 const submitProfileUrls = async (urlList, targetTableId = "") => {
   if (urlList.length === 0) {
-    showErrorMsg("请至少输入一个有效的博主主页链接");
+    loading.value = false;
+    showCompletionToast('没有可处理的作者主页链接', { empty: true });
     return;
   }
 
@@ -1213,7 +1127,8 @@ const handleImmediateSubmit = async () => {
       return;
     }
 
-    showToast(`正在启动作者作品获取...${TASK_TOAST_SUFFIX}`, true);
+    loading.value = true;
+    feedback.begin(`正在启动作者作品获取...${TASK_TOAST_SUFFIX}`);
     await nextTick();
     showToast(`正在读取作者主页与作品范围...${TASK_TOAST_SUFFIX}`, true);
     const sourceTable = formData.value.mode === 'table' ? await bitable.base.getActiveTable() : null;
@@ -1224,15 +1139,16 @@ const handleImmediateSubmit = async () => {
     } else {
       let recordIdList = await getRecordIdListByScope(sourceTable, formData.value.scope, formData.value.rowCount);
       if (!recordIdList) {
-        showCompletionToast('任务未开始');
+        hideToast();
+        loading.value = false;
         return;
       }
       if (inputFilter) {
         showToast(`正在筛选符合条件的记录...${TASK_TOAST_SUFFIX}`, true);
         recordIdList = await filterRecordIds(sourceTable, recordIdList, inputFilter);
         if (!recordIdList.length) {
-          showCompletionToast('没有符合筛选条件的数据');
-          ElNotification({ message: '没有符合筛选条件的数据', type: 'info' });
+          showCompletionToast('没有符合筛选条件的数据', { empty: true });
+          loading.value = false;
           return;
         }
       }
@@ -1241,14 +1157,16 @@ const handleImmediateSubmit = async () => {
     }
 
     if (inputFilter && !urlList.length) {
-      showCompletionToast('符合条件的行中没有可用链接');
-      ElNotification({ message: '符合条件的行中没有可用链接', type: 'info' });
+      showCompletionToast('符合条件的行中没有可用链接', { empty: true });
+      loading.value = false;
       return;
     }
 
     if (normalizeTargetType(formData.value.targetType) === 'existing') {
+      if (!tableConfigsLoaded.value) await loadTableOutputConfigs({ throwOnError: true });
+      if (mainOutputTableId.value !== formData.value.targetTableId) await applyTableConfig(formData.value.targetTableId);
       const isValid = await validateTableFields(formData.value.targetTableId, selectedFieldKeys.value, {
-        successMessageSuffix: `，${TASK_TOAST_SUFFIX}`,
+        throwOnError: true,
         fieldMappings: cloneFieldMappings(mappingDraft.value),
         writeMode: formData.value.writeMode,
         onProgress: showProfileFieldProgress,
@@ -1256,7 +1174,8 @@ const handleImmediateSubmit = async () => {
       if (isValid) {
         await submitProfileUrls(urlList, formData.value.targetTableId);
       } else {
-        showCompletionToast('目标字段校验未通过，任务未开始');
+        loading.value = false;
+        showCompletionToast('目标字段校验未通过，任务未开始', { type: 'error' });
       }
       return;
     }
@@ -1264,14 +1183,16 @@ const handleImmediateSubmit = async () => {
     await submitProfileUrls(urlList, '');
   } catch (error) {
     console.error('提交博主作品获取任务失败:', error);
-    showCompletionToast(`任务提交失败：${error.message || '请稍后重试'}`);
-    showErrorMsg(error.message || '提交失败，请稍后重试');
+    loading.value = false;
+    recoveryRequiresReopen.value = !!error.requiresReopen;
+    feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: recoveryRequiresReopen.value });
   } finally {
     isSubmitting.value = false;
   }
 };
 
 const taskActionState = computed(() => {
+  if (clearing.value) return 'clearing';
   if (isCancelling.value) return 'stopping';
   if (loading.value && activeProfileTaskId.value) return 'running';
   if (loading.value || isSubmitting.value) return 'submitting';
@@ -1388,7 +1309,7 @@ const loadTaskList = async () => {
     taskList.value = parseTaskList(res.data);
   } catch (error) {
     console.error('获取定时任务失败:', error);
-    ElNotification({ message: error.message || '获取定时任务失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '获取定时任务失败', type: 'error', duration: 5000 });
     taskList.value = [];
   } finally {
     taskListLoading.value = false;
@@ -1554,7 +1475,7 @@ const saveTask = async () => {
       const fieldMappings = cloneFieldMappings(config.fieldMappings);
       const hasIncompleteMapping = fieldMappings.some(item => !item.source_key || !item.target_field_id);
       if (hasIncompleteMapping) {
-        ElNotification({ message: '请完成字段映射后再保存任务', type: 'warning', duration: 0 });
+        ElMessage({ plain: true, message: '请完成字段映射后再保存任务', type: 'warning', duration: 3000 });
         return;
       }
       await saveTableOutputConfig({
@@ -1578,10 +1499,9 @@ const saveTask = async () => {
       throw new Error(res.msg || '保存定时任务失败');
     }
 
-    ElNotification({
+    ElMessage({ plain: true,
       message: taskId ? '定时任务已更新' : '定时任务已创建',
-      type: 'success',
-    });
+      type: 'success', duration: 3000 });
 
     if (taskDialogForm.value === form) {
       taskDialogVisible.value = false;
@@ -1590,7 +1510,7 @@ const saveTask = async () => {
     await loadTaskList();
   } catch (error) {
     console.error('保存定时任务失败:', error);
-    ElNotification({ message: error.message || '保存定时任务失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '保存定时任务失败', type: 'error', duration: 5000 });
   } finally {
     taskDialogLoading.value = false;
   }
@@ -1614,11 +1534,11 @@ const deleteTask = async (task) => {
       throw new Error(res.msg || '删除定时任务失败');
     }
 
-    ElNotification({ message: '定时任务已删除', type: 'success' });
+    ElMessage({ plain: true, message: '定时任务已删除', type: 'success', duration: 3000 });
     await loadTaskList();
   } catch (error) {
     console.error('删除定时任务失败:', error);
-    ElNotification({ message: error.message || '删除定时任务失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '删除定时任务失败', type: 'error', duration: 5000 });
   }
 };
 
@@ -1647,10 +1567,10 @@ const toggleTaskStatus = async (task) => {
       });
     }
 
-    ElNotification({ message: '任务状态已更新', type: 'success' });
+    ElMessage({ plain: true, message: '任务状态已更新', type: 'success', duration: 3000 });
   } catch (error) {
     console.error('更新任务状态失败:', error);
-    ElNotification({ message: error.message || '更新任务状态失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '更新任务状态失败', type: 'error', duration: 5000 });
   }
 };
 
@@ -1690,7 +1610,6 @@ onMounted(async () => {
 onUnmounted(() => {
   componentUnmounted = true;
   stopStreamTask();
-  if (toastTimer) clearTimeout(toastTimer);
 });
 
 watch(selectedFieldKeys, (keys) => {
@@ -1937,7 +1856,7 @@ watch(
 
           <el-form-item v-if="formData.targetType === 'existing'" label="">
             <div class="c-label">数据写入方式</div>
-            <el-radio-group v-model="formData.writeMode" class="radio-block">
+            <el-radio-group v-model="formData.writeMode" class="radio-block" :disabled="!outputConfigReady">
               <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
                 {{ item.label }}
                 <el-tooltip v-if="item.value === 'upsert'" effect="dark" placement="top">
@@ -1994,17 +1913,17 @@ watch(
               <template v-else-if="formData.targetTableId">
                 <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
                 <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
-                  <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+                  <el-select v-model="mapping.source_key" :disabled="!outputConfigReady" placeholder="选择输出字段" size="small">
                     <el-option v-for="field in mappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                   </el-select>
                   <span class="mapping-arrow">→</span>
-                  <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+                  <el-select v-model="mapping.target_field_id" :disabled="!outputConfigReady" placeholder="选择目标字段" size="small">
                     <el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                   </el-select>
-                  <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+                  <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)" :disabled="!outputConfigReady">删除</el-button>
                 </div>
                 <div class="mapping-actions">
-                  <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
+                  <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })" :disabled="!outputConfigReady">+ 添加字段映射</el-button>
                 </div>
               </template>
               <p v-else class="mapping-empty">选择目标表格后配置字段映射</p>
@@ -2023,14 +1942,15 @@ watch(
 
       </div>
 
+      <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
       <div v-if="formData.executionMode === 'immediate'" class="action-group">
         <el-button
           class="commit-btn"
           :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
-          :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
-          :disabled="taskActionState === 'submitting' || taskActionState === 'stopping'"
+          :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
+          :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || recoveryRequiresReopen"
           @click="handleTaskAction"
-        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
+        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
       </div>
 
       <div v-else class="schedule-inline-panel">
@@ -2344,7 +2264,7 @@ watch(
                 <span>正在加载表格配置…</span>
               </template>
               <template v-else>
-                <span>表格配置加载失败，请重试</span>
+                <span>{{ taskOutputError }}</span>
                 <el-button link type="primary" size="small" @click="applyTaskTableConfig(taskDialogForm.targetTableId)">重试</el-button>
               </template>
             </div>
@@ -2407,7 +2327,7 @@ watch(
                       <el-option v-for="field in getMappingTargetFields(index, taskMappingDraft, taskTableFieldOptions)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                     </el-select>
                     <el-button :disabled="!taskOutputConfigReady" link type="danger" class="mapping-delete" @click="taskMappingDraft.splice(index, 1)">删除</el-button>
-                  </div>
+                </div>
                   <div class="mapping-actions">
                     <el-button :disabled="!taskOutputConfigReady" link type="primary" @click="taskMappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
                   </div>
@@ -2534,22 +2454,7 @@ watch(
       </template>
     </el-dialog>
 
-    <div class="toast-wrap" :class="{ show: toastVisible }">
-      <div class="toast" :class="{ 'toast-loading': toastLoading, 'toast-success': !toastLoading }">
-        <div class="toast-icon" v-if="toastLoading">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <path d="M12 2a10 10 0 0 1 10 10"></path>
-          </svg>
-        </div>
-        <div class="toast-icon" v-else>
-          <svg viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="10" fill="#00B42A"></circle>
-            <path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
-          </svg>
-        </div>
-        <span>{{ toastText }}</span>
-      </div>
-    </div>
+    <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>
 
@@ -2714,40 +2619,10 @@ watch(
 .form :deep(.el-input-number .el-input__wrapper) {
   min-height: 32px;
 }
-.commit-btn {
-  background: #A8071A;
-  width: 100%;
-  height: 36px;
-  border-radius: 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: #fff;
-  font-size: var(--app-font-size-body);
-  font-weight: var(--app-font-weight-medium);
-  margin-top: 0;
-  cursor: pointer;
-  border: none;
-  transition: background 0.2s ease;
-}
-.commit-btn:hover { background: #C11126; }
-.commit-btn:active { background: #8A0515; }
+
+.commit-btn { margin-top: 0; }
 .action-group {
   margin-top: 8px;
-}
-.commit-btn.is-running {
-  background: #fff;
-  border: 1px solid #d5495c;
-  color: #a8071a;
-}
-.commit-btn.is-running:hover { background: #fff1f2; }
-.commit-btn.is-running:active { background: #ffe4e6; }
-.commit-btn.is-running.is-disabled {
-  background: #fafafa;
-  border-color: #e5e6eb;
-  color: #86909c;
-  cursor: not-allowed;
 }
 .profile-progress {
   text-align: center;
@@ -3417,68 +3292,6 @@ watch(
   gap: 8px;
 }
 
-.toast-wrap {
-  width: max-content;
-  max-width: calc(100vw - 32px);
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%) scale(0.95);
-  z-index: 9999;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.3s ease, transform 0.3s ease;
-}
-
-.toast-wrap.show {
-  opacity: 1;
-  transform: translate(-50%, -50%) scale(1);
-}
-
-.toast {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  background: #FFFFFF;
-  border: 1px solid #E5E6EB;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  font-size: var(--app-font-size-body);
-  line-height: 22px;
-  font-weight: var(--app-font-weight-medium);
-  color: #1D2129;
-  max-width: calc(100vw - 32px);
-  box-sizing: border-box;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.toast-icon {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.toast-icon svg {
-  width: 100%;
-  height: 100%;
-}
-
-.toast-loading .toast-icon {
-  animation: spin 0.8s linear infinite;
-  color: #A8071A;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 @media (max-width: 640px) {
   .deadline-setting-grid {
     flex-wrap: wrap;
@@ -3495,6 +3308,7 @@ watch(
 .source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
 .custom-radio-group { gap: 8px; }
 .sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: var(--app-font-size-body); font-weight: var(--app-font-weight-regular); line-height: 20px; }
+
 </style>
 
 <style scoped src="../assets/output-layout.css"></style>

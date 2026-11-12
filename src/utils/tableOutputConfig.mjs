@@ -14,3 +14,9 @@ export function createTableConfigSaver(write) {
     return result;
   };
 }
+
+export function parseTableConfigList(data) {
+  const list = Array.isArray(data) ? data : data?.list ?? data?.items;
+  if (!Array.isArray(list)) throw new Error('表格配置返回格式不正确');
+  return list;
+}

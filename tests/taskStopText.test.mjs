@@ -33,7 +33,7 @@ for (const [page, engine, label] of [['CommentFetch','commentStreamTask','评论
     const format = new Function(`${formatterSource};return getTaskStoppingText;`)();
     let message;
     const cancelling = {value:false};
-    const bindings = { isCancelling:cancelling, cancelling, activeStreamTask:null, activeSeriesTask:null,
+    const bindings = { clearing:{value:false}, isCancelling:cancelling, cancelling, activeStreamTask:null, activeSeriesTask:null,
       getStoppingText:task=>format(task,label), stoppedCommentProgress:task=>format(task,label),
       showToast:text=>message=text, TASK_TOAST_SUFFIX:'请勿关闭插件，关闭将中断任务', getStreamProgressText:()=>'',
       showCompletionToast:text=>message=text, finishToast:text=>message=text,

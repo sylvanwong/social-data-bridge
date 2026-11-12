@@ -21,16 +21,19 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
   let timer = null;
   let inFlightTask = null;
   let lifecycleVersion = 0;
+  let finishingTask = null;
 
-  const bounded = async (operation, label) => {
+  const bounded = async (operation, label, { readOnly = false } = {}) => {
     if (!operationTimeoutMs) return operation();
     let timeout;
     try {
       return await Promise.race([operation(), new Promise((_, reject) => {
         timeout = setTimeout(() => {
-          const error = new Error(`${label}超时，请关闭当前插件后重新打开并核对写入结果，勿重复启动任务`);
+          const error = new Error(readOnly
+            ? `${label}超时，请稍后恢复任务`
+            : `${label}超时，请关闭当前插件后重新打开并核对写入结果，勿重复启动任务`);
           error.stopPolling = true;
-          error.requiresReopen = true;
+          error.requiresReopen = !readOnly;
           reject(error);
         }, operationTimeoutMs);
       })]);
@@ -101,7 +104,7 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
   const drain = async (task) => {
     let wroteData = false;
     while (activeTask === task) {
-      const response = await bounded(() => getResults(task), '读取获取结果');
+      const response = await bounded(() => getResults(task), '读取获取结果', { readOnly: true });
       if (activeTask !== task) return wroteData;
       const data = unwrapApiData(response);
       if (Number(task.latestStatus?.status) === 3 && Number.isSafeInteger(data.count) && data.count >= 0) task.resultCount = data.count;
@@ -146,11 +149,26 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
     return wroteData;
   };
 
+  const finishTask = async (task) => {
+    // 已确认终态且结果排空；清理响应失败后只重试清理，不重新获取或写入。
+    finishingTask = task;
+    onProgress?.(task.latestStatus, task, 'clearing');
+    await clear();
+    if (activeTask !== task) return;
+    finishingTask = null;
+    stop();
+    await onFinish?.(task.latestStatus, task);
+  };
+
   const poll = async (task) => {
     if (activeTask !== task || inFlightTask === task) return;
     inFlightTask = task;
     try {
-      const status = unwrapApiData(await bounded(() => getStatus(task), '读取任务进度'));
+      if (finishingTask === task) {
+        await finishTask(task);
+        return;
+      }
+      const status = unwrapApiData(await bounded(() => getStatus(task), '读取任务进度', { readOnly: true }));
       if (activeTask !== task) return;
       if (Number(task.latestStatus?.status) !== 3 || Number(status.status) !== 3) delete task.resultCount;
       task.latestStatus = status;
@@ -178,10 +196,7 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
         ? isTerminal(status)
         : Number(status.status) === 1 || Number(status.status) === 2;
       if (terminal && !wroteData) {
-        await clear();
-        if (activeTask !== task) return;
-        stop();
-        await onFinish?.(status, task);
+        await finishTask(task);
         return;
       }
       if (Date.now() - (task.lastActivityAt || Date.now()) >= STALL_TIMEOUT) {
@@ -192,7 +207,8 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
     } catch (error) {
       if (activeTask !== task) return;
       task.pollInterval = Math.min(Math.max(task.pollInterval || ACTIVE_INTERVAL, ACTIVE_INTERVAL) * 2, MAX_INTERVAL);
-      if (error.stopPolling || Date.now() - (task.lastActivityAt || Date.now()) >= STALL_TIMEOUT) {
+      const invalidAuth = error.code === 'INVALID_API_KEY' || [401, 403].includes(error.response?.status);
+      if (error.stopPolling || invalidAuth || Date.now() - (task.lastActivityAt || Date.now()) >= STALL_TIMEOUT) {
         stop();
         await onError?.(error, task);
       } else {
@@ -214,17 +230,7 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
   // 提交成功后先保留恢复入口；页面是否仍在运行不影响这一步。
   const saveForResume = async (task) => {
     assertNoPendingMutation();
-    let selection;
-    try {
-      selection = await bounded(() => bitable.base.getSelection(), '读取当前表格');
-    } catch (error) {
-      // 尚未调用保存，迟到的只读响应不会修改状态，可保留 taskId 重试补存。
-      if (error.requiresReopen) {
-        error.requiresReopen = false;
-        error.message = '读取当前表格超时，请稍后恢复任务';
-      }
-      throw error;
-    }
+    const selection = await bounded(() => bitable.base.getSelection(), '读取当前表格', { readOnly: true });
     assertNoPendingMutation();
     await save({
       cursor: '', writtenCount: 0, lastProcessed: -1, lastHeartbeatAt: 0,
@@ -238,7 +244,7 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
     let taskToStart;
     try {
       assertNoPendingMutation();
-      const selection = await bounded(() => bitable.base.getSelection(), '读取当前表格');
+      const selection = await bounded(() => bitable.base.getSelection(), '读取当前表格', { readOnly: true });
       if (version !== lifecycleVersion) return;
       assertNoPendingMutation();
       activeTask = {
@@ -246,6 +252,7 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
         lastActivityAt: Date.now(), pollInterval: ACTIVE_INTERVAL, baseId: selection.baseId || '', ...task,
       };
       taskToStart = activeTask;
+      finishingTask = null;
       await save(taskToStart);
       await poll(taskToStart);
     } catch (error) {
@@ -299,14 +306,18 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
       }
       if (version !== lifecycleVersion) return false;
       assertNoPendingMutation();
-      const saved = await bounded(() => bitable.bridge.getData(storageKey), '读取恢复进度');
-      if (version !== lifecycleVersion || !saved?.taskId || activeTask) return false;
-      const selection = await bounded(() => bitable.base.getSelection(), '读取当前表格');
+      const saved = await bounded(() => bitable.bridge.getData(storageKey), '读取恢复进度', { readOnly: true });
       if (version !== lifecycleVersion || activeTask) return false;
-      if (saved.baseId && selection.baseId && saved.baseId !== selection.baseId) return false;
+      const pendingFinish = finishingTask && (!saved?.taskId || saved.taskId === finishingTask.taskId) ? finishingTask : null;
+      const taskData = pendingFinish || saved;
+      if (!taskData?.taskId) return false;
+      const selection = await bounded(() => bitable.base.getSelection(), '读取当前表格', { readOnly: true });
+      if (version !== lifecycleVersion || activeTask) return false;
+      if (taskData.baseId && selection.baseId && taskData.baseId !== selection.baseId) return false;
       assertNoPendingMutation();
-      const taskToResume = { ...saved, lastActivityAt: saved.lastActivityAt || Date.now(), pollInterval: saved.pollInterval || ACTIVE_INTERVAL };
+      const taskToResume = { ...taskData, lastActivityAt: taskData.lastActivityAt || Date.now(), pollInterval: taskData.pollInterval || ACTIVE_INTERVAL };
       activeTask = taskToResume;
+      finishingTask = pendingFinish ? taskToResume : null;
       await onRestore?.(taskToResume);
       if (version !== lifecycleVersion || activeTask !== taskToResume) return false;
       await poll(taskToResume);

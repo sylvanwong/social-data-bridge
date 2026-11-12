@@ -1,7 +1,10 @@
 <script setup>
+import { parseTableConfigList } from '../utils/tableOutputConfig.mjs';
 import { getTaskStoppingText } from '@/utils/taskStopText';
+import TaskFeedback from './TaskFeedback.vue';
+import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { bitable, FieldType } from '@lark-base-open/js-sdk';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import request from '@/utils/request';
 import { BLOGGER_FIELD_MAPPING, getDefaultSelectedFieldKeys, showErrorMsg, useSocialData } from '@/composables/useSocialData';
 import { useIncrementalTask } from '@/composables/useIncrementalTask';
@@ -19,20 +22,25 @@ const selectedFieldKeys = ref([]);
 const mappingDraft = ref([]);
 const mappingExpanded = ref(false);
 const mappingLoading = ref(false);
+let tableFieldsLoadToken = 0;
+let tableFieldsError = null;
 const loading = ref(false);
 const submitting = ref(false);
 const cancelling = ref(false);
 const taskId = ref('');
-const toastVisible = ref(false);
-const toastText = ref('');
-const toastLoading = ref(false);
-let toastTimer = null;
+const feedback = useTaskFeedback();
+const { toastVisible, toastText, toastLoading, toastType, taskNotice } = feedback;
 const fieldReady = ref(false);
 const storageKey = 'blogger_search_stream_task_v1';
 const fieldStorageKey = 'blogger_search_selected_fields_v1';
 const tableOutputConfigs = ref({});
+const tableConfigsLoaded = ref(false);
+let tableConfigsError = null;
+let tableConfigsLoadToken = 0;
 const tableConfigSaving = ref(false);
 const tableConfigApplying = ref(false);
+const outputConfigReady = computed(() => tableConfigsLoaded.value && !!form.value.table_id && !tableConfigApplying.value && !mappingLoading.value && !tableFieldsError);
+const tableConfigSaves = new Map();
 let tableConfigSaveQueued = false;
 const allKeys = SEARCH_FIELD_MAPPING.map(field => field.key);
 const allSelected = computed(() => allKeys.every(key => selectedFieldKeys.value.includes(key)));
@@ -50,47 +58,44 @@ const getTableName = () => form.value.keyword.split(/[\n,，]+/).map(item => ite
 const { createAndWriteData, validateTableFields } = useSocialData(getTableName, props.api_key, SEARCH_FIELD_MAPPING);
 const auth = () => ({ authorization: `Bearer ${props.api_key}` });
 
-const showToast = (text, isLoading = true) => {
-  if (toastTimer) {
-    clearTimeout(toastTimer);
-    toastTimer = null;
-  }
-  toastText.value = text;
-  toastLoading.value = isLoading;
-  toastVisible.value = true;
+const showToast = (text, isLoading = true, options = {}) => {
+  if (isLoading) feedback.progress(text, { stopping: cancelling.value });
+  else feedback.finish(text, options);
 };
-
-const hideToast = () => {
-  toastVisible.value = false;
-};
-
-const showCompletionToast = text => {
-  showToast(text, false);
-  toastTimer = setTimeout(hideToast, 3000);
-};
+const hideToast = () => feedback.hide();
+const showCompletionToast = (text, options = {}) => feedback.finish(text, options);
 
 const getStoppingText = task => getTaskStoppingText(task, '作者');
 
 const hasRecoverableTask = ref(false);
+const clearing = ref(false);
 const requiresReopen = ref(false);
 let componentUnmounted = false;
-const restoreTask = task => {
+const restoreTask = (task, progressText = '正在恢复未完成的作者搜索任务…') => {
   hasRecoverableTask.value = true;
   loading.value = true;
   taskId.value = task.taskId;
-  showToast('正在恢复未完成的作者搜索任务…');
+  const status = task.latestStatus;
+  cancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
+  showToast(cancelling.value ? getStoppingText(task) : progressText);
 };
 const resumeSavedTask = async () => {
-  if (requiresReopen.value || componentUnmounted) return;
+  if (requiresReopen.value || componentUnmounted || loading.value) return;
   loading.value = true;
+  feedback.begin('正在检查未完成任务…');
   try {
+    await nextTick();
     const resumed = await searchTask.resume(restoreTask);
-    if (!resumed) loading.value = false;
+    if (!resumed) {
+      loading.value = false;
+      if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
+      else hideToast();
+    }
   } catch (error) {
     hasRecoverableTask.value = true;
     requiresReopen.value = !!error.requiresReopen;
     loading.value = false;
-    showErrorMsg(error.message || '恢复任务失败，请重试');
+    feedback.fail(error, { persist: true, requiresReopen: requiresReopen.value });
   }
 };
 
@@ -136,7 +141,12 @@ const searchTask = useIncrementalTask({
     task.targetTableId = result?.tableId || task.targetTableId;
     task.pendingWrite = false;
   },
-  onProgress: (status, task) => {
+  onProgress: (status, task, phase) => {
+    clearing.value = phase === 'clearing';
+    if (clearing.value) {
+      feedback.progress('正在清理任务进度…');
+      return;
+    }
     if (Number(status.status) === 3 || status.status_text === 'cancel_requested' || status.cancel_requested) cancelling.value = true;
     const processed = Number(status.processed) || 0;
     const total = Number(status.total) || 0;
@@ -146,26 +156,25 @@ const searchTask = useIncrementalTask({
   },
   onWriting: (items, task) => { showToast(cancelling.value ? getStoppingText(task) : `正在写入 ${items.length} 条作者数据…`); },
   onFinish: (status, task) => {
+    clearing.value = false;
     hasRecoverableTask.value = false;
     loading.value = false; cancelling.value = false; taskId.value = '';
     if (Number(status.status) === 2) {
-      showCompletionToast(status.reason || '任务失败');
-      showErrorMsg(status.reason || '获取数据失败');
+      feedback.fail(status.reason || '获取数据失败');
       return;
     }
     if (Number(status.status) === 3) {
-      showCompletionToast(`任务已停止，已写入 ${task.writtenCount || 0} 条作者`);
+      showCompletionToast(`任务已停止，已写入 ${task.writtenCount || 0} 条作者`, { stopped: true });
       return;
     }
-    showCompletionToast(`处理完成，已写入 ${task.writtenCount || 0} 条作者`);
+    showCompletionToast(`处理完成，已写入 ${task.writtenCount || 0} 条作者`, { empty: !task.writtenCount });
   },
   onError: (error, task) => {
+    clearing.value = false;
     hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
     requiresReopen.value = !!error.requiresReopen;
     loading.value = false; cancelling.value = false; taskId.value = '';
-    const message = error.message || '任务长时间没有进度';
-    showCompletionToast(message);
-    showErrorMsg(message);
+    feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: requiresReopen.value });
   },
 });
 
@@ -177,61 +186,97 @@ const loadTables = async () => {
 };
 const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
 const loadTableOutputConfigs = async () => {
-  if (!props.api_key) return;
+  const token = ++tableConfigsLoadToken;
+  tableConfigsLoaded.value = false;
+  tableConfigsError = null;
+  if (!props.api_key) return false;
   try {
-    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: auth(), params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
+    const baseId = await getBaseId();
+    if (componentUnmounted || token !== tableConfigsLoadToken) return false;
+    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: auth(), params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
+    if (componentUnmounted || token !== tableConfigsLoadToken) return false;
+    if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '读取输出表配置失败');
     const data = response.data?.data || response.data;
-    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
+    const list = parseTableConfigList(data);
     tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
-  } catch (error) { console.error('读取作者搜索表格配置失败:', error); }
+    tableConfigsLoaded.value = true;
+    return true;
+  } catch (error) {
+    if (componentUnmounted || token !== tableConfigsLoadToken) return false;
+    tableConfigsError = error;
+    console.error('读取作者搜索表格配置失败:', error);
+    return false;
+  }
 };
 const loadTableFields = async tableId => {
+  const token = ++tableFieldsLoadToken;
+  const pendingConfig = tableConfigSaves.get(tableId)?.config;
+  tableFieldsError = null;
   tableConfigApplying.value = true;
   tableFieldOptions.value = [];
   mappingDraft.value = [];
-  if (!tableId) { mappingLoading.value = false; tableConfigApplying.value = false; return; }
+  if (!tableId) { mappingLoading.value = false; tableConfigApplying.value = false; return true; }
   mappingLoading.value = true;
   try {
     const table = await bitable.base.getTableById(tableId);
+    if (componentUnmounted || token !== tableFieldsLoadToken) return;
     const fields = await table.getFieldMetaList();
+    if (componentUnmounted || token !== tableFieldsLoadToken) return;
     tableFieldOptions.value = fields.map(field => ({ id: field.id, name: field.name, type: field.type }));
-    const config = tableOutputConfigs.value[tableId];
+    if (!tableConfigsLoaded.value) return false;
+    const config = tableConfigSaves.get(tableId)?.config || pendingConfig || tableOutputConfigs.value[tableId];
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
     if (config?.write_mode === 'append' || config?.write_mode === 'upsert') form.value.writeMode = config.write_mode;
+    return true;
   } catch (error) {
-    showErrorMsg('读取目标表字段失败，请稍后重试');
+    if (componentUnmounted || token !== tableFieldsLoadToken) return;
+    tableFieldsError = error;
+    if (!submitting.value) showErrorMsg(error.message || '读取目标表字段失败，请稍后重试', 5000);
+    return false;
   } finally {
+    if (componentUnmounted || token !== tableFieldsLoadToken) return;
     mappingLoading.value = false;
     tableConfigApplying.value = false;
   }
 };
-const saveTableOutputConfig = async () => {
-  if (form.value.radio !== 2 || !form.value.table_id || tableConfigApplying.value) return;
-  if (tableConfigSaving.value) { tableConfigSaveQueued = true; return; }
-  if (!props.api_key || !tableFieldOptions.value.length) return;
-  tableConfigSaving.value = true;
-  try {
-    const targetTableId = form.value.table_id;
-    const table = await bitable.base.getTableById(targetTableId);
+const saveTableOutputConfig = async (outputConfig = null) => {
+  outputConfig = outputConfig?.targetTableId ? outputConfig : null;
+  if (componentUnmounted || !tableConfigsLoaded.value) return;
+  if (!outputConfig && (form.value.radio !== 2 || !form.value.table_id || tableConfigApplying.value)) return;
+  if (!props.api_key || (!outputConfig && !tableFieldOptions.value.length)) return;
+  let snapshot = outputConfig;
+  if (!snapshot) {
+    const targetTableId = form.value.table_id, writeMode = form.value.writeMode;
     const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => {
       const source = SEARCH_FIELD_MAPPING.find(field => field.key === item.source_key);
       const target = tableFieldOptions.value.find(field => field.id === item.target_field_id);
       return { ...item, source_name: source?.name || item.source_name || '', target_field_name: target?.name || item.target_field_name || '', target_field_type: target?.type ?? item.target_field_type };
     });
-    const response = await request({
-      url: TABLE_CONFIG_API_PATH,
-      method: 'put',
-      headers: auth(),
-      data: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: form.value.writeMode, field_mappings: fieldMappings },
-    });
+    snapshot = { targetTableId, writeMode, fieldMappings };
+  }
+  const { targetTableId, writeMode, fieldMappings } = snapshot;
+  const pending = { snapshot, config: { write_mode: writeMode, field_mappings: fieldMappings } };
+  tableConfigSaves.set(targetTableId, pending);
+  if (tableConfigSaving.value) { tableConfigSaveQueued = true; return; }
+  tableConfigSaveQueued = false;
+  tableConfigSaving.value = true;
+  try {
+    const table = await bitable.base.getTableById(targetTableId);
+    const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: writeMode, field_mappings: fieldMappings };
+    if (componentUnmounted) return;
+    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: auth(), data: payload });
+    if (componentUnmounted) return;
+    if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '保存作者搜索表格配置失败');
     tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: response.data?.data || response.data };
-  } catch (error) {
-    console.error('保存作者搜索表格配置失败:', error);
-  } finally {
+  } catch (error) { if (!componentUnmounted) console.error('保存作者搜索表格配置失败:', error); }
+  finally {
+    if (tableConfigSaves.get(targetTableId) === pending) tableConfigSaves.delete(targetTableId);
     tableConfigSaving.value = false;
-    if (tableConfigSaveQueued) { tableConfigSaveQueued = false; saveTableOutputConfig(); }
+    tableConfigSaveQueued = tableConfigSaves.size > 0;
+    if (tableConfigSaveQueued && !componentUnmounted) saveTableOutputConfig(tableConfigSaves.values().next().value.snapshot);
   }
 };
+
 const getMappingSourceFields = index => {
   const usedKeys = new Set(mappingDraft.value.filter((item, itemIndex) => itemIndex !== index).map(item => item.source_key).filter(Boolean));
   return SEARCH_FIELD_MAPPING.filter(field => selectedFieldKeys.value.includes(field.key)).map(field => ({ ...field, disabled: usedKeys.has(field.key) }));
@@ -254,46 +299,77 @@ const loadFields = async () => {
 };
 watch(selectedFieldKeys, keys => { if (fieldReady.value) bitable.bridge.setData(fieldStorageKey, keys); }, { deep: true });
 watch([mappingDraft, () => form.value.writeMode], saveTableOutputConfig, { deep: true });
-watch(() => form.value.radio, value => {
-  if (value === 2) loadTables();
-  else { tableFieldOptions.value = []; mappingDraft.value = []; }
+watch([() => form.value.radio, () => form.value.table_id], ([radio, tableId], [previousRadio]) => {
+  if (radio === 2) {
+    if (radio !== previousRadio) loadTables();
+    loadTableFields(tableId);
+  } else loadTableFields('');
 });
-watch(() => form.value.table_id, loadTableFields);
 
 const toggleAll = checked => { selectedFieldKeys.value = checked ? [...allKeys] : ['user_id']; };
 const parseKeywords = value => [...new Set(String(value || '').split(/[\n,，]+/).map(item => item.trim()).filter(Boolean))];
 const cancel = async () => {
   const task = searchTask.getActiveTask();
-  if (!task?.taskId || cancelling.value) return;
+  if (!task?.taskId || cancelling.value || clearing.value) return;
   cancelling.value = true; showToast(getStoppingText(task));
   try {
     const response = await request({ url: '/social/api/v1/feishu/blogger/search/task/cancel', method: 'post', headers: auth(), data: { task_id: task.taskId } });
     if (response.data?.sta !== 0) throw new Error(response.data?.msg || '停止任务失败');
-  } catch (error) { cancelling.value = false; showErrorMsg(error.message || '停止任务失败'); }
+  } catch (error) {
+    if (searchTask.getActiveTask() !== task || clearing.value) return;
+    const status = task.latestStatus;
+    cancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
+    showToast(cancelling.value ? getStoppingText(task) : `任务继续执行，已写入 ${task.writtenCount || 0} 条作者`);
+    showErrorMsg(error?.response?.data?.msg || error.message || '停止任务失败');
+  }
 };
 const submit = async () => {
+  if (requiresReopen.value || componentUnmounted) return;
   if (hasRecoverableTask.value) return resumeSavedTask();
   if (submitting.value || loading.value) return;
   submitting.value = true;
+  let prepared = false;
   try {
     const keywords = parseKeywords(form.value.keyword);
-    if (!props.api_key) throw new Error('请输入API key');
+    if (!props.api_key) throw new Error('请输入 API Key');
     if (!form.value.social_type) throw new Error('请选择平台');
     if (!keywords.length) throw new Error('请输入至少一个作者关键词');
     if (keywords.length > 100) throw new Error('最多支持 100 个关键词');
     if (form.value.social_type === 'instagram' && keywords.some(keyword => [...keyword].length > 256)) throw new Error('Instagram 每个关键词最多 256 个字符');
     if (form.value.rangeType === 'pages' && (!Number.isInteger(form.value.pages) || form.value.pages < 1 || form.value.pages > 100)) throw new Error('搜索页数必须为 1～100 的整数');
     if (form.value.radio === 2 && !form.value.table_id) throw new Error('请选择现有表格');
+    if (form.value.radio === 2 && !tableConfigsLoaded.value) {
+      prepared = true;
+      loading.value = true;
+      feedback.begin('正在读取输出表配置…');
+      const loaded = await loadTableOutputConfigs();
+      if (componentUnmounted) return;
+      if (!loaded) throw tableConfigsError || new Error('读取输出表配置失败');
+      await loadTableFields(form.value.table_id);
+    }
     if (form.value.radio === 2 && mappingLoading.value) throw new Error('正在读取目标表字段，请稍后重试');
+    if (form.value.radio === 2 && tableFieldsError) {
+      prepared = true;
+      loading.value = true;
+      feedback.begin('正在读取目标表字段…');
+      const loaded = await loadTableFields(form.value.table_id);
+      if (componentUnmounted) return;
+      if (!loaded) throw tableFieldsError || new Error('读取目标表字段失败，请稍后重试');
+    }
     if (form.value.radio === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
     const outputSnapshot = {
       targetTableId: form.value.radio === 2 ? form.value.table_id : '',
       selectedFieldKeys: [...selectedFieldKeys.value], writeMode: form.value.writeMode,
       fieldMappings: form.value.radio === 2 ? mappingDraft.value.map(item => ({ ...item })) : [],
     };
+    prepared = true;
+    loading.value = true;
+    feedback.begin('正在启动作者搜索...');
+    await nextTick();
     if (outputSnapshot.targetTableId && !(await validateTableFields(outputSnapshot.targetTableId, outputSnapshot.selectedFieldKeys, {
       writeMode: outputSnapshot.writeMode, uniqueKey: 'user_id', fieldMappings: outputSnapshot.fieldMappings,
-    }))) return;
+      throwOnError: true, onProgress: showToast,
+    }))) throw new Error('目标字段校验未通过，任务未开始');
     const filter_config = isDouyin.value ? { follower_count_range: form.value.follower_count_range, user_type: form.value.user_type } : {};
     if (componentUnmounted) return;
     await searchTask.submit(async () => {
@@ -302,13 +378,16 @@ const submit = async () => {
       const task = response.data.data;
       return { taskId: task.task_id, pendingWrite: false,
         ...outputSnapshot };
-    }, restoreTask);
+    }, task => restoreTask(task, '任务已创建，正在准备获取作者…'));
   } catch (error) {
     loading.value = false;
-    showErrorMsg(error.message || '提交失败，请稍后重试');
+    requiresReopen.value = !!error.requiresReopen;
+    if (prepared) feedback.fail(error, { persist: requiresReopen.value });
+    else showErrorMsg(error.message || '提交失败，请稍后重试');
   } finally { submitting.value = false; }
 };
 const taskActionState = computed(() => {
+  if (clearing.value) return 'clearing';
   if (cancelling.value) return 'stopping';
   if (loading.value && taskId.value) return 'running';
   if (loading.value || submitting.value) return 'submitting';
@@ -329,13 +408,14 @@ onMounted(async () => {
     await resumeSavedTask();
   } catch (error) {
     hasRecoverableTask.value = true;
-    showErrorMsg(error.message || '读取任务状态失败，请重试恢复');
+    loading.value = false;
+    requiresReopen.value = !!error.requiresReopen;
+    feedback.fail(error, { persist: true });
   } finally { submitting.value = false; }
 });
 onUnmounted(() => {
   componentUnmounted = true;
   searchTask.stop();
-  if (toastTimer) clearTimeout(toastTimer);
 });
 </script>
 
@@ -350,7 +430,7 @@ onUnmounted(() => {
       <span class="sub-page-title">作者搜索获取</span>
     </div>
     <div class="form-card">
-      <el-form class="form" :model="form" label-position="top">
+      <el-form class="form" :model="form" label-position="top" :disabled="loading || submitting" :inert="(loading || submitting) ? '' : null" :aria-busy="loading || submitting">
         <section class="settings-section" aria-labelledby="blogger-fetch-settings-title">
           <h2 id="blogger-fetch-settings-title" class="settings-section-heading">
             <span class="settings-step">1</span>
@@ -436,7 +516,7 @@ onUnmounted(() => {
         <el-form-item v-if="form.radio === 2" label="" style="margin-top: 0">
           <div class="field-stack">
             <div class="c-label">数据写入方式</div>
-            <el-radio-group v-model="form.writeMode" class="radio-block">
+            <el-radio-group v-model="form.writeMode" class="radio-block" :disabled="!outputConfigReady">
               <el-radio value="upsert">更新或新增</el-radio>
               <el-radio value="append">始终新增</el-radio>
             </el-radio-group>
@@ -462,46 +542,32 @@ onUnmounted(() => {
             <template v-else>
               <p class="mapping-note">同名字段会自动匹配；不同名时可指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
               <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
-                <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+                <el-select v-model="mapping.source_key" :disabled="!outputConfigReady" placeholder="选择输出字段" size="small">
                   <el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                 </el-select>
                 <span class="mapping-arrow">→</span>
-                <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+                <el-select v-model="mapping.target_field_id" :disabled="!outputConfigReady" placeholder="选择目标字段" size="small">
                   <el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                 </el-select>
-                <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+                <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)" :disabled="!outputConfigReady">删除</el-button>
               </div>
-              <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
+              <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })" :disabled="!outputConfigReady">+ 添加字段映射</el-button></div>
             </template>
           </div>
         </div>
         </section>
+      </el-form>
+        <p v-if="taskNotice" class="sub-hint" role="status">{{ taskNotice }}</p>
         <el-button
           class="commit-btn"
           :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
-          :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
-          :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'reopen'"
+          :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
+          :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || taskActionState === 'reopen'"
           @click="handleTaskAction"
-        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
-      </el-form>
+        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
     </div>
 
-    <div class="toast-wrap" :class="{ show: toastVisible }">
-      <div class="toast" :class="{ 'toast-loading': toastLoading }">
-        <div class="toast-icon" v-if="toastLoading">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <path d="M12 2a10 10 0 0 1 10 10"></path>
-          </svg>
-        </div>
-        <div class="toast-icon" v-else>
-          <svg viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="10" fill="#00B42A"></circle>
-            <path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
-          </svg>
-        </div>
-        <span>{{ toastText }}</span>
-      </div>
-    </div>
+    <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>
 
@@ -580,18 +646,7 @@ onUnmounted(() => {
 .sub-page-back svg { width:100%; height:100%; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 .sub-page-title { overflow:hidden; color:#1d2129; font-size:18px; font-weight:600; line-height:24px; text-overflow:ellipsis; white-space:nowrap; }
 .form-card { box-sizing:border-box; margin:16px; padding:20px; background:#fff; border:1px solid #e5e6eb; border-radius:8px; }
-.commit-btn { width:100%; height:36px; margin-top:0; border:0; border-radius:6px; background:#a8071a; color:#fff; font-size:14px; font-weight:500; }
-.commit-btn:hover { background:#c11126; }
-.commit-btn:active { background:#8a0515; }
-.commit-btn.is-running { border:1px solid #d5495c; background:#fff; color:#a8071a; }
-.commit-btn.is-running:hover { background:#fff1f2; }
-.commit-btn.is-running:active { background:#ffe4e6; }
-.commit-btn.is-running.is-disabled { border-color:#e5e6eb; background:#fafafa; color:#86909c; cursor:not-allowed; }
-.toast-wrap { position:fixed; top:50%; left:50%; z-index:9999; width:max-content; max-width:calc(100vw - 32px); pointer-events:none; opacity:0; transform:translate(-50%,-50%) scale(.95); transition:opacity .3s ease,transform .3s ease; }
-.toast-wrap.show { opacity:1; transform:translate(-50%,-50%) scale(1); }
-.toast { display:inline-flex; align-items:center; gap:8px; box-sizing:border-box; max-width:calc(100vw - 32px); padding:8px 16px; border:1px solid #e5e6eb; border-radius:8px; background:#fff; box-shadow:0 8px 24px rgba(0,0,0,.12); color:#1d2129; font-size:14px; font-weight:500; line-height:22px; white-space:normal; overflow-wrap:anywhere; }
-.toast-icon { display:flex; align-items:center; justify-content:center; flex-shrink:0; width:18px; height:18px; }
-.toast-icon svg { width:100%; height:100%; }
-.toast-loading .toast-icon { color:#a8071a; animation:spin .8s linear infinite; }
-@keyframes spin { to { transform:rotate(360deg); } }
+
+.commit-btn { margin-top:0; }
+
 </style>

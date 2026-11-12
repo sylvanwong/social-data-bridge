@@ -53,16 +53,18 @@ onMounted(async () => {
 });
 
 const saveApiKey = async () => {
-  if (api_key.value === "") {
-    api_key_disabled.value = true;
-    await bitable.bridge.setData("api_key", API_KEY_CLEARED_MARKER);
-    social_type_options.value = [...TYPE_OPTIONS];
-    return;
-  } else {
-    api_key_disabled.value = true;
+  api_key_disabled.value = true;
+  try {
+    if (api_key.value === "") {
+      await bitable.bridge.setData("api_key", API_KEY_CLEARED_MARKER);
+      social_type_options.value = [...TYPE_OPTIONS];
+      return;
+    }
     await bitable.bridge.setData("api_key", api_key.value);
-    ElMessage({ message: "保存成功", type: "success", plain: true });
+    ElMessage({ message: "保存成功", type: "success", plain: true, duration: 3000 });
     social_type_options.value = await fetchPlatformConfig(PLATFORM_CONFIG_NAMES.search, TYPE_OPTIONS);
+  } catch (error) {
+    ElMessage({ message: error?.message || "保存 API Key 失败，请重试", type: "error", plain: true, duration: 5000 });
   }
 };
 
@@ -71,7 +73,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
     return await fetchPlatformConfigOptions(api_key.value, name, fallbackOptions);
   } catch (error) {
     console.error('获取平台配置失败:', error);
-    ElMessage({ message: "获取平台配置失败，使用默认设置", type: "warning", plain: true });
+    ElMessage({ message: "获取平台配置失败，使用默认设置", type: "warning", plain: true, duration: 5000 });
     return [...fallbackOptions];
   }
 };

@@ -1,5 +1,7 @@
+import { nextTableName } from '../utils/tableNames.mjs';
+import { resolveWritableField } from "../utils/tableFields.js";
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { ElMessage, ElNotification } from "element-plus";
+import { ElMessage } from "element-plus";
 import { ref, onUnmounted } from "vue";
 import request, { buildApiUrl } from '@/utils/request'
 
@@ -17,7 +19,7 @@ export const FIELD_MAPPING = [
   { key: 'collect_count', name: '收藏数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'share_count', name: '分享数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'social_type', name: '平台', type: FieldType.Text, defaultSelected: true },
-  { key: 'share_url', name: '视频链接', type: FieldType.Text, defaultSelected: true },
+  { key: 'share_url', name: '视频链接', type: FieldType.Url, defaultSelected: true },
   { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
   { key: 'cover_url', name: '封面', type: FieldType.Text, defaultSelected: true },
   { key: 'duration', name: '时长', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
@@ -42,7 +44,7 @@ export const KEYWORD_SEARCH_FIELD_MAPPING = [
   { key: 'comment_count', name: '评论数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'collect_count', name: '收藏数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'share_count', name: '分享数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
-  { key: 'share_url', name: '作品链接', legacyNames: ['视频链接'], type: FieldType.Text, defaultSelected: true },
+  { key: 'share_url', name: '作品链接', legacyNames: ['视频链接'], type: FieldType.Url, defaultSelected: true },
   { key: 'cover_url', name: '封面链接', legacyNames: ['封面'], type: FieldType.Text, defaultSelected: true },
   { key: 'cover_attachment', name: '封面附件', type: FieldType.Attachment, defaultSelected: true, getUrls: (item) => item?.cover_url ? [item.cover_url] : [], getFileName: () => 'cover' },
   { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
@@ -67,7 +69,7 @@ export const PROFILE_FIELD_MAPPING = [
   { key: 'comment_count', name: '评论数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'collect_count', name: '收藏数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'share_count', name: '分享数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
-  { key: 'share_url', name: '作品链接', legacyNames: ['视频链接'], type: FieldType.Text, defaultSelected: true },
+  { key: 'share_url', name: '作品链接', legacyNames: ['视频链接'], type: FieldType.Url, defaultSelected: true },
   { key: 'cover_url', name: '封面链接', legacyNames: ['封面'], type: FieldType.Text, defaultSelected: true },
   { key: 'cover_attachment', name: '封面附件', type: FieldType.Attachment, defaultSelected: true, getUrls: (item) => item?.cover_url ? [item.cover_url] : [], getFileName: () => 'cover' },
   { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
@@ -112,7 +114,7 @@ const getAllowedFieldTypes = (config) => {
   if (config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
-  if (config.key === 'profile_url') {
+  if (config.key === 'profile_url' || config.key === 'share_url') {
     return [FieldType.Text, FieldType.Url];
   }
   if (config.key === 'tags') {
@@ -400,6 +402,9 @@ const normalizeCellValue = async (table, field, value, config, fieldType, extra 
   }
 
   let nextValue = value;
+  if ((fieldType === FieldType.Number || fieldType === FieldType.DateTime) && (nextValue == null || nextValue === '')) {
+    return null;
+  }
   if (config.isTimestamp && nextValue) {
     nextValue = nextValue * 1000;
   }
@@ -469,11 +474,7 @@ const chunkRecords = (records, size = 200) => {
 };
 
 export const showErrorMsg = (message) => {
-  ElMessage({ message, type: "error", plain: true });
-};
-
-const escapeRegExp = (value) => {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  ElMessage({ message, type: "error", plain: true, duration: 3000 });
 };
 
 const normalizeTableName = (value) => {
@@ -491,30 +492,9 @@ export const createSequentialTable = async (baseTableName, assertActive) => {
   try {
     const safeBaseTableName = normalizeTableName(baseTableName);
     const existingTables = await bitable.base.getTableMetaList();
-    const tableNames = existingTables.map(table => table.name);
-
-    const existsBaseTable = tableNames.includes(safeBaseTableName);
-    const existsSequentialTable = tableNames.some(name => name.startsWith(`${safeBaseTableName}`) && /\d+$/.test(name.slice(safeBaseTableName.length)));
-    if (!existsBaseTable && !existsSequentialTable) {
-      assertActive?.();
-      const newTable = await bitable.base.addTable({ name: safeBaseTableName });
-      return newTable;
-    }
-
-    const reg = new RegExp(`^${escapeRegExp(safeBaseTableName)}(\\d+)$`);
-    let maxIndex = 0;
-    tableNames.forEach(name => {
-      const match = name.match(reg);
-      if (match) {
-        const index = parseInt(match[1], 10);
-        if (index > maxIndex) maxIndex = index;
-      }
-    });
-
-    const newTableName = `${safeBaseTableName}${maxIndex + 1}`;
+    const name = nextTableName(safeBaseTableName, existingTables.map(table => table.name));
     assertActive?.();
-    const newTable = await bitable.base.addTable({ name: newTableName });
-    return newTable;
+    return await bitable.base.addTable({ name });
   } catch (error) {
     console.error("获取表格序号失败：", error);
     throw error;
@@ -552,9 +532,12 @@ export const setupTableFields = async (tableId, selectedFieldKeys = [], fieldMap
 
 export const validateTableFields = async (tableId, selectedFieldKeys = [], fieldMapping = FIELD_MAPPING, options = {}) => {
   try {
+    if ((options.fieldMappings || []).some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
+    options.assertActive?.();
     options.onProgress?.('正在检查目标表字段...');
     const activeTable = await bitable.base.getTableById(tableId);
     const fieldMetaList = await activeTable.getFieldMetaList();
+    options.assertActive?.();
     const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
     const fieldMetaById = new Map(fieldMetaList.map(meta => [meta.id, meta]));
     const explicitMappings = new Map(
@@ -585,13 +568,9 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
         if (!explicitMapping) missingFields.push(config);
         continue;
       }
-      try {
-        const field = await activeTable.getFieldById(matchedField.fieldMeta.id);
-        fieldList.push({ field, config });
-      } catch (error) {
-        console.error(`获取字段失败：${config.name}`, error);
-        missingFields.push(config);
-      }
+      const field = await activeTable.getFieldById(matchedField.fieldMeta.id);
+      options.assertActive?.();
+      fieldList.push({ field, config });
     }
 
     for (const item of fieldList) {
@@ -599,7 +578,9 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
         const fieldType = await item.field.getType();
         item.fieldType = fieldType;
         if (!isFieldTypeCompatible(fieldType, item.config)) {
-          ElNotification({ title: '出错', message: `字段"${item.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(item.config)}类型，请修改后，点击插件顶部右上角关闭按钮，再重新进入操作`, type: 'error', duration: 0 });
+          const message = `输出字段"${item.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(item.config)}类型，请修正目标字段类型后重试`;
+          if (options.throwOnError) throw new Error(message);
+          ElMessage({ message, type: 'error', plain: true, duration: 8000 });
           return false;
         }
       }
@@ -612,16 +593,21 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
     for (const config of missingFields) {
       try {
         options.onProgress?.(`正在创建字段 ${createdFieldCount + 1}/${missingFields.length}：${config.name}...`);
+        options.assertActive?.();
         await activeTable.addField({ type: config.type, name: config.name });
         createdFieldCount++;
       } catch (error) {
-        ElNotification({ title: '出错', message: `添加字段 "${config.name}" 失败`, type: 'error', duration: 0 });
+        const message = `添加字段 "${config.name}" 失败`;
+        if (options.throwOnError) throw new Error(`${message}${error?.message ? `：${error.message}` : ''}`);
+        ElMessage({ message, type: 'error', plain: true, duration: 5000 });
         return false;
       }
     }
 
     if (missingFields.length > 0) {
-      ElNotification({ title: '成功', message: `已自动添加 ${missingFields.length} 个字段${options.successMessageSuffix || ''}`, type: 'success' });
+      const message = `已自动添加 ${missingFields.length} 个字段${options.successMessageSuffix || ''}`;
+      if (options.onProgress) options.onProgress(message);
+      else if (!options.throwOnError) ElMessage({ message, type: 'success', plain: true, duration: 3000 });
     }
 
     const refreshedFieldMetaList = await activeTable.getFieldMetaList();
@@ -634,9 +620,10 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
         : resolveFieldMetaByConfig(refreshedFieldMetaByName, config);
       const fieldId = matchedField?.fieldMeta?.id;
       if (!fieldId) continue;
+      const field = await activeTable.getFieldById(fieldId);
+      options.assertActive?.();
       try {
-        const field = await activeTable.getFieldById(fieldId);
-        await applyFieldDisplayConfig(field, config);
+        await applyFieldDisplayConfig(field, config, options.assertActive);
       } catch (error) {
         console.error(`设置字段 ${config.name} 格式失败:`, error);
       }
@@ -644,14 +631,16 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
 
     const availableFieldList = [...fieldList, ...missingFields.map(config => ({ field: true, config }))];
     if (availableFieldList.length === 0) {
+      if (options.throwOnError) throw new Error('所选表格没有可写入字段');
       showErrorMsg("所选表格没有可写入字段");
       return false;
     }
 
     return true;
   } catch (error) {
+    if (options.throwOnError) throw error;
     console.error("验证表格字段时出错:", error);
-    showErrorMsg("验证表格字段失败，请稍后重试");
+    showErrorMsg(error?.response?.data?.msg || error?.message || "验证表格字段失败，请稍后重试");
     return false;
   }
 };
@@ -837,10 +826,10 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         const fieldId = matchedField?.fieldMeta?.id;
         if (!fieldId) return { field: null, config };
         try {
-          const field = await activeTable.getFieldById(fieldId);
-          const fieldType = await field.getType();
+          const { field, fieldType } = await resolveWritableField(activeTable, await activeTable.getFieldById(fieldId));
           return { field, config, fieldType };
         } catch (error) {
+          if (options.stopAfterCurrentBatch) throw error;
           console.error(`获取字段失败：${config.name}`, error);
           return { field: null, config };
         }
@@ -851,7 +840,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         if (options.stopAfterCurrentBatch) {
           throw new Error(`字段“${incompatibleField.config.name}”类型不匹配，请修正后恢复任务`);
         }
-        ElNotification({ title: '出错', message: `字段"${incompatibleField.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(incompatibleField.config)}类型，请修改后，点击插件顶部右上角关闭按钮，再重新进入操作`, type: 'error', duration: 0 });
+        ElMessage({ plain: true, message: `输出字段"${incompatibleField.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(incompatibleField.config)}类型，请修正目标字段类型后重试`, type: 'error', duration: 8000 });
         resetParams();
         return;
       }
@@ -928,7 +917,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
               const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, extra, item, api_key);
               options.assertActive?.();
               const cell = await field.createCell(value);
-              return { cell, fieldId: field.id, value: config.type === FieldType.Attachment ? await cell.getValue() : value };
+              return { cell, fieldId: field.id, value: await cell.getValue() };
             }));
             return {
               record: cells.map(entry => entry.cell),
@@ -949,7 +938,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
             options.assertActive?.();
             const cell = await field.createCell(value);
             record.push(cell);
-            normalizedRecord[field.id] = config.type === FieldType.Attachment ? await cell.getValue() : value;
+            normalizedRecord[field.id] = await cell.getValue();
           }
           records.push(record);
           normalizedRecords.push(normalizedRecord);
@@ -1031,7 +1020,10 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
           created.forEach((recordId, index) => existingByKey.set(creates[index].key, recordId));
         }
       } else {
-        recordIds = await writeBatch(() => activeTable.addRecords(records));
+        for (const batch of chunkRecords(records)) {
+          const created = await writeBatch(() => activeTable.addRecords(batch));
+          recordIds = recordIds.concat(created);
+        }
       }
 
       options.assertActive?.();
@@ -1049,7 +1041,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       }
     } catch (error) {
       if (options.stopAfterCurrentBatch) {
-        const writeError = new Error(`${error?.message || '写入失败'}；已暂停写入，请核对表格结果后再恢复任务`);
+        const writeError = new Error(`${error?.message || '写入失败'}；已暂停写入，请核对表格结果后再恢复任务`, { cause: error });
         writeError.stopPolling = true;
         throw writeError;
       }
@@ -1060,12 +1052,12 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         const { tableId: newTableId } = await createSequentialTable(tableName);
         await setupTableFields(newTableId, selectedFieldKeys, fieldMapping);
         return await createAndWriteData(list, type, task_id, newTableId, selectedFieldKeys, options);
-        ElNotification({ title: '温馨提示', message: '当前多维表格已达到单表存储上限！已为您自动生成新表格展示全部数据', type: 'success', duration: 3000 });
+        ElMessage({ plain: true, message: '当前多维表格已达到单表存储上限！已为您自动生成新表格展示全部数据', type: 'success', duration: 3000 });
         return;
       } catch (retryError) {
         console.error("🚀 ~ 创建新表重试写入失败:", retryError)
         const errorMsg = retryError?.message ? `写入失败：${retryError.message}` : "写入失败，请稍后重试";
-        ElNotification({ title: '错误', message: errorMsg, type: 'error', duration: 0 });
+        ElMessage({ plain: true, message: errorMsg, type: 'error', duration: 5000 });
         if (options.stopAfterCurrentBatch) {
           throw retryError;
         }

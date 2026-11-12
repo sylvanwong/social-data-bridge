@@ -43,6 +43,125 @@ test('恢复旧任务，无新增字段也能继续排空剩余结果', async ()
   assert.deepEqual(h.errors, []);
 });
 
+test('终态清理响应失败后，恢复读取再次失败仍保留待清理任务，恢复成功不重新请求后端', async () => {
+  let statusReads = 0, clears = 0;
+  const h = harness({ getStatus: async () => { statusReads++; return { status: 3 }; }, getResults: async () => ({ items: [] }) });
+  const save = h.bitable.bridge.setData;
+  h.bitable.bridge.setData = async (key, value) => {
+    await save(key, value);
+    if (!value.taskId && ++clears === 1) throw new Error('清理已生效但响应失败');
+  };
+  try {
+    await h.task.start({ taskId: 'old' });
+    assert.equal(h.errors.length, 1);
+    assert.deepEqual(h.saved(), {});
+    const read = h.bitable.bridge.getData;
+    h.bitable.bridge.getData = async () => { throw new Error('读取暂时失败'); };
+    await assert.rejects(h.task.resume(), /读取暂时失败/);
+    h.bitable.bridge.getData = read;
+    assert.equal(await h.task.resume(), true);
+    assert.equal(statusReads, 1);
+    assert.equal(clears, 2);
+    assert.deepEqual(h.finished, [0]);
+    assert.equal(h.task.getActiveTask(), null);
+  } finally { h.task.stop(); }
+});
+
+test('终态清理失败后恢复记录已被另一任务替换，不得用旧收尾状态清除新任务', async () => {
+  let clears = 0; const reads = [];
+  const h = harness({ getStatus: async task => { reads.push(task.taskId); return { status: task.taskId === 'old' ? 3 : 0 }; }, getResults: async () => ({ items: [] }) });
+  const save = h.bitable.bridge.setData;
+  h.bitable.bridge.setData = async (key, value) => {
+    if (!value.taskId && ++clears === 1) throw new Error('清理失败');
+    return save(key, value);
+  };
+  try {
+    await h.task.start({ taskId: 'old' });
+    await save('test', { taskId: 'new', baseId: 'base', cursor: 'new-cursor', writtenCount: 5 });
+    await h.task.resume();
+    assert.equal(clears, 1);
+    assert.deepEqual(reads, ['old', 'new']);
+    assert.equal(h.task.getActiveTask().taskId, 'new');
+    assert.equal(h.saved().cursor, 'new-cursor');
+    assert.deepEqual(h.finished, []);
+  } finally { h.task.stop(); }
+});
+
+for (const stage of ['getStatus', 'getResults']) {
+  for (const auth of [{ code: 'INVALID_API_KEY' }, { response: { status: 401 } }, { response: { status: 403 } }]) {
+    test(`${stage}鉴权失败${auth.code || auth.response.status}立即暂停并可恢复原任务`, async () => {
+      let invalid = true;
+      const authError = Object.assign(new Error('API Key 已失效'), auth);
+      const h = harness({
+        getStatus: async () => { if (stage === 'getStatus' && invalid) throw authError; return { status: 0 }; },
+        getResults: async () => { if (stage === 'getResults' && invalid) throw authError; return { items: [] }; },
+      });
+      await h.bitable.bridge.setData('test', { taskId: 'old', baseId: 'base', cursor: 'saved-cursor', writtenCount: 20 });
+      try {
+        await h.task.resume();
+        assert.equal(h.task.getActiveTask(), null);
+        assert.equal(h.errors.length, 1);
+        assert.equal(h.errors[0], authError);
+        assert.notEqual(h.errors[0].requiresReopen, true);
+        assert.equal(h.timers.size, 0, '鉴权失败不得继续安排自动轮询');
+        assert.equal(h.saved().cursor, 'saved-cursor');
+        assert.equal(h.saved().writtenCount, 20);
+        assert.deepEqual(h.calls, []);
+        invalid = false;
+        await h.task.resume();
+        assert.equal(h.task.getActiveTask().taskId, 'old');
+        assert.equal(h.task.getActiveTask().cursor, 'saved-cursor');
+      } finally { h.task.stop(); }
+    });
+  }
+}
+
+for (const stage of ['getData', 'getSelection', 'getStatus', 'getResults']) {
+  test(`${stage}只读超时可同页恢复原任务，晚响应不写入或推进游标`, async () => {
+    let release, blocked = true, writes = 0, thrown;
+    const gate = new Promise(resolve => { release = resolve; });
+    const status = { status: 0, processed: 1 };
+    const result = { items: [{ id: 'one' }], next_cursor: 'cursor-1', has_more: false };
+    const h = harness({ operationTimeoutMs: 180000,
+      getStatus: async () => stage === 'getStatus' && blocked ? gate : status,
+      getResults: async task => {
+        assert.equal(task.cursor, 'saved-cursor');
+        return stage === 'getResults' && blocked ? gate : result;
+      },
+      writeBatch: async () => { writes++; },
+    });
+    const saved = { taskId: 'old', baseId: 'base', cursor: 'saved-cursor', writtenCount: 7 };
+    await h.bitable.bridge.setData('test', saved);
+    const owner = stage === 'getData' ? h.bitable.bridge : stage === 'getSelection' ? h.bitable.base : null;
+    const original = owner?.[stage];
+    if (owner) owner[stage] = async () => blocked ? gate : original();
+    const pending = h.task.resume().catch(error => { thrown = error; });
+    for (let i = 0; i < 100; i++) await Promise.resolve();
+    const timer = [...h.timers.values()].find(timer => timer.delay === 180000);
+    assert.ok(timer);
+    timer.fn(); await pending;
+    const error = thrown || h.errors[0];
+    assert.notEqual(error.requiresReopen, true);
+    assert.equal(error.stopPolling, true);
+    assert.match(error.message, /超时.*恢复任务/);
+    assert.doesNotMatch(error.message, /关闭|重新(?:打开|进入)/);
+    assert.equal(writes, 0);
+    assert.deepEqual(h.saved(), saved);
+
+    blocked = false;
+    release(stage === 'getData' ? saved : stage === 'getSelection' ? { baseId: 'base' } : stage === 'getStatus' ? status : result);
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    assert.equal(writes, 0, '迟到的读取结果不得重新开始写入');
+    assert.deepEqual(h.saved(), saved);
+    await h.task.resume();
+    assert.equal(h.task.getActiveTask().taskId, 'old');
+    assert.equal(writes, 1);
+    assert.equal(h.saved().cursor, 'cursor-1');
+    assert.equal(h.saved().writtenCount, 8);
+    h.task.stop();
+  });
+}
+
 test('写表失败不推进游标', async () => {
   const h = harness({ writeBatch: async () => { throw new Error('write failed'); } });
   await h.task.start({ taskId: 'task' });

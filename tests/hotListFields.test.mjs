@@ -1,6 +1,7 @@
+import { resolveWritableField } from '../src/utils/tableFields.js';
 import test from 'node:test';
 import { ref, computed, watch } from 'vue';
-import { createTableConfigSaver } from '../src/utils/tableOutputConfig.mjs';
+import { createTableConfigSaver, parseTableConfigList } from '../src/utils/tableOutputConfig.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
@@ -102,7 +103,7 @@ function configSaver(bindings) {
   bindings = { showErrorMsg() {}, tableConfigReady: { value: true }, tableConfigLoading: { value: false }, ...bindings };
   const source = parse(fs.readFileSync(new URL('../src/components/HotListFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
   const nodes = parseJS(source, { sourceType: 'module' }).program.body
-    .filter(node => node.type === 'VariableDeclaration' && node.declarations.some(item => ['persistTableOutputConfig', 'saveTableOutputConfig'].includes(item.id.name)));
+    .filter(node => node.type === 'VariableDeclaration' && node.declarations.some(item => ['tableConfigSaves', 'persistTableOutputConfig', 'saveTableOutputConfig'].includes(item.id.name)));
   return new Function('createTableConfigSaver', ...Object.keys(bindings), nodes.map(node => source.slice(node.start, node.end)).join('\n') + '\nreturn saveTableOutputConfig;')(createTableConfigSaver, ...Object.values(bindings));
 }
 
@@ -148,7 +149,7 @@ for (const failFirst of [false, true]) {
 
 function configEditor() {
   const source = parse(fs.readFileSync(new URL('../src/components/HotListFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
-  const names = ['tableConfigLoading', 'tableConfigError', 'tableOutputConfigsLoaded', 'mainOutputTableId', 'tableConfigReady', 'tableConfigReadId', 'tableConfigsRequest', 'targetFieldReadId', 'loadTargetFieldOptions', 'loadTableOutputConfigs', 'applyTableOutputConfig', 'persistTableOutputConfig', 'saveTableOutputConfig'];
+  const names = ['tableConfigLoading', 'tableConfigError', 'tableOutputConfigsLoaded', 'tableConfigSaves', 'mainOutputTableId', 'tableConfigReady', 'tableConfigReadId', 'tableConfigsRequest', 'targetFieldReadId', 'loadTargetFieldOptions', 'loadTableOutputConfigs', 'applyTableOutputConfig', 'persistTableOutputConfig', 'saveTableOutputConfig'];
   const nodes = parseJS(source, { sourceType: 'module' }).program.body.filter(node => node.type === 'VariableDeclaration' && node.declarations.some(item => names.includes(item.id.name)));
   const formData = ref({ radio: 2, table_id: 'A' });
   const mappingDraft = ref([{ source_key: 'title', target_field_id: 'original' }]);
@@ -156,7 +157,7 @@ function configEditor() {
   let response = { sta: 0, data: { list: [] } };
   let fieldRead = async id => [{ id: `${id}-title`, name: id }];
   const bindings = {
-    ref, computed, createTableConfigSaver, formData, mappingDraft, targetFieldOptions: ref([]), tableOutputConfigs: ref({}),
+    ref, computed, createTableConfigSaver, parseTableConfigList, formData, mappingDraft, targetFieldOptions: ref([]), tableOutputConfigs: ref({}),
     props: { api_key: 'test-only' }, getBaseId: async () => 'base',
     bitable: { base: { getTableById: async id => ({ getFieldMetaList: () => fieldRead(id), getName: async () => id }) } },
     request: async args => {
@@ -251,7 +252,7 @@ for (const failure of ['business', 'network']) {
     await save();
     assert.equal(tableOutputConfigs.value.A, original);
     assert.equal(mappingDraft.value[0].target_field_id, 'edited');
-    assert.deepEqual(messages, ['保存表格配置失败，请重试']);
+    assert.deepEqual(messages, [failure === 'network' ? 'network failed' : 'save failed']);
     succeeds = true;
     await save();
     assert.equal(tableOutputConfigs.value.A.field_mappings[0].target_field_id, 'edited');
@@ -277,7 +278,7 @@ for (const existing of [false, true]) {
       addRecords: async records => written.push(...records),
     };
     const bindings = {
-      mappingDraft: { value: [{ source_key: 'rank', target_field_id: 'custom-rank' }] },
+      resolveWritableField, mappingDraft: { value: [{ source_key: 'rank', target_field_id: 'custom-rank' }] },
       getActiveFieldMapping: () => [{ key: 'rank', name: '排名', type: 2 }],
       bitable: { base: { getTableById: async () => table } },
       isFieldTypeCompatible: (actual, config) => actual === config.type,

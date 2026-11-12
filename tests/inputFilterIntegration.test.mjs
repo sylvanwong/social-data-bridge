@@ -1,15 +1,22 @@
+import { readRecordIds, readUniqueSourceLinks, readSourceRows } from '../src/utils/sourceTableRows.mjs';
+import { resolveWritableField } from '../src/utils/tableFields.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { nextTick } from 'vue';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
-import { createTableConfigSaver } from '../src/utils/tableOutputConfig.mjs';
+import { createTableConfigSaver, parseTableConfigList } from '../src/utils/tableOutputConfig.mjs';
 import { bitable, FieldType, DateFormatter, NumberFormatter } from '@lark-base-open/js-sdk';
 
 // Exercise the real page handlers, substituting only their SDK and external dependencies.
 function pageHandler(page, name, bindings) {
-  bindings = { hasRecoverableTask: { value: false }, componentUnmounted: false, formData: { value: {} }, fieldListLoading: { value: false }, linkFieldContext: { tableId: '', viewId: '', fieldName: '', pendingSelection: null }, writeMode: { value: 'upsert' }, editingTaskId: { value: null }, taskMappingDraft: { value: [] }, mappingDraft: { value: [] }, taskOutputLoading: { value: false }, taskOutputError: { value: '' }, taskOutputTableId: { value: '' }, taskOutputConfigReady: { value: true }, taskDialogVisible: { value: false }, tableConfigApplying: { value: false }, mainOutputTableId: { value: '' }, mainConfigReadId: { value: 0 }, taskConfigReadId: { value: 0 }, fieldReadRequests: new WeakMap(), taskTableFieldOptions: { value: [] }, tableFieldOptions: { value: [] }, ...bindings };
+  bindings = { parseTableConfigList, readRecordIds, readUniqueSourceLinks, readSourceRows, tableConfigSaveSequence: 0, tableConfigSaveRevisions: new Map(), tableConfigSaves: new Map(), tableConfigsReadId: { value: 0 }, ensureMainTableOutputConfig: async () => {}, resolveWritableField, taskFeedback: { toastLoading: { value: false }, recordFailure() {}, fail() {} }, feedback: { begin() {}, progress() {}, finish() {}, fail() {}, hide() {} }, nextTick, recoveryRequiresReopen: { value: false }, hasRecoverableTask: { value: false }, componentUnmounted: false, formData: { value: {} }, fieldListLoading: { value: false }, linkFieldContext: { tableId: '', viewId: '', fieldName: '', pendingSelection: null }, writeMode: { value: 'upsert' }, editingTaskId: { value: null }, taskMappingDraft: { value: [] }, mappingDraft: { value: [] }, taskOutputLoading: { value: false }, taskOutputError: { value: '' }, taskOutputTableId: { value: '' }, taskOutputConfigReady: { value: true }, taskDialogVisible: { value: false }, tableConfigApplying: { value: false }, mainOutputTableId: { value: '' }, mainConfigReadId: { value: 0 }, taskConfigReadId: { value: 0 }, fieldReadRequests: new WeakMap(), taskTableFieldOptions: { value: [] }, tableFieldOptions: { value: [] }, ...bindings };
+  bindings.ElMessage ??= bindings.ElNotification;
+  if (!bindings.taskFeedbackBound) {
+    bindings.taskFeedback = { ...bindings.taskFeedback, recordFailure: (error) => bindings.ElNotification?.({message: error.message || error}), fail: (error) => bindings.ElNotification?.({message: error.message || error}) };
+    bindings.taskFeedbackBound = true;
+  }
   if (name === 'saveTableOutputConfig' && !bindings.persistTableOutputConfig) {
     bindings.persistTableOutputConfig = pageHandler(page, 'persistTableOutputConfig', { ...bindings, createTableConfigSaver });
   }
@@ -29,6 +36,11 @@ function pageHandler(page, name, bindings) {
   }
   if (name !== 'cloneFieldMappings' && !bindings.cloneFieldMappings && declarations.some(node => node.id.name === 'cloneFieldMappings')) {
     bindings.cloneFieldMappings = pageHandler(page, 'cloneFieldMappings', bindings);
+  }
+  if (['writeDataToRecord', 'createCellValue'].includes(name)) {
+    bindings.FieldType = { ...FieldType, ...bindings.FieldType };
+    bindings.getAllowedFieldTypes = pageHandler(page, 'getAllowedFieldTypes', bindings);
+    bindings.isFieldTypeCompatible = pageHandler(page, 'isFieldTypeCompatible', bindings);
   }
   const node = declarations.find(node => node.id.name === name).init;
   return new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
@@ -59,7 +71,7 @@ for (const page of ['VideoDataFetch', 'BloggerInfoFetch', 'ProfileFetch']) {
     await pageHandler(page, page === 'ProfileFetch' ? 'handleImmediateSubmit' : 'handleTableModeSubmit', bindings)();
     assert.deepEqual(calls, ['validate', 'scope', 'filter']);
     assert.equal(activeReads, 1);
-    assert.deepEqual(notifications, [{ message: '没有符合筛选条件的数据', type: 'info' }]);
+    assert.deepEqual(notifications, []);
     assert.equal(loading.value, false);
     assert.equal(isSubmitting.value, false);
   });
@@ -189,6 +201,7 @@ for (const page of ['VideoDataFetch', 'BloggerInfoFetch', 'ProfileFetch']) {
       let submitted, validations = 0;
       const bindings = {
         taskDialogForm: { value: config }, cloneInputFilter, validateBaseForm: () => true,
+        mainOutputTableId: { value: 'A' }, taskOutputTableId: { value: 'A' },
         ensureScheduleTableContext: async () => true, getWriteFieldConfigs: () => [], getActiveFieldConfigs: () => [],
         normalizeTargetType: value => value, normalizeWorkFetchRange: value => value, getTableName: () => 'test',
         getCurrentSourceContext: async () => {
@@ -255,14 +268,14 @@ for (const page of ['VideoDataFetch', 'BloggerInfoFetch']) {
 for (const page of ['VideoDataFetch', 'BloggerInfoFetch', 'ProfileFetch']) {
   test(`${page}：范围与链接读取使用传入源表`, async () => {
     const ids = ['A-row'];
-    const view = { getSelectedRecordIdList: async () => ids };
+    const view = { getSelectedRecordIdList: async () => ids, getVisibleRecordIdListByPage: async () => ids };
     const table = { getActiveView: async () => view, getFieldById: async id => {
       assert.equal(id, 'A-link');
       return { getCell: async recordId => { assert.equal(recordId, 'A-row'); return { getValue: async () => 'https://example.test/A' }; } };
     } };
     const bindings = { bitable: { base: { getActiveTable: () => assert.fail('不应读取新当前表') } },
-      console: { log() {} }, getAllVisibleRecordIdList: async v => { assert.equal(v, view); return ids; },
-      extractUrlHint: value => value, extractProfileLink: value => value };
+      console: { log() {} },
+      extractUrlHint: value => value, extractCellLink: value => value };
     const scope = pageHandler(page, 'getRecordIdListByScope', bindings);
     assert.deepEqual(await scope(table, 'selected', 1), ids);
     assert.deepEqual(await scope(table, 'n', 1), ids);
@@ -1040,37 +1053,55 @@ for (const [page, loader] of [
   }
 }
 
-for (const inDialog of [false, true]) {
-  for (const complete of [false, true]) {
-    test(`BloggerInfoFetch：${inDialog ? '弹窗' : '主页面'}保存使用本入口映射，${complete ? '完整映射提交' : '不完整映射阻止保存'}`, async () => {
-      const selected = [{ source_key: 'name', target_field_id: complete ? 'selected-field' : '' }];
-      const other = [{ source_key: 'name', target_field_id: 'other-field' }];
-      const saved = [], notifications = [];
-      let requests = 0;
-      const bindings = {
-        taskDialogLoading: { value: false }, taskDialogVisible: { value: inDialog },
-        taskDialogForm: { value: { targetType: 'existing', targetTableId: 'target' } },
-        mappingDraft: { value: inDialog ? other : selected },
-        taskMappingDraft: { value: inDialog ? selected : other },
-        editingTaskId: { value: inDialog ? 'task' : null }, props: { api_key: 'test-only' }, TASK_API_PATH: '/tasks',
-        validateConfiguredInputFilter: async () => null,
-        buildTaskPayload: async () => ({ name: 'task' }),
-        saveTableOutputConfig: async config => { saved.push(config.fieldMappings); },
-        request: async () => { requests++; return { data: { sta: 0 } }; },
-        ElNotification: value => notifications.push(value), console: { error() {} },
-        getDefaultTaskDialogForm: () => ({}), loadTaskList: async () => {},
-      };
-      await pageHandler('BloggerInfoFetch', 'saveTask', bindings)();
-      assert.equal(requests, complete ? 1 : 0);
-      if (complete) {
-        assert.deepEqual(saved, [selected]);
-        assert.notEqual(saved[0], selected);
-      } else {
-        assert.deepEqual(saved, []);
-        assert.equal(notifications[0].message, '请完成字段映射后再保存任务');
-      }
-      assert.equal(bindings.taskDialogLoading.value, false);
-    });
+for (const targetType of ['current', 'existing']) {
+  for (const inDialog of [false, true]) {
+    for (const mappingState of ['incomplete', 'complete', 'empty']) {
+      test(`BloggerInfoFetch：${targetType} ${inDialog ? '弹窗' : '主页面'}定时保存校验 ${mappingState} 映射`, async () => {
+        const complete = mappingState !== 'incomplete';
+        const selected = mappingState === 'empty' ? [] : [{ source_key: 'name', target_field_id: complete ? 'selected-field' : '' }];
+        const other = [{ source_key: 'name', target_field_id: 'other-field' }];
+        const saved = [], notifications = [];
+        let requests = 0;
+        const bindings = {
+          taskDialogLoading: { value: false }, taskDialogVisible: { value: inDialog },
+          taskDialogForm: { value: { targetType, targetTableId: targetType === 'existing' ? 'target' : '' } },
+          mainOutputTableId: { value: targetType === 'current' ? 'source' : 'target' },
+          taskOutputTableId: { value: targetType === 'current' ? 'source' : 'target' },
+          mappingDraft: { value: inDialog ? other : selected },
+          taskMappingDraft: { value: inDialog ? selected : other },
+          editingTaskId: { value: inDialog ? 'task' : null }, props: { api_key: 'test-only' }, TASK_API_PATH: '/tasks',
+          validateConfiguredInputFilter: async () => null,
+          buildTaskPayload: async () => ({ name: 'task', snapshot: { resolved_target_table_id: targetType === 'current' ? 'source' : 'target' } }),
+          saveTableOutputConfig: async config => {
+            assert.equal(config.resolvedTargetTableId, targetType === 'current' ? 'source' : '');
+            saved.push(config.fieldMappings);
+          },
+          request: async config => {
+            assert.equal(config.method, inDialog ? 'put' : 'post');
+            requests++; return { data: { sta: 0 } };
+          },
+          ElNotification: value => notifications.push(value), console: { error() {} },
+          getDefaultTaskDialogForm: () => ({}), loadTaskList: async () => {},
+        };
+        const save = pageHandler('BloggerInfoFetch', 'saveTask', bindings);
+        await save();
+        assert.equal(requests, complete ? 1 : 0);
+        if (complete) {
+          assert.deepEqual(saved, [selected]);
+          if (targetType === 'existing') assert.notEqual(saved[0], selected);
+        } else {
+          assert.deepEqual(saved, []);
+          assert.equal(notifications[0].message, '请完成字段映射后再保存任务');
+          assert.deepEqual((inDialog ? bindings.taskMappingDraft : bindings.mappingDraft).value, selected);
+          assert.equal(bindings.taskDialogLoading.value, false);
+          selected[0].target_field_id = 'selected-field';
+          await save();
+          assert.equal(requests, 1, '补全后同页可继续保存');
+          assert.deepEqual(saved, [selected]);
+        }
+        assert.equal(bindings.taskDialogLoading.value, false);
+      });
+    }
   }
 }
 
@@ -1498,7 +1529,12 @@ for (const page of ['BloggerInfoFetch', 'ProfileFetch']) {
     form.value.targetType = 'new'; owner.value = '';
     assert.equal(ready.value, true);
     form.value.targetType = 'current';
-    assert.equal(ready.value, true);
+    assert.equal(ready.value, page !== 'BloggerInfoFetch');
+    if (page === 'BloggerInfoFetch') {
+      form.value.sourceTableId = 'source'; owner.value = 'other';
+      assert.equal(ready.value, false);
+      owner.value = 'source'; assert.equal(ready.value, true);
+    }
   });
 }
 
@@ -1724,7 +1760,6 @@ for (const page of ['VideoDataFetch', 'BloggerInfoFetch', 'ProfileFetch']) {
       getSelectedRecordIdList: async () => selected,
     };
     const bindings = { console: { log() {}, warn() {} }, ElNotification: value => notices.push(value) };
-    bindings.getAllVisibleRecordIdList = pageHandler(page, 'getAllVisibleRecordIdList', bindings);
     const read = pageHandler(page, 'getRecordIdListByScope', bindings);
     const table = { getActiveView: async () => view };
     for (const [count, pages] of [[5, 1], [200, 1], [201, 2], [500, 3]]) {
@@ -1741,5 +1776,45 @@ for (const page of ['VideoDataFetch', 'BloggerInfoFetch', 'ProfileFetch']) {
     assert.equal(await read(table, 'selected'), null);
     assert.equal(notices.length, 1);
     assert.equal(calls.length, 0);
+  });
+}
+
+test('作品详情共用源表读取后保留无链接的原始值及对应行号', async () => {
+  const rawValue = { text: '待解析的作品标识' };
+  const table = { getFieldById: async () => ({
+    getCell: async id => {
+      if (id === 'unreadable') throw new Error('读取该单元格失败');
+      return { getValue: async () => id === 'work' ? rawValue : [] };
+    },
+  }) };
+  const read = pageHandler('VideoDataFetch', 'getCellValuesByFieldId', { extractUrlHint: () => null });
+  assert.deepEqual(await read(table, ['empty', 'unreadable', 'work'], 'field'), [
+    { recordId: 'work', url: null, rawValue },
+  ]);
+});
+
+for (const inDialog of [false, true]) {
+  test(`BloggerInfoFetch当前表定时保存：${inDialog ? '弹窗' : '主页面'}准备期间活动表变化，不将原映射保存给新表`, async () => {
+    const notices = [];
+    let finish;
+    const bindings = {
+      taskDialogLoading: { value: false }, taskDialogVisible: { value: inDialog },
+      taskDialogForm: { value: { targetType: 'current' } },
+      mainOutputTableId: { value: 'A' }, taskOutputTableId: { value: 'A' },
+      mappingDraft: { value: [{ source_key: 'name', target_field_id: 'A-name' }] },
+      taskMappingDraft: { value: [{ source_key: 'name', target_field_id: 'A-name' }] },
+      validateConfiguredInputFilter: async () => null,
+      buildTaskPayload: () => new Promise(resolve => { finish = resolve; }),
+      saveTableOutputConfig: () => assert.fail('不能将原表映射保存到新来源表'),
+      request: () => assert.fail('不能创建来源表与映射不匹配的任务'),
+      ElMessage: x => notices.push(x), console: { error() {} },
+    };
+    const save = pageHandler('BloggerInfoFetch', 'saveTask', bindings)();
+    await new Promise(setImmediate);
+    bindings.mainOutputTableId.value = 'B'; bindings.taskOutputTableId.value = 'B';
+    finish({ snapshot: { resolved_target_table_id: 'B' } });
+    await save;
+    assert.match(notices[0].message, /来源表已变化/);
+    assert.equal(bindings.taskDialogLoading.value, false);
   });
 }

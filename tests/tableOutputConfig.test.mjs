@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createTableConfigSaver } from '../src/utils/tableOutputConfig.mjs';
+import { createTableConfigSaver, parseTableConfigList } from '../src/utils/tableOutputConfig.mjs';
 
 const deferred = () => {
   let resolve, reject;
@@ -46,4 +46,14 @@ test('不同表独立提交，失败不会取消另一表或阻塞同表后续�
   await failed;
   await next;
   assert.deepEqual(calls, ['A', 'B', 'A']);
+});
+
+test('表配置列表支持服务端 list 和旧数组、items，缺失或非数组不能表示空配置', () => {
+  const configs = [{ target_table_id: 'B' }];
+  for (const list of [configs, []]) {
+    for (const data of [list, { list }, { items: list }]) assert.deepEqual(parseTableConfigList(data), list);
+  }
+  for (const data of [undefined, {}, { list: 'invalid' }]) {
+    assert.throws(() => parseTableConfigList(data), /表格配置返回格式不正确/);
+  }
 });
