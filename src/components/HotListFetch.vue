@@ -1,8 +1,12 @@
 <script setup>
-import { createTableConfigSaver } from '@/utils/tableOutputConfig.mjs';
+import { nextTableName } from '../utils/tableNames.mjs';
+import { resolveWritableField } from "../utils/tableFields.js";
+import TaskFeedback from './TaskFeedback.vue';
+import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
+import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { computed, ref, onMounted, watch } from "vue";
-import { ElNotification } from "element-plus";
+import { ElMessage } from "element-plus";
 import request from '@/utils/request'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
@@ -23,6 +27,9 @@ const FIELD_TYPE_NAME = {
 };
 
 const getAllowedFieldTypes = (config) => {
+  if (config.type === FieldType.Number) {
+    return [FieldType.Number, FieldType.Text];
+  }
   if (config.key === 'social_type') {
     return [FieldType.Text, FieldType.SingleSelect];
   }
@@ -58,9 +65,8 @@ const platformOptions = ref([]);
 const table_options = ref([]);
 const loading = ref(false);
 const isSubmitting = ref(false);
-const toastVisible = ref(false);
-const toastText = ref('');
-const toastLoading = ref(false);
+const taskFeedback = useTaskFeedback();
+const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const FIELD_SELECTION_STORAGE_KEY = 'hot_list_selected_fields_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
@@ -68,6 +74,7 @@ const mappingExpanded = ref(false);
 const mappingDraft = ref([]);
 const targetFieldOptions = ref([]);
 const tableOutputConfigs = ref({});
+const tableConfigSaves = new Map();
 const tableConfigLoading = ref(false);
 const tableConfigError = ref('');
 const tableOutputConfigsLoaded = ref(false);
@@ -124,18 +131,14 @@ const getMappingTargetFields = (index) => {
   }));
 };
 
-const showToast = (text, isLoading = true) => {
-  toastText.value = text;
-  toastLoading.value = isLoading;
-  toastVisible.value = true;
+const showToast = (text, isLoading = true, options = {}) => {
+  if (isLoading) return options.begin ? taskFeedback.begin(text, options) : taskFeedback.progress(text, options);
+  taskFeedback.finish(text, options);
 };
+const hideToast = () => taskFeedback.hide();
 
-const hideToast = () => {
-  toastVisible.value = false;
-};
-
-const showErrorMsg = (message) => {
-  ElNotification({ message, type: "error", duration: 0 });
+const showErrorMsg = (message, duration = 3000) => {
+  ElMessage({ message, type: "error", plain: true, duration });
 };
 
 const getDefaultSelectedFieldKeys = () => FIELD_MAPPING.map(field => field.key);
@@ -196,12 +199,11 @@ const loadTableOutputConfigs = async () => {
   if (tableConfigsRequest) return tableConfigsRequest;
   tableConfigsRequest = (async () => {
     try {
-      if (!props.api_key) throw new Error('请先设置API Key');
+      if (!props.api_key) throw new Error('请先设置 API Key');
       const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
       if (response.data?.sta !== 0) throw new Error(response.data?.msg || '读取表格配置失败');
       const data = response.data?.data;
-      const list = Array.isArray(data) ? data : (data?.list || data?.items);
-      if (!Array.isArray(list)) throw new Error('表格配置返回格式不正确');
+      const list = parseTableConfigList(data);
       tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
       tableOutputConfigsLoaded.value = true;
       return true;
@@ -215,6 +217,7 @@ const loadTableOutputConfigs = async () => {
 };
 const applyTableOutputConfig = async (tableId) => {
   const readId = ++tableConfigReadId;
+  const pendingConfig = tableConfigSaves.get(tableId)?.config;
   mainOutputTableId.value = '';
   tableConfigError.value = '';
   tableConfigLoading.value = !!tableId;
@@ -227,7 +230,7 @@ const applyTableOutputConfig = async (tableId) => {
     if (readId !== tableConfigReadId) return;
     if (!(await loadTargetFieldOptions(tableId))) throw new Error('无法读取目标表字段，请重试');
     if (readId !== tableConfigReadId) return;
-    const config = tableOutputConfigs.value[tableId];
+    const config = tableConfigSaves.get(tableId)?.config || pendingConfig || tableOutputConfigs.value[tableId];
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
     mainOutputTableId.value = tableId;
   } catch (error) {
@@ -250,10 +253,14 @@ const saveTableOutputConfig = async () => {
   try {
     const fields = targetFieldOptions.value;
     const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({ ...item, source_name: FIELD_MAPPING.find(field => field.key === item.source_key)?.name || '', target_field_name: fields.find(field => field.id === item.target_field_id)?.name || '' }));
-    await persistTableOutputConfig({ targetTableId: tableId, fieldMappings });
+    const saving = persistTableOutputConfig({ targetTableId: tableId, fieldMappings });
+    tableConfigSaves.set(tableId, { saving, config: { write_mode: 'append', field_mappings: fieldMappings } });
+    try { await saving; } finally {
+      if (tableConfigSaves.get(tableId)?.saving === saving) tableConfigSaves.delete(tableId);
+    }
   } catch (error) {
     console.error('保存表格配置失败:', error);
-    showErrorMsg('保存表格配置失败，请重试');
+    showErrorMsg(error.message || '保存表格配置失败，请重试', 5000);
   }
 };
 const resolveFieldId = (config, fieldMetaMap, isExistingTable) => {
@@ -265,23 +272,8 @@ const resolveFieldId = (config, fieldMetaMap, isExistingTable) => {
 
 const createSequentialTable = async (baseTableName) => {
   const existingTables = await bitable.base.getTableMetaList();
-  const tableNames = existingTables.map(table => table.name);
-  const existsBaseTable = tableNames.includes(baseTableName);
-  const existsSequentialTable = tableNames.some(name => name.startsWith(`${baseTableName}`) && /\d+$/.test(name.slice(baseTableName.length)));
-  if (!existsBaseTable && !existsSequentialTable) {
-    return await bitable.base.addTable({ name: baseTableName });
-  }
-
-  const reg = new RegExp(`^${baseTableName}(\\d+)$`);
-  let maxIndex = 0;
-  tableNames.forEach(name => {
-    const match = name.match(reg);
-    if (match) {
-      const index = parseInt(match[1], 10);
-      if (index > maxIndex) maxIndex = index;
-    }
-  });
-  return await bitable.base.addTable({ name: `${baseTableName}${maxIndex + 1}` });
+  const name = nextTableName(baseTableName, existingTables.map(table => table.name));
+  return await bitable.base.addTable({ name });
 };
 
 const setupTableFields = async (tableId, isNewTable = false) => {
@@ -337,25 +329,27 @@ const setupTableFields = async (tableId, isNewTable = false) => {
     try {
       await table.addField({ type: config.type, name: config.name });
     } catch (error) {
-      ElNotification({ message: `添加字段 "${config.name}" 失败`, type: 'error', duration: 0 });
       throw error;
     }
   }
 
   if (!isNewTable && missingFields.length > 0) {
-    ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+    showToast(`已自动添加 ${missingFields.length} 个字段，正在准备写入…`);
   }
 };
 
-const validateTableFields = async (tableId) => {
+const validateTableFields = async (tableId, options = {}) => {
   try {
+    if (mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
     if (getActiveFieldMapping().length === 0) {
+      if (options.throwOnError) throw new Error("请至少选择一个需要更新的字段");
       showErrorMsg("请至少选择一个需要更新的字段");
       return false;
     }
     await setupTableFields(tableId);
     return true;
   } catch (error) {
+    if (options.throwOnError) throw error;
     console.error("验证表格字段时出错:", error);
     showErrorMsg(error.message || "验证表格字段失败，请稍后重试");
     return false;
@@ -379,7 +373,7 @@ const loadPlatformOptions = async () => {
     console.error("获取平台配置失败:", error);
     platformOptions.value = [];
     formData.value.platform = "";
-    showErrorMsg("获取平台配置失败，请稍后重试");
+    showErrorMsg(error.message || "获取平台配置失败，请稍后重试", 5000);
   }
 };
 
@@ -394,7 +388,7 @@ const loadTableOptions = async () => {
     );
   } catch (error) {
     console.error("获取表格列表失败:", error);
-    showErrorMsg("获取表格列表失败，请稍后重试");
+    showErrorMsg(error.message || "获取表格列表失败，请稍后重试", 5000);
   }
 };
 
@@ -415,6 +409,10 @@ watch(() => formData.value.table_id, (id) => {
 watch(mappingDraft, saveTableOutputConfig, { deep: true, flush: 'sync' });
 
 const normalizeValue = (value, config, fieldType) => {
+  if ((fieldType === FieldType.Number || fieldType === FieldType.DateTime) && (value == null || value === '')) return null;
+  if (config.type === FieldType.Number && fieldType === FieldType.Text) {
+    return String(value ?? '');
+  }
   if (config?.key === 'social_type' && fieldType === FieldType.SingleSelect) {
     return value ? value : null;
   }
@@ -457,8 +455,11 @@ const writeDataToTable = async (table, list, isExistingTable = false) => {
   const records = [];
   for (const item of list) {
     const record = [];
-    for (const { field, config } of fieldList) {
-      const fieldType = await field.getType();
+    for (const { field: sourceField, config } of fieldList) {
+      const { field, fieldType } = await resolveWritableField(table, sourceField);
+      if (!isFieldTypeCompatible(fieldType, config)) {
+        throw new Error(`字段类型不匹配:字段"${config.name}"，仅支持${getExpectedFieldTypeName(config)}`);
+      }
       record.push(await field.createCell(normalizeValue(item[config.key], config, fieldType)));
     }
     records.push(record);
@@ -469,7 +470,7 @@ const writeDataToTable = async (table, list, isExistingTable = false) => {
 
 const submit = async (targetTableId = "") => {
   if (!props.api_key) {
-    showErrorMsg("请输入API key");
+    showErrorMsg("请输入 API Key");
     return;
   }
   if (!formData.value.platform) {
@@ -500,7 +501,8 @@ const submit = async (targetTableId = "") => {
 
     const list = extractList(res.data);
     if (!list.length) {
-      throw new Error("未获取到热榜数据");
+      showToast("未获取到热榜数据", false, { empty: true });
+      return;
     }
 
     let currentTableId = targetTableId;
@@ -516,20 +518,20 @@ const submit = async (targetTableId = "") => {
     await writeDataToTable(table, list, Boolean(targetTableId));
 
     showToast(`处理完成：成功 ${list.length} 条，失败 0 条`, false);
-    setTimeout(() => {
-      hideToast();
-    }, 3000);
+
   } catch (error) {
     console.error("提交热榜获取失败:", error);
-    hideToast();
-    showErrorMsg(error?.message || "提交失败，请稍后重试");
+    taskFeedback.fail(error);
   } finally {
     loading.value = false;
   }
 };
 
 const commit = async () => {
-  if (loading.value || isSubmitting.value) return;
+  if (loading.value || isSubmitting.value || noticeRequiresReopen.value) return;
+  if (!props.api_key) return showErrorMsg("请输入 API Key");
+  if (!formData.value.platform) return showErrorMsg("请选择平台");
+  if (!getActiveFieldMapping().length) return showErrorMsg("请至少选择一个需要更新的字段");
   isSubmitting.value = true;
   try {
     if (formData.value.radio === 2) {
@@ -542,10 +544,14 @@ const commit = async () => {
         showErrorMsg(tableConfigError.value || '请等待表格配置加载完成');
         return;
       }
-      if (await validateTableFields(tableId)) await submit(tableId);
+      showToast("正在检查目标表字段…", true, { begin: true });
+      if (await validateTableFields(tableId, { throwOnError: true })) await submit(tableId);
       return;
     }
+    showToast("正在准备获取热榜…", true, { begin: true });
     await submit("");
+  } catch (error) {
+    taskFeedback.fail(error);
   } finally {
     isSubmitting.value = false;
   }
@@ -645,25 +651,11 @@ watch(selectedFieldKeys, (keys) => {
         </el-form>
       </div>
 
-      <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="!tableConfigReady" @click="commit">立即执行</el-button>
+      <p v-if="taskNotice" class="sub-hint" role="status">{{ taskNotice }}</p>
+      <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="!tableConfigReady || loading || isSubmitting || noticeRequiresReopen" @click="commit">{{ loading ? '执行中…' : isSubmitting ? '准备中…' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
     </div>
 
-    <div class="toast-wrap" :class="{ show: toastVisible }">
-      <div class="toast" :class="{ 'toast-loading': toastLoading, 'toast-success': !toastLoading }">
-        <div class="toast-icon" v-if="toastLoading">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <path d="M12 2a10 10 0 0 1 10 10"></path>
-          </svg>
-        </div>
-        <div class="toast-icon" v-else>
-          <svg viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="10" fill="#00B42A"></circle>
-            <path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
-          </svg>
-        </div>
-        <span>{{ toastText }}</span>
-      </div>
-    </div>
+    <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>
 
@@ -837,63 +829,8 @@ watch(selectedFieldKeys, (keys) => {
   color: #F53F3F;
   margin-right: 4px;
 }
-.commit-btn {
-  width: 100%;
-  margin-top: 8px;
-  height: 40px;
-  font-size: 15px;
-  font-weight: 600;
-}
-.toast-wrap {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 500;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.3s ease, transform 0.3s ease;
-}
-.toast-wrap.show {
-  opacity: 1;
-  transform: translate(-50%, -50%) scale(1);
-}
-.toast {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 18px;
-  background: #FFFFFF;
-  border: 1px solid #E5E6EB;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  font-size: 14px;
-  font-weight: 500;
-  color: #1D2129;
-  white-space: nowrap;
-}
-.toast-icon {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.toast .toast-icon svg {
-  width: 100%;
-  height: 100%;
-}
-.toast-loading .toast-icon {
-  animation: spin 0.8s linear infinite;
-  color: #A8071A;
-}
-.toast-success .toast-icon {
-  color: #00B42A;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
+
+.commit-btn { margin-top: 8px; }
 .sub-page { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
 .section-heading { font-size: 16px; font-weight: 500; line-height: 22px; }
 .group-label, .c-label { margin-bottom: 8px; font-size: 14px; font-weight: 500; line-height: 20px; }
@@ -901,4 +838,6 @@ watch(selectedFieldKeys, (keys) => {
 .source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
 .custom-radio-group { gap: 8px; }
 .sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
+.sub-hint { margin:0 0 10px; color:#86909c; font-size:12px; line-height:18px; }
+
 </style>

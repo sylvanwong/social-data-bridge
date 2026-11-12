@@ -276,10 +276,8 @@ loadTableOptions();
   color: #1D2129;
   margin-bottom: 8px;
 }
-.commit-btn {
-  width: 100%;
-  margin-top: 8px;
-}
+
+.commit-btn { margin-top: 8px; }
 .result-card {
   margin-top: 16px;
   padding: 16px;

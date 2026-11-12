@@ -50,6 +50,12 @@ service.interceptors.response.use((response) => {
   }
 
   return response;
+}, (error) => {
+  if ([401, 403].includes(error.response?.status)) {
+    error.code = 'INVALID_API_KEY';
+    error.message = error.response?.data?.msg || error.message || 'API Key 已失效';
+  }
+  return Promise.reject(error);
 })
 
 export default service

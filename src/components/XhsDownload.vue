@@ -1,8 +1,24 @@
 <script setup>
+import { useToolOutputConfig } from '../composables/useToolOutputConfig.js';
+import { parseManualUrls } from '../utils/sourceLinks.mjs';
+import { nextTableName } from '../utils/tableNames.mjs';
+import { readRecordIds, readSourceRows } from '../utils/sourceTableRows.mjs';
+import { resolveWritableField } from "../utils/tableFields.js";
+import { createTableConfigSaver } from '@/utils/tableOutputConfig.mjs';
+import TaskFeedback from "./TaskFeedback.vue";
+import { useTaskFeedback } from "../composables/useTaskFeedback.mjs";
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
-import { computed, ref, onMounted, watch } from "vue";
-import { ElNotification } from "element-plus";
+import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
+import { ElMessage } from "element-plus";
 import request, { buildApiUrl } from '@/utils/request';
+
+let componentUnmounted = false;
+// 异步结果返回后核对实例，卸载后不再发起后续请求或写入。
+const assertMounted = value => {
+  if (componentUnmounted) throw new Error('页面已关闭，任务已停止');
+  return value;
+};
+onUnmounted(() => { componentUnmounted = true; });
 
 const emit = defineEmits(['back']);
 
@@ -96,6 +112,7 @@ const shouldProxyAttachmentDownload = (item, fieldName) => {
 };
 
 const downloadAttachmentAsFile = async (url, finalName, fieldName, item) => withAttachmentDownloadSlot(async () => {
+  assertMounted();
   const xhsCover = fieldName === '封面附件';
   const shouldUseProxy = shouldProxyAttachmentDownload(item, fieldName);
   const requestUrl = shouldUseProxy ? buildProxyDownloadUrl(url, finalName, xhsCover) : url;
@@ -104,15 +121,16 @@ const downloadAttachmentAsFile = async (url, finalName, fieldName, item) => with
   const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
 
   try {
-    const response = await fetch(requestUrl, { headers, signal: controller.signal });
+    const response = assertMounted(await fetch(requestUrl, { headers, signal: controller.signal }));
     if (!response.ok) {
       throw new Error(`下载失败: HTTP ${response.status}`);
     }
 
-    const blob = await response.blob();
+    const blob = assertMounted(await response.blob());
     const normalizedName = xhsCover ? finalName.replace(/\.[a-zA-Z0-9]{2,5}$/, '.jpg') : finalName;
     return new File([blob], normalizedName, { type: blob.type || 'application/octet-stream' });
   } catch (error) {
+    assertMounted();
     if (controller.signal.aborted) {
       throw new Error(`附件下载超时（${ATTACHMENT_DOWNLOAD_TIMEOUT / 1000} 秒）`);
     }
@@ -122,24 +140,26 @@ const downloadAttachmentAsFile = async (url, finalName, fieldName, item) => with
   }
 });
 
-const fieldOptions = ref([]);
 const tableOptions = ref([]);
 const loading = ref(false);
 const stopRequested = ref(false);
-const toastVisible = ref(false);
-const toastText = ref('');
-const toastLoading = ref(false);
+const taskFeedback = useTaskFeedback();
+const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
 const mappingExpanded = ref(false);
-const mappingDraft = ref([]);
-const targetFieldOptions = ref([]);
-const tableOutputConfigs = ref({});
-const tableConfigApplying = ref(false);
-const tableConfigSaving = ref(false);
 const TASK_PLUGIN_TYPE = 'xhs_download';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const {
+  fieldOptions, sourceFieldLoading, sourceFieldLoadError, loadFieldOptions, retrySourceFields, handleLinkFieldDropdownVisibleChange,
+  tableConfigSaveError, tableConfigSaving, trackMappingSave, mappingDraft, targetFieldOptions, mainOutputTableId, targetFieldTableId, tableConfigLoadError,
+  tableOutputConfigs, tableConfigsLoaded, tableConfigsLoading, tableConfigsError, tableConfigApplying,
+  outputConfigReady, loadTargetFieldOptions, retryTargetFields, getBaseId, loadTableOutputConfigs,
+  applyTableOutputConfig, loadCurrentTableOutputConfig, ensureOutputConfigReady, changeTargetType
+} = useToolOutputConfig({
+  props, formData, pluginType: TASK_PLUGIN_TYPE, sourceFieldKey: 'xhsLinkFieldId', loading, stopRequested, taskFeedback,
+  isUnmounted: () => componentUnmounted,
+});
 const mappingStatus = computed(() => { const count = mappingDraft.value.filter(item => item?.source_key && item?.target_field_id).length; return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射'; });
 const getMappingSourceFields = (index) => {
   const usedSourceKeys = new Set(
@@ -179,6 +199,7 @@ const loadSelectedFieldKeys = async () => {
 
   try {
     const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+    if (componentUnmounted) return;
 
     if (!Array.isArray(savedValue)) {
       selectedFieldKeys.value = defaultKeys;
@@ -188,6 +209,7 @@ const loadSelectedFieldKeys = async () => {
     const validKeys = savedValue.filter(key => FIELD_CONFIG.some(field => field.key === key));
     selectedFieldKeys.value = validKeys.length > 0 ? validKeys : defaultKeys;
   } catch (error) {
+    if (componentUnmounted) return;
     console.error('读取字段勾选状态失败:', error);
     selectedFieldKeys.value = defaultKeys;
   }
@@ -200,95 +222,38 @@ const saveSelectedFieldKeys = async (keys) => {
     console.error('保存字段勾选状态失败:', error);
   }
 };
-const loadTargetFieldOptions = async (tableId) => {
-  if (!tableId) { targetFieldOptions.value = []; return; }
-  try { const table = await bitable.base.getTableById(tableId); targetFieldOptions.value = await table.getFieldMetaList(); } catch (error) { targetFieldOptions.value = []; }
-};
-const loadCurrentTargetFieldOptions = async () => {
-  try {
-    const table = await bitable.base.getActiveTable();
-    targetFieldOptions.value = await table.getFieldMetaList();
-  } catch (error) {
-    targetFieldOptions.value = [];
-  }
-};
-const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
-const loadTableOutputConfigs = async () => { if (!props.api_key) return; try { const r = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } }); const d = r.data?.data || r.data; const list = Array.isArray(d) ? d : (d?.list || d?.items || []); tableOutputConfigs.value = Object.fromEntries(list.filter(i => i?.target_table_id).map(i => [i.target_table_id, i])); } catch (e) {} };
-const applyTableOutputConfig = async (id) => { tableConfigApplying.value = true; try { const c = tableOutputConfigs.value[id]; mappingDraft.value = Array.isArray(c?.field_mappings) ? c.field_mappings.map(i => ({ ...i })) : []; await loadTargetFieldOptions(id); } finally { tableConfigApplying.value = false; } };
-const loadCurrentTableOutputConfig = async () => {
-  try {
-    const table = await bitable.base.getActiveTable();
-    await applyTableOutputConfig(table.id);
-  } catch (error) {
-    mappingDraft.value = [];
-    targetFieldOptions.value = [];
-  }
-};
+const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, writeMode, fieldMappings }) => {
+  if (componentUnmounted) return;
+  const table = await bitable.base.getTableById(targetTableId);
+  const payload = {
+    plugin_type: TASK_PLUGIN_TYPE,
+    base_id: await getBaseId(),
+    target_table_id: targetTableId,
+    target_table_name: await table.getName(),
+    write_mode: writeMode,
+    field_mappings: fieldMappings,
+  };
+  if (componentUnmounted) return;
+  const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+  if (componentUnmounted) return;
+  if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存小红书下载表格配置失败');
+  const saved = response.data?.data || response.data || payload;
+  tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: saved };
+});
 const saveTableOutputConfig = async () => {
-  if (!props.api_key || tableConfigApplying.value || tableConfigSaving.value) return;
-
-  let id = formData.value.targetTableId;
-  if (formData.value.targetType === 'current') {
-    id = (await bitable.base.getActiveTable()).id;
-  }
-  if (!id) return;
-
-  tableConfigSaving.value = true;
-  try {
-    const table = await bitable.base.getTableById(id);
-    const payload = {
-      plugin_type: TASK_PLUGIN_TYPE,
-      base_id: await getBaseId(),
-      target_table_id: id,
-      target_table_name: await table.getName(),
-      write_mode: 'append',
-      field_mappings: mappingDraft.value.filter(i => i.source_key && i.target_field_id).map(i => ({
-        ...i,
-        source_name: FIELD_CONFIG.find(f => f.key === i.source_key)?.name || '',
-        target_field_name: targetFieldOptions.value.find(f => f.id === i.target_field_id)?.name || '',
-      })),
-    };
-    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
-    tableOutputConfigs.value = { ...tableOutputConfigs.value, [id]: response.data?.data || response.data || payload };
-  } finally {
-    tableConfigSaving.value = false;
-  }
+  if (componentUnmounted || !props.api_key || !outputConfigReady.value) return;
+  const targetTableId = formData.value.targetType === 'current'
+    ? mainOutputTableId.value : formData.value.targetTableId;
+  if (!targetTableId) return;
+  const fieldMappings = mappingDraft.value.filter(i => i.source_key && i.target_field_id).map(i => ({
+    ...i,
+    source_name: FIELD_CONFIG.find(f => f.key === i.source_key)?.name || '',
+    target_field_name: targetFieldOptions.value.find(f => f.id === i.target_field_id)?.name || '',
+  }));
+  const saving = persistTableOutputConfig({ targetTableId, writeMode: 'append', fieldMappings });
+  await trackMappingSave(targetTableId, saving);
 };
 const resolveFieldId = (config, fieldNameToId) => mappingDraft.value.find(item => item?.source_key === config.key && item?.target_field_id)?.target_field_id || fieldNameToId[config.name];
-
-const getFieldListByType = async ({ silent = false } = {}) => {
-  try {
-    const table = await bitable.base.getActiveTable();
-    const view = await table.getActiveView();
-    // 视图字段元数据按列顺序返回，数据表字段列表不保证与视图顺序一致。
-    const fieldList = await view.getFieldMetaList();
-
-    const urlFieldList = fieldList.filter(item =>
-      item.type === FieldType.Url || item.type === FieldType.Text
-    );
-
-    fieldOptions.value = urlFieldList.map(field => ({
-      id: field.id,
-      name: field.name
-    }));
-  } catch (error) {
-    console.error('获取字段列表失败:', error);
-    fieldOptions.value = [{ id: 'nodata', name: '获取字段列表失败' }];
-    if (!silent) {
-      ElNotification({ message: '当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
-    }
-  }
-};
-
-const loadFieldOptions = async ({ silent = false } = {}) => {
-  await getFieldListByType({ silent });
-};
-
-const handleLinkFieldDropdownVisibleChange = (visible) => {
-  if (visible) {
-    loadFieldOptions({ silent: true });
-  }
-};
 
 const loadTableOptions = async () => {
   try {
@@ -302,81 +267,24 @@ const loadTableOptions = async () => {
   } catch (error) {
     console.error('获取表格列表失败:', error);
     tableOptions.value = [];
-    ElNotification({ message: '获取表格列表失败，请稍后重试', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: '获取表格列表失败，请稍后重试', type: 'error', duration: 5000 });
   }
 };
 
-const getAllVisibleRecordIdList = async (view, limit = Infinity) => {
-  const pageSize = 200;
-  let pageToken = undefined;
-  let allRecordIdList = [];
-  let loopCount = 0;
-  const maxLoops = 100;
-
-  while (loopCount < maxLoops) {
-    loopCount++;
-    const result = await view.getVisibleRecordIdListByPage({
-      pageSize,
-      pageToken
-    });
-
-    let recordIds = [];
-    let hasMore = false;
-
-    if (Array.isArray(result)) {
-      recordIds = result;
-      hasMore = result.length === pageSize;
-    } else if (result && typeof result === 'object') {
-      recordIds = result.recordIds || result.records || result.data || result.list || [];
-      hasMore = result.hasMore || result.hasNext || result.has_next || false;
-      pageToken = result.pageToken || result.nextPageToken || result.next_token;
-    }
-
-    if (recordIds.length > 0) {
-      allRecordIdList = allRecordIdList.concat(recordIds);
-      if (allRecordIdList.length >= limit) {
-        return allRecordIdList.slice(0, limit);
-      }
-    }
-
-    if (!hasMore || recordIds.length === 0) {
-      break;
-    }
-  }
-
-  return allRecordIdList;
-};
-
-const getRecordIdListByScope = async (scope, rowCount) => {
-  const table = await bitable.base.getActiveTable();
-  const view = await table.getActiveView();
-
-  let recordIdList = [];
-  if (scope === 'all') {
-    recordIdList = await getAllVisibleRecordIdList(view);
-  } else if (scope === 'selected') {
-    recordIdList = await view.getSelectedRecordIdList();
-    if (recordIdList.length === 0) {
-      ElNotification({ message: '请先在表格中选择至少一行数据', type: 'warning', duration: 0 });
-      return null;
-    }
-  } else {
-    recordIdList = await getAllVisibleRecordIdList(view, rowCount);
-  }
-  return recordIdList;
-};
+const getRecordIdListByScope = (table, scope, rowCount) =>
+  readRecordIds(table, scope, rowCount, ElMessage, assertMounted);
 
 const validateAndAddFields = async (tableId, activeFieldConfigs) => {
   try {
     const table = tableId
-      ? await bitable.base.getTableById(tableId)
-      : await bitable.base.getActiveTable();
-    const fieldList = await table.getFieldList();
+      ? assertMounted(await bitable.base.getTableById(tableId))
+      : assertMounted(await bitable.base.getActiveTable());
+    const fieldList = assertMounted(await table.getFieldList());
     const fieldMetaMap = new Map();
 
     for (const field of fieldList) {
-      const name = await field.getName();
-      fieldMetaMap.set(name, { id: field.id, type: field.type });
+      const name = assertMounted(await field.getName());
+      fieldMetaMap.set(name, { id: field.id, type: assertMounted(await field.getType()) });
     }
 
     const missingFields = [];
@@ -387,11 +295,13 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
       if (mappedFieldId) {
         const mappedField = fieldList.find(field => field.id === mappedFieldId);
         if (!mappedField) {
-          ElNotification({ message: `映射目标字段不存在: ${config.name}`, type: 'error', duration: 0 });
+          if (loading.value) throw new Error(`映射目标字段不存在: ${config.name}`);
+          ElMessage({ plain: true, message: `映射目标字段不存在: ${config.name}`, type: 'error', duration: 5000 });
           return null;
         }
-        if (!isFieldTypeCompatible(mappedField.type, config)) {
-          typeMismatchFields.push({ name: `${config.name} → ${await mappedField.getName()}`, expected: getAllowedFieldTypes(config).map(type => FIELD_TYPE_NAME[type] || type).join(' / '), actual: mappedField.type });
+        const mappedFieldType = assertMounted(await mappedField.getType());
+        if (!isFieldTypeCompatible(mappedFieldType, config)) {
+          typeMismatchFields.push({ name: `${config.name} → ${assertMounted(await mappedField.getName())}`, expected: getAllowedFieldTypes(config).map(type => FIELD_TYPE_NAME[type] || type).join(' / '), actual: mappedFieldType });
         }
         continue;
       }
@@ -409,16 +319,17 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
 
     if (typeMismatchFields.length > 0) {
       const errorMsg = typeMismatchFields.map(f => `"${f.name}" 类型不匹配，仅支持${f.expected}`).join(', ');
-      ElNotification({ message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 0 });
+      if (loading.value) throw new Error(`字段类型错误: ${errorMsg}`);
+      ElMessage({ plain: true, message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 8000 });
       return null;
     }
 
     for (const fieldConfig of missingFields) {
       try {
-        const addFieldResult = await table.addField({
+        const addFieldResult = assertMounted(await table.addField({
           type: fieldConfig.type,
           name: fieldConfig.name
-        });
+        }));
         const newFieldId = typeof addFieldResult === 'string'
           ? addFieldResult
           : addFieldResult?.fieldId || addFieldResult?.id || addFieldResult?.field_id;
@@ -426,9 +337,9 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
         if (newFieldId) {
           fieldMetaMap.set(fieldConfig.name, { id: newFieldId, type: fieldConfig.type });
         } else {
-          const latestFieldList = await table.getFieldList();
+          const latestFieldList = assertMounted(await table.getFieldList());
           for (const field of latestFieldList) {
-            const name = await field.getName();
+            const name = assertMounted(await field.getName());
             if (name === fieldConfig.name) {
               fieldMetaMap.set(fieldConfig.name, { id: field.id, type: fieldConfig.type });
               break;
@@ -436,7 +347,9 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
           }
         }
       } catch (e) {
-        ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
+        assertMounted();
+        if (loading.value) throw e;
+        ElMessage({ plain: true, message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 5000 });
         return null;
       }
     }
@@ -447,42 +360,27 @@ const validateAndAddFields = async (tableId, activeFieldConfigs) => {
     }
 
     if (missingFields.length > 0) {
-      ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+      if (loading.value) showToast(`已自动添加 ${missingFields.length} 个字段`);
+      else ElMessage({ plain: true, message: `已自动添加 ${missingFields.length} 个字段`, type: 'success', duration: 3000 });
     }
 
     return fieldNameToId;
   } catch (error) {
-    ElNotification({ message: `字段操作失败: ${error.message || error}`, type: 'error', duration: 0});
+    assertMounted();
+    if (loading.value) throw error;
+    ElMessage({ plain: true, message: `字段操作失败: ${error.message || error}`, type: 'error', duration: 5000});
     return null;
   }
 };
 
 const createSequentialTable = async (baseTableName) => {
-  const existingTables = await bitable.base.getTableMetaList();
-  const tableNames = existingTables.map((table) => table.name);
-  const existsBaseTable = tableNames.includes(baseTableName);
-  const existsSequentialTable = tableNames.some((name) => name.startsWith(`${baseTableName}`) && /\d+$/.test(name.slice(baseTableName.length)));
-  if (!existsBaseTable && !existsSequentialTable) {
-    return await bitable.base.addTable({ name: baseTableName });
-  }
-
-  const reg = new RegExp(`^${baseTableName}(\\d+)$`);
-  let maxIndex = 0;
-  tableNames.forEach((name) => {
-    const match = name.match(reg);
-    if (match) {
-      const index = parseInt(match[1], 10);
-      if (index > maxIndex) {
-        maxIndex = index;
-      }
-    }
-  });
-
-  return await bitable.base.addTable({ name: `${baseTableName}${maxIndex + 1}` });
+  const tables = assertMounted(await bitable.base.getTableMetaList());
+  const name = nextTableName(baseTableName, tables.map(table => table.name));
+  return assertMounted(await bitable.base.addTable({ name }));
 };
 
 const createManualTargetTable = async () => {
-  const tableMeta = await createSequentialTable(MANUAL_TABLE_BASE_NAME);
+  const tableMeta = assertMounted(await createSequentialTable(MANUAL_TABLE_BASE_NAME));
   const tableId = tableMeta.tableId || tableMeta.id;
   if (!tableId) {
     throw new Error('创建新表格失败');
@@ -491,8 +389,8 @@ const createManualTargetTable = async () => {
 };
 
 const setupNewTableFields = async (tableId, activeFieldConfigs) => {
-  const table = await bitable.base.getTableById(tableId);
-  const fieldMetaList = await table.getFieldMetaList();
+  const table = assertMounted(await bitable.base.getTableById(tableId));
+  const fieldMetaList = assertMounted(await table.getFieldMetaList());
   const defaultFirstField = fieldMetaList[0];
 
   if (activeFieldConfigs.length === 0) {
@@ -500,15 +398,15 @@ const setupNewTableFields = async (tableId, activeFieldConfigs) => {
   }
 
   if (defaultFirstField && defaultFirstField.name === '文本') {
-    await table.setField(defaultFirstField.id, {
+    assertMounted(await table.setField(defaultFirstField.id, {
       type: activeFieldConfigs[0].type,
       name: activeFieldConfigs[0].name
-    });
+    }));
   }
 
   for (let index = 1; index < activeFieldConfigs.length; index++) {
     const config = activeFieldConfigs[index];
-    await table.addField({ type: config.type, name: config.name });
+    assertMounted(await table.addField({ type: config.type, name: config.name }));
   }
 };
 
@@ -519,72 +417,57 @@ const getFinalFileName = (url, baseName, index, total) => {
   return `${name}${ext}`;
 };
 
-const writeDataToRecord = async (recordId, item, fieldNameToId, activeFieldConfigs) => {
-  try {
-    const table = await bitable.base.getActiveTable();
-    const fields = {};
+const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFieldConfigs) => {
+  const fields = {};
 
-    for (const config of activeFieldConfigs) {
-      const fieldId = resolveFieldId(config, fieldNameToId);
-      if (!fieldId) continue;
+  for (const config of activeFieldConfigs) {
+    const fieldId = resolveFieldId(config, fieldNameToId);
+    if (!fieldId) continue;
 
-      try {
-        const field = await table.getField(fieldId);
-        if (config.type === FieldType.Attachment) {
-          let urls = config.getUrls(item);
-          // 确保 urls 是数组
-          if (typeof urls === 'string') {
-            urls = [urls];
-          }
-          if (!Array.isArray(urls)) {
-            urls = [];
-          }
-          // 过滤掉空值，自动把 HTTP 转 HTTPS 解决混合内容问题
-          urls = urls
-            .filter(url => url && typeof url === 'string')
-            .map(url => url.replace(/^http:\/\//i, 'https://'));
-
-          if (urls.length > 0) {
-            try {
-              // 先尝试直接下载文件方式（适合小文件/图片）
-              const results = await Promise.allSettled(
-                urls.map(async (url, index) => {
-                  const baseName = config.getFileName();
-                  const finalName = getFinalFileName(url, baseName, index, urls.length);
-                  return downloadAttachmentAsFile(url, finalName, config.name, item);
-                })
-              );
-              const files = results
-                .filter(result => result.status === 'fulfilled')
-                .map(result => result.value);
-              if (files.length > 0) {
-                const cell = await field.createCell(files.length === 1 ? files[0] : files);
-                fields[fieldId] = await cell.getValue();
-              }
-            } catch (error) {
-              console.log('附件下载失败，跳过附件写入:', error);
-              // 下载失败不中断整个流程，只跳过附件字段
-            }
-          }
-        } else {
-          const fieldType = await field.getType();
-          const value = config.name === '平台' && fieldType === FieldType.SingleSelect
-            ? (config.getValue(item) || null)
-            : config.getValue(item);
-          const cell = await field.createCell(value);
-          fields[fieldId] = await cell.getValue();
-        }
-      } catch (e) {
-        console.error(`准备字段 ${config.name} 失败:`, e);
+    const sourceField = assertMounted(await table.getField(fieldId));
+    const { field, fieldType } = assertMounted(await resolveWritableField(table, sourceField));
+    if (config.type === FieldType.Attachment) {
+      let urls = config.getUrls(item);
+      // 确保 urls 是数组
+      if (typeof urls === 'string') {
+        urls = [urls];
       }
-    }
+      if (!Array.isArray(urls)) {
+        urls = [];
+      }
+      // 过滤掉空值，自动把 HTTP 转 HTTPS 解决混合内容问题
+      urls = urls
+        .filter(url => url && typeof url === 'string')
+        .map(url => url.replace(/^http:\/\//i, 'https://'));
 
-    if (Object.keys(fields).length > 0) {
-      await table.setRecord(recordId, { fields });
+      if (urls.length > 0) {
+        // 先尝试直接下载文件方式（适合小文件/图片）
+        const results = assertMounted(await Promise.allSettled(
+          urls.map(async (url, index) => {
+            const baseName = config.getFileName();
+            const finalName = getFinalFileName(url, baseName, index, urls.length);
+            return downloadAttachmentAsFile(url, finalName, config.name, item);
+          })
+        ));
+        const files = results
+          .filter(result => result.status === 'fulfilled')
+          .map(result => result.value);
+        if (files.length > 0) {
+          const cell = assertMounted(await field.createCell(files.length === 1 ? files[0] : files));
+          fields[fieldId] = assertMounted(await cell.getValue());
+        }
+      }
+    } else {
+      const value = config.name === '平台' && fieldType === FieldType.SingleSelect
+        ? (config.getValue(item) || null)
+        : config.getValue(item);
+      const cell = assertMounted(await field.createCell(value));
+      fields[fieldId] = assertMounted(await cell.getValue());
     }
-  } catch (error) {
-    console.error('写入记录失败:', error);
-    throw error;
+  }
+
+  if (Object.keys(fields).length > 0) {
+    assertMounted(await table.setRecord(recordId, { fields }));
   }
 };
 
@@ -595,7 +478,8 @@ const writeDataToTargetRecord = async (table, item, activeFieldConfigs, fieldIdB
     const fieldId = resolveFieldId(config, Object.fromEntries(fieldIdByName));
     if (!fieldId) continue;
 
-    const field = await table.getFieldById(fieldId);
+    const sourceField = assertMounted(await table.getFieldById(fieldId));
+    const { field, fieldType } = assertMounted(await resolveWritableField(table, sourceField));
     if (config.type === FieldType.Attachment) {
       let urls = config.getUrls(item);
       if (typeof urls === 'string') {
@@ -610,27 +494,27 @@ const writeDataToTargetRecord = async (table, item, activeFieldConfigs, fieldIdB
 
       if (urls.length > 0) {
         try {
-          const files = await Promise.all(
+          const files = assertMounted(await Promise.all(
             urls.map(async (url, index) => {
               const baseName = config.getFileName();
               const finalName = getFinalFileName(url, baseName, index, urls.length);
               return downloadAttachmentAsFile(url, finalName, config.name, item);
             })
-          );
-          cells.push(await field.createCell(files.length === 1 ? files[0] : files));
+          ));
+          cells.push(assertMounted(await field.createCell(files.length === 1 ? files[0] : files)));
         } catch (error) {
+          assertMounted();
           console.log('附件下载失败，跳过附件写入:', error);
-          cells.push(await field.createCell(null));
+          cells.push(assertMounted(await field.createCell(null)));
         }
       } else {
-        cells.push(await field.createCell(null));
+        cells.push(assertMounted(await field.createCell(null)));
       }
     } else {
-      const fieldType = await field.getType();
       const value = config.name === '平台' && fieldType === FieldType.SingleSelect
         ? (config.getValue(item) || null)
         : config.getValue(item);
-      cells.push(await field.createCell(value));
+      cells.push(assertMounted(await field.createCell(value)));
     }
   }
 
@@ -638,25 +522,25 @@ const writeDataToTargetRecord = async (table, item, activeFieldConfigs, fieldIdB
 };
 
 const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
-  const table = await bitable.base.getTableById(tableId);
-  const fieldList = await table.getFieldList();
+  const table = assertMounted(await bitable.base.getTableById(tableId));
+  const fieldList = assertMounted(await table.getFieldList());
   const fieldIdByName = new Map();
 
   for (const field of fieldList) {
-    const name = await field.getName();
+    const name = assertMounted(await field.getName());
     fieldIdByName.set(name, field.id);
   }
 
   const records = [];
   for (const item of list) {
-    const cells = await writeDataToTargetRecord(table, item, activeFieldConfigs, fieldIdByName);
+    const cells = assertMounted(await writeDataToTargetRecord(table, item, activeFieldConfigs, fieldIdByName));
     if (cells.length > 0) {
       records.push(cells);
     }
   }
 
   if (records.length > 0) {
-    await table.addRecords(records);
+    assertMounted(await table.addRecords(records));
   }
 };
 
@@ -681,50 +565,23 @@ const extractXhsLink = (value) => {
   return null;
 };
 
-const getCellValuesByFieldId = async (recordIdList, fieldId) => {
-  const table = await bitable.base.getActiveTable();
-  const field = await table.getFieldById(fieldId);
-
-  const rows = await Promise.all(
-    recordIdList.map(async (recordId) => {
-      try {
-        const cell = await field.getCell(recordId);
-        const value = await cell.getValue();
-        const url = extractXhsLink(value);
-        return url ? { recordId, url } : null;
-      } catch (e) {
-        return null;
-      }
-    })
-  );
-
-  return rows.filter(item => item && typeof item.url === 'string' && item.url.trim());
-};
-
-const parseManualUrls = (text) => {
-  if (!text || typeof text !== 'string') {
-    return [];
-  }
-
-  return [...new Set(
-    text
-      .split(/[\n,，]+/)
-      .map(item => item.trim())
-      .filter(Boolean)
-  )];
-};
+const getCellValuesByFieldId = (table, recordIds, fieldId) =>
+  readSourceRows(table, recordIds, fieldId, (recordId, value) => {
+    const url = extractXhsLink(value);
+    return typeof url === 'string' && url.trim() ? { recordId, url } : null;
+  }, assertMounted);
 
 const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
   if (targetType === 'new') {
-    const tableId = await createManualTargetTable();
-    await setupNewTableFields(tableId, activeFieldConfigs);
-    await bitable.ui.switchToTable(tableId);
+    const tableId = assertMounted(await createManualTargetTable());
+    assertMounted(await setupNewTableFields(tableId, activeFieldConfigs));
+    assertMounted(await bitable.ui.switchToTable(tableId));
     return tableId;
   }
 
   if (targetType === 'existing') {
     const tableId = formData.value.targetTableId;
-    const fieldNameToId = await validateAndAddFields(tableId, activeFieldConfigs);
+    const fieldNameToId = assertMounted(await validateAndAddFields(tableId, activeFieldConfigs));
     if (!fieldNameToId) {
       return null;
     }
@@ -751,33 +608,34 @@ const fetchXhsByRows = async (rowList, { onSuccess = null } = {}) => {
     try {
       showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
 
-      const response = await request({
+      const response = assertMounted(await request({
         url: '/social/api/v1/feishu/social_info',
         method: 'post',
         timeout: 60000,
         headers: { 'authorization': `Bearer ${props.api_key}` },
         data: { url }
-      });
+      }));
 
       const res = response.data;
 
       if (res.sta === 0 && res.data) {
         const item = { ...res.data, __recordId: recordId };
         if (onSuccess) {
-          await onSuccess(item, i);
+          assertMounted(await onSuccess(item, i));
         } else {
           successList.push(item);
         }
         successCount++;
       } else {
-        ElNotification({ message: res.msg || '获取小红书内容失败', type: 'error', duration: 0 });
+        taskFeedback.recordFailure(res.msg || '获取小红书内容失败', { index: i + 1 });
         failCount++;
       }
     } catch (error) {
+      assertMounted();
       if (error?.code === 'INVALID_API_KEY') {
         throw error;
       }
-      ElNotification({ message: error.message || '请求失败', type: 'error', duration: 0 });
+      taskFeedback.recordFailure(error, { index: i + 1 });
       failCount++;
     }
   }
@@ -795,70 +653,74 @@ const requestStop = () => {
 };
 
 const handleTableModeSubmit = async () => {
+  if (loading.value || !fieldSelectionReady.value || sourceFieldLoading.value) return;
   if (!props.api_key) {
-    ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请先设置 API Key', type: 'warning', duration: 3000 });
     return;
   }
 
   if (!formData.value.xhsLinkFieldId) {
-    ElNotification({ message: '请选择小红书链接字段', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: sourceFieldLoadError.value || '请选择小红书链接字段', type: sourceFieldLoadError.value ? 'error' : 'warning', duration: sourceFieldLoadError.value ? 5000 : 3000 });
     return;
   }
 
   if (formData.value.xhsLinkFieldId === 'nodata') {
-    ElNotification({ message: '未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: '未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 3000 });
     return;
   }
 
   const activeFieldConfigs = getActiveFieldConfigs();
   if (activeFieldConfigs.length === 0) {
-    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请至少选择一个需要更新的字段', type: 'warning', duration: 3000 });
     return;
   }
 
   stopRequested.value = false;
   loading.value = true;
+  showToast("正在启动小红书下载...", true, { begin: true });
+  await nextTick();
 
   try {
-    const recordIdList = await getRecordIdListByScope(
+    assertMounted();
+    const sourceTable = assertMounted(await bitable.base.getActiveTable());
+    if (!assertMounted(await ensureOutputConfigReady(sourceTable))) return;
+    const recordIdList = assertMounted(await getRecordIdListByScope(
+      sourceTable,
       formData.value.scope,
       formData.value.rowCount
-    );
+    ));
 
     if (!recordIdList) {
+      finishToast('任务未开始', { type: 'info' });
       loading.value = false;
       return;
     }
 
-    const activeTable = await bitable.base.getActiveTable();
-    const fieldNameToId = await validateAndAddFields(activeTable.id, activeFieldConfigs);
+    const fieldNameToId = assertMounted(await validateAndAddFields(sourceTable.id, activeFieldConfigs));
 
     if (!fieldNameToId) {
-      loading.value = false;
+
+      if (taskFeedback.toastLoading.value) finishToast('目标字段校验未通过，任务未开始', { type: 'info' });
+        loading.value = false;
       return;
     }
 
-    const rowList = await getCellValuesByFieldId(recordIdList, formData.value.xhsLinkFieldId);
-    const { successCount, failCount, stopped } = await fetchXhsByRows(rowList, {
-      onSuccess: (item) => writeDataToRecord(item.__recordId, item, fieldNameToId, activeFieldConfigs),
-    });
+    const rowList = assertMounted(await getCellValuesByFieldId(sourceTable, recordIdList, formData.value.xhsLinkFieldId));
+    const { successCount, failCount, stopped } = assertMounted(await fetchXhsByRows(rowList, {
+      onSuccess: (item) => writeDataToRecord(sourceTable, item.__recordId, item, fieldNameToId, activeFieldConfigs),
+    }));
 
-    showToast(
+    finishToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
         : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
-      false
+      { stopped, successCount, failCount, empty: successCount === 0 && failCount === 0 }
     );
 
-    setTimeout(() => {
-      hideToast();
-    }, 3000);
-
   } catch (error) {
+    if (componentUnmounted) return;
     const errorMessage = error.message || '获取数据失败';
-    showToast(`处理失败：${errorMessage}`, false);
-    setTimeout(() => hideToast(), 3000);
-    ElNotification({ message: errorMessage, type: 'error', duration: 0 });
+    taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
     stopRequested.value = false;
@@ -866,69 +728,73 @@ const handleTableModeSubmit = async () => {
 };
 
 const handleManualModeSubmit = async () => {
+  if (loading.value || !fieldSelectionReady.value) return;
   if (!props.api_key) {
-    ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请先设置 API Key', type: 'warning', duration: 3000 });
     return;
   }
 
   if (!formData.value.manualUrls || !formData.value.manualUrls.trim()) {
-    ElNotification({ message: '请输入小红书链接', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请输入小红书链接', type: 'warning', duration: 3000 });
     return;
   }
 
   if (formData.value.targetType === 'existing' && !formData.value.targetTableId) {
-    ElNotification({ message: '请选择现有表格', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请选择现有表格', type: 'warning', duration: 3000 });
     return;
   }
 
   const urls = parseManualUrls(formData.value.manualUrls);
   if (urls.length === 0) {
-    ElNotification({ message: '请至少输入一个有效的小红书链接', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请至少输入一个有效的小红书链接', type: 'warning', duration: 3000 });
     return;
   }
 
   const activeFieldConfigs = getActiveFieldConfigs();
   if (activeFieldConfigs.length === 0) {
-    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请至少选择一个需要更新的字段', type: 'warning', duration: 3000 });
     return;
   }
 
   stopRequested.value = false;
   loading.value = true;
+  showToast("正在启动小红书下载...", true, { begin: true });
+  await nextTick();
 
   try {
+    if (!assertMounted(await ensureOutputConfigReady())) return;
     const rowList = urls.map(url => ({ url }));
-    const { successList, successCount, failCount, stopped } = await fetchXhsByRows(rowList);
+    const { successList, successCount, failCount, stopped } = assertMounted(await fetchXhsByRows(rowList));
     if (successList.length === 0) {
-      if (stopped) {
-        showToast('任务已停止：成功 0 条，失败 0 条', false);
-        setTimeout(() => hideToast(), 3000);
-        return;
-      }
-      throw new Error('未获取到有效的小红书内容');
-    }
-
-    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs);
-    if (!targetTableId) {
+      finishToast(
+        stopped
+          ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
+          : failCount > 0
+            ? `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`
+            : '未获取到有效的小红书内容',
+        { stopped, successCount, failCount, empty: failCount === 0 }
+      );
       return;
     }
 
-    await appendRecordsToTable(targetTableId, successList, activeFieldConfigs);
+    const targetTableId = assertMounted(await resolveTargetTableId(formData.value.targetType, activeFieldConfigs));
+    if (!targetTableId) {
+      if (taskFeedback.toastLoading.value) finishToast('目标表字段校验未通过，任务未开始', { type: 'info' });
+      return;
+    }
 
-    showToast(
+    assertMounted(await appendRecordsToTable(targetTableId, successList, activeFieldConfigs));
+
+    finishToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
         : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
-      false
+      { stopped, successCount, failCount, empty: successCount === 0 && failCount === 0 }
     );
-    setTimeout(() => {
-      hideToast();
-    }, 3000);
   } catch (error) {
+    if (componentUnmounted) return;
     const errorMessage = error.message || '获取数据失败';
-    showToast(`处理失败：${errorMessage}`, false);
-    setTimeout(() => hideToast(), 3000);
-    ElNotification({ message: errorMessage, type: 'error', duration: 0 });
+    taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
     stopRequested.value = false;
@@ -936,7 +802,7 @@ const handleManualModeSubmit = async () => {
 };
 
 const handleTaskAction = () => {
-  if (stopRequested.value) return;
+  if (stopRequested.value || noticeRequiresReopen.value) return;
   if (loading.value) {
     requestStop();
     return;
@@ -945,6 +811,7 @@ const handleTaskAction = () => {
 };
 
 const handleSubmit = async () => {
+  if (loading.value) return;
   stopRequested.value = false;
   if (formData.value.mode === 'manual') {
     await handleManualModeSubmit();
@@ -960,28 +827,32 @@ const stepNumber = (delta) => {
   formData.value.rowCount = val;
 };
 
-const showToast = (text, isLoading = true) => {
-  toastText.value = text;
-  toastLoading.value = isLoading;
-  toastVisible.value = true;
+const showToast = (text, isLoading = true, options = {}) => {
+  if (isLoading) {
+    const progressOptions = { stopping: stopRequested.value, ...options };
+    if (options.begin) taskFeedback.begin(text, progressOptions);
+    else taskFeedback.progress(text, progressOptions);
+  } else {
+    taskFeedback.finish(text, options);
+  }
 };
 
-const hideToast = () => {
-  toastVisible.value = false;
+const finishToast = (text, options = {}) => {
+  showToast(text, false, options);
 };
+
+const hideToast = () => { taskFeedback.hide(); };
 
 onMounted(async () => {
+  loadSelectedFieldKeys().finally(() => {
+    if (!componentUnmounted) fieldSelectionReady.value = true;
+  });
+  if (formData.value.mode === 'table') loadFieldOptions();
   await loadTableOutputConfigs();
-  if (formData.value.mode === 'table') {
-    loadFieldOptions({ silent: true });
+  if (componentUnmounted) return;
+  if (formData.value.mode === 'table' && !targetFieldTableId.value) {
     loadCurrentTableOutputConfig();
   }
-
-  Promise.all([
-    loadSelectedFieldKeys()
-  ]).finally(() => {
-    fieldSelectionReady.value = true;
-  });
 });
 
 watch(selectedFieldKeys, (keys) => {
@@ -991,19 +862,19 @@ watch(selectedFieldKeys, (keys) => {
 
   saveSelectedFieldKeys(keys);
 }, { deep: true });
-watch(() => formData.value.targetTableId, (id) => loadTargetFieldOptions(id));
-watch(() => formData.value.targetTableId, async id => { if (id && tableOutputConfigs.value[id]) await applyTableOutputConfig(id); else mappingDraft.value = []; });
-watch(mappingDraft, saveTableOutputConfig, { deep: true });
-watch(() => formData.value.targetType, async (type) => {
-  if (type === 'current') await loadCurrentTargetFieldOptions();
+watch(() => formData.value.targetTableId, async id => {
+  if (formData.value.targetType !== 'existing') return;
+  await applyTableOutputConfig(id);
 });
+watch(mappingDraft, saveTableOutputConfig, { deep: true });
+watch(() => formData.value.targetType, changeTargetType);
 
 watch(
   () => formData.value.mode,
   (mode) => {
     if (mode === 'table') {
       formData.value.targetType = 'current';
-      loadFieldOptions({ silent: false });
+      loadFieldOptions();
       loadCurrentTableOutputConfig();
     }
 
@@ -1050,11 +921,11 @@ watch(
     <div class="form-card">
       <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
       <div class="group-label">小红书链接来源</div>
-      <el-radio-group v-model="formData.mode" class="source-mode-radio radio-block">
+      <el-radio-group v-model="formData.mode" class="source-mode-radio radio-block" :disabled="loading">
         <el-radio value="table">从表格选取</el-radio>
         <el-radio value="manual">手动输入</el-radio>
       </el-radio-group>
-      <el-form ref="form" class="form" :model="formData" label-position="top">
+      <el-form ref="form" class="form" :model="formData" label-position="top" :disabled="loading" :inert="(loading) ? '' : null" :aria-busy="loading">
         <template v-if="formData.mode === 'table'">
           <el-form-item label="">
             <div slot="label" class="c-label">
@@ -1075,6 +946,11 @@ watch(
             >
               <el-option v-for="field in fieldOptions" :key="field.id" :label="field.name" :value="field.id" />
             </el-select>
+            <div v-if="sourceFieldLoading" class="sub-hint" role="status">正在读取来源字段…</div>
+            <div v-else-if="sourceFieldLoadError" class="table-config-feedback sub-hint" role="status" aria-live="polite">
+              <span>{{ sourceFieldLoadError }}</span>
+              <el-button link type="primary" @click="retrySourceFields">重试</el-button>
+            </div>
           </el-form-item>
 
           <el-form-item label="" style="margin-top: 12px">
@@ -1159,7 +1035,7 @@ watch(
         </template>
         <el-form-item label="" style="margin-top: 12px">
           <div class="c-label">输出字段</div>
-          <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+          <el-checkbox-group v-model="selectedFieldKeys" :disabled="!fieldSelectionReady" class="field-checkbox-group">
             <el-checkbox
               v-for="field in FIELD_CONFIG"
               :key="field.key"
@@ -1169,10 +1045,26 @@ watch(
               {{ field.name }}
             </el-checkbox>
           </el-checkbox-group>
+          <div v-if="!fieldSelectionReady" class="sub-hint" role="status">正在读取输出字段设置…</div>
         </el-form-item>
         <div v-if="formData.mode === 'table' || formData.targetType === 'existing'" class="mapping-accordion">
           <button type="button" class="mapping-accordion-trigger" :aria-expanded="mappingExpanded" @click="mappingExpanded = !mappingExpanded"><span class="mapping-accordion-label">字段映射 <span class="mapping-optional">（可选）</span><span class="mapping-status">{{ mappingStatus }}</span></span><span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span></button>
-          <div v-show="mappingExpanded" class="mapping-accordion-panel"><p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
+          <div v-if="tableConfigsLoading" class="sub-hint" role="status">正在读取表格输出配置…</div>
+          <div v-else-if="tableConfigsError" class="table-config-feedback sub-hint" role="status" aria-live="polite">
+            <span>{{ tableConfigsError }}</span>
+            <el-button link type="primary" @click="loadTableOutputConfigs">重试</el-button>
+          </div>
+          <div v-else-if="tableConfigApplying" class="sub-hint" role="status">正在读取目标表字段…</div>
+          <div v-else-if="tableConfigLoadError" class="table-config-feedback sub-hint" role="status" aria-live="polite">
+            <span>{{ tableConfigLoadError }}</span>
+            <el-button link type="primary" @click="retryTargetFields">重试</el-button>
+          </div>
+          <div v-if="tableConfigSaving" class="table-config-feedback sub-hint" role="status">正在保存字段映射…</div>
+          <div v-else-if="tableConfigSaveError" class="table-config-feedback sub-hint" role="status" aria-live="polite">
+            <span>字段映射未保存：{{ tableConfigSaveError }}</span>
+            <el-button link type="primary" :disabled="!outputConfigReady" @click="saveTableOutputConfig">重试保存</el-button>
+          </div>
+          <div v-show="mappingExpanded" class="mapping-accordion-panel" :inert="!outputConfigReady ? '' : null" :aria-disabled="!outputConfigReady"><p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
             <div v-for="(mapping,index) in mappingDraft" :key="index" class="mapping-row"><el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small"><el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" /></el-select><span class="mapping-arrow">→</span><el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small"><el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" /></el-select><el-button link type="danger" @click="mappingDraft.splice(index,1)">删除</el-button></div>
             <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({source_key:'',target_field_id:''})">+ 添加字段映射</el-button></div>
           </div>
@@ -1184,33 +1076,27 @@ watch(
           class="commit-btn"
           :class="{ 'is-running': loading }"
           :loading="stopRequested"
-          :disabled="stopRequested"
+          :disabled="stopRequested || noticeRequiresReopen || (!loading && (!fieldSelectionReady || (formData.mode === 'table' && sourceFieldLoading)))"
           @click="handleTaskAction"
-        >{{ stopRequested ? '正在停止…' : loading ? '停止任务' : '立即执行' }}</el-button>
+        >{{ stopRequested ? '正在停止…' : loading ? '停止任务' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
+      <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
       </div>
     </div>
 
     <!-- Toast 提示 -->
-    <div class="toast-wrap" :class="{ show: toastVisible }">
-      <div class="toast" :class="{ 'toast-loading': toastLoading, 'toast-success': !toastLoading }">
-        <div class="toast-icon" v-if="toastLoading">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <path d="M12 2a10 10 0 0 1 10 10"></path>
-          </svg>
-        </div>
-        <div class="toast-icon" v-else>
-          <svg viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="10" fill="#00B42A"></circle>
-            <path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
-          </svg>
-        </div>
-        <span>{{ toastText }}</span>
-      </div>
-    </div>
+    <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>
 
 <style scoped>
+.sub-hint {
+  margin: 8px 0 0;
+  font-size: var(--app-font-size-small);
+  line-height: 20px;
+  color: #86909C;
+  overflow-wrap: anywhere;
+}
+
 .sub-page {
   min-height: 100vh;
   background: #fffcfc;
@@ -1299,25 +1185,8 @@ watch(
 .form :deep(.el-form-item__content) {
   font-size: 14px;
 }
-.commit-btn {
-  background: #A8071A;
-  width: 100%;
-  height: 40px;
-  border-radius: 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 500;
-  margin-top: 0;
-  cursor: pointer;
-  border: none;
-  transition: background 0.2s ease;
-}
-.commit-btn:hover { background: #C11126; }
-.commit-btn:active { background: #8A0515; }
+
+.commit-btn { margin-top: 0; }
 .task-actions {
   display: flex;
   gap: 8px;
@@ -1325,19 +1194,6 @@ watch(
 }
 .task-actions .commit-btn {
   flex: 1;
-}
-.commit-btn.is-running {
-  background: #fff;
-  border: 1px solid #d5495c;
-  color: #a8071a;
-}
-.commit-btn.is-running:hover { background: #fff1f2; }
-.commit-btn.is-running:active { background: #ffe4e6; }
-.commit-btn.is-running.is-disabled {
-  background: #fafafa;
-  border-color: #e5e6eb;
-  color: #86909c;
-  cursor: not-allowed;
 }
 .c-label {
   display: flex;
@@ -1365,14 +1221,13 @@ watch(
 }
 .source-mode-radio :deep(.el-radio__label) {
   padding-left: 8px;
-  color: #1D2129;
   font-size: 14px;
 }
-.source-mode-radio :deep(.el-radio__input.is-checked .el-radio__inner) {
+.source-mode-radio :deep(.el-radio__input.is-checked:not(.is-disabled) .el-radio__inner) {
   border-color: #A8071A;
   background: #A8071A;
 }
-.source-mode-radio :deep(.el-radio__input.is-checked + .el-radio__label) {
+.source-mode-radio :deep(.el-radio:not(.is-disabled) .el-radio__label) {
   color: #1D2129;
 }
 
@@ -1666,4 +1521,5 @@ watch(
 .source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
 .custom-radio-group { gap: 8px; }
 .sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
+
 </style>

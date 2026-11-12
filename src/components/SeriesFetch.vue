@@ -1,7 +1,13 @@
 <script setup>
+import { parseManualUrls } from '../utils/sourceLinks.mjs';
+import { readRecordIds, readUniqueSourceLinks } from '../utils/sourceTableRows.mjs';
+import { resolveWritableField } from '../utils/tableFields.js';
+import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
+import TaskFeedback from './TaskFeedback.vue';
+import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { getTaskStoppingText } from '@/utils/taskStopText';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { ElNotification } from "element-plus";
+import { ElMessage } from "element-plus";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
@@ -34,22 +40,28 @@ const activeSeriesTaskId = ref('');
 let activeSeriesTask = null;
 const profileProgress = ref({ text: "", done: false });
 const listPageSize = 20;
-const toastVisible = ref(false);
-const toastText = ref('');
-const toastLoading = ref(false);
-let toastTimer = null;
+const feedback = useTaskFeedback();
+const { toastVisible, toastText, toastType, toastLoading, taskNotice } = feedback;
 const FIELD_SELECTION_STORAGE_KEY = 'series_fetch_selected_fields_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
 const tableFieldOptions = ref([]);
 const tableOutputConfigs = ref({});
+const tableConfigsLoaded = ref(false);
+let tableConfigsError = null;
+let tableConfigsLoadToken = 0;
 const mappingDraft = ref([]);
 const mappingExpanded = ref(false);
 const tableConfigLoading = ref(false);
+const tableConfigLoadError = ref('');
+let tableConfigReadId = 0;
 const tableConfigApplying = ref(false);
+const outputConfigReady = computed(() => tableConfigsLoaded.value && !!formData.value.table_id && !tableConfigApplying.value && !tableConfigLoading.value && !tableConfigLoadError.value);
 const tableConfigSaving = ref(false);
+const tableConfigSaves = new Map();
 const isSubmitting = ref(true);
 const hasRecoverableTask = ref(false);
+const clearing = ref(false);
 const recoveryRequiresReopen = ref(false);
 let componentUnmounted = false;
 const TASK_PLUGIN_TYPE = 'series_fetch';
@@ -139,8 +151,11 @@ const getMappingTargetFields = (index) => {
 };
 const mappingStatus = computed(() => {
   if (!formData.value.table_id) return '选择目标表格后可设置';
+  if (tableConfigLoading.value) return '正在读取目标表字段…';
+  if (tableConfigLoadError.value) return '读取目标表字段失败';
+  if (!tableFieldOptions.value.length) return '目标表格暂无可用字段';
   const count = mappingDraft.value.filter(item => item.source_key && item.target_field_id).length;
-  return count ? `已设置 ${count} 项映射` : '选择目标表格后可设置';
+  return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
 });
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
@@ -221,28 +236,13 @@ const resetParams = () => {
   profileProgress.value = { text: "", done: false };
 };
 
-const showToast = (text, isLoading = true) => {
-  if (toastTimer) {
-    clearTimeout(toastTimer);
-    toastTimer = null;
-  }
-  toastText.value = text;
-  toastLoading.value = isLoading;
-  toastVisible.value = true;
+const showToast = (text, isLoading = true, options = {}) => {
+  if (isLoading) feedback.progress(text, { stopping: isCancelling.value });
+  else feedback.finish(text, options);
 };
 
-const hideToast = () => {
-  if (toastTimer) {
-    clearTimeout(toastTimer);
-    toastTimer = null;
-  }
-  toastVisible.value = false;
-};
-
-const finishToast = (text) => {
-  showToast(text, false);
-  toastTimer = setTimeout(hideToast, 3000);
-};
+const hideToast = () => feedback.hide();
+const finishToast = (text, options = {}) => feedback.finish(text, options);
 
 const getStoppingText = task => getTaskStoppingText(task, '短剧');
 
@@ -253,7 +253,7 @@ const showFieldProgress = (message) => {
 };
 
 const showErrorMsg = (message) => {
-  ElNotification({ message, type: "error", duration: 0 });
+  ElMessage({ message, type: "error", plain: true, duration: 3000 });
 };
 
 
@@ -306,32 +306,24 @@ const setupTableFields = async (tableId, isNewTable = false, onProgress = null) 
   }
   let createdFieldCount = 0;
   for (const config of missingFields) {
-    try {
-      onProgress?.(`正在创建字段 ${createdFieldCount + 1}/${missingFields.length}：${config.name}...`);
-      await table.addField({ type: config.type, name: config.name });
-      createdFieldCount++;
-    } catch (error) {
-      ElNotification({ message: `添加字段 "${config.name}" 失败`, type: 'error', duration: 0 });
-      throw error;
-    }
-  }
-
-  if (!isNewTable && missingFields.length > 0) {
-    ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+    onProgress?.(`正在创建字段 ${createdFieldCount + 1}/${missingFields.length}：${config.name}...`);
+    await table.addField({ type: config.type, name: config.name });
+    createdFieldCount++;
   }
 
   onProgress?.('正在设置字段格式...');
   const latestFieldMetaList = await table.getFieldMetaList();
   const latestFieldMetaMap = new Map(latestFieldMetaList.map(meta => [meta.name, meta.id]));
   for (const config of activeFieldMapping) {
-    const fieldId = latestFieldMetaMap.get(config.name);
+    if (!config.formatter && !config.dateFormat) continue;
+    const fieldId = mappingBySource.get(config.key) || latestFieldMetaMap.get(config.name);
     if (!fieldId) continue;
     try {
-      const field = await table.getFieldById(fieldId);
-      if (config.formatter && field.type === FieldType.Number) {
+      const { field, fieldType } = await resolveWritableField(table, await table.getFieldById(fieldId));
+      if (config.formatter && fieldType === FieldType.Number) {
         await field.setFormatter(config.formatter);
       }
-      if (config.dateFormat && field.type === FieldType.DateTime) {
+      if (config.dateFormat && fieldType === FieldType.DateTime) {
         await field.setDateFormat(config.dateFormat);
       }
     } catch (error) {
@@ -340,13 +332,15 @@ const setupTableFields = async (tableId, isNewTable = false, onProgress = null) 
   }
 };
 
-const validateTableFields = async (tableId, onProgress = null) => {
+const validateTableFields = async (tableId, onProgress = null, options = {}) => {
   try {
+    if (mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
     await setupTableFields(tableId, false, onProgress);
     return true;
   } catch (error) {
     console.error("验证表格字段时出错:", error);
-    showErrorMsg(error.message || "验证表格字段失败，请稍后重试");
+    if (options.throwOnError) throw error;
+    feedback.fail(error);
     return false;
   }
 };
@@ -398,10 +392,12 @@ const getSeriesResults = async (task) => {
   };
 };
 
-const restoreSeriesTask = task => {
+const restoreSeriesTask = (task, progressText = '正在恢复未完成的短剧获取任务...') => {
   activeSeriesTask = task; activeSeriesTaskId.value = task.taskId;
   hasRecoverableTask.value = true; loading.value = true;
-  showToast('正在恢复未完成的短剧获取任务...', true);
+  const status = task.latestStatus;
+  isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
+  showToast(isCancelling.value ? getStoppingText(task) : progressText, true);
 };
 const seriesStreamTask = useIncrementalTask({
   storageKey: 'series_fetch_stream_task_v1', operationTimeoutMs: 180000,
@@ -435,7 +431,12 @@ const seriesStreamTask = useIncrementalTask({
     task.targetTableId = result?.tableId || task.targetTableId;
     task.pendingWrite = false;
   },
-  onProgress: (status, task) => {
+  onProgress: (status, task, phase) => {
+    clearing.value = phase === 'clearing';
+    if (clearing.value) {
+      feedback.progress('正在清理任务进度…');
+      return;
+    }
     activeSeriesTask = task;
     if (Number(status.status) === 3 || status.cancel_requested || status.status_text === 'cancel_requested') isCancelling.value = true;
     showToast(isCancelling.value ? getStoppingText(task)
@@ -443,35 +444,50 @@ const seriesStreamTask = useIncrementalTask({
   },
   onWriting: (items, task) => showToast(isCancelling.value ? getStoppingText(task) : `正在写入 ${items.length} 条短剧，已写入 ${task.writtenCount || 0} 条`, true),
   onFinish: (status, task) => {
+    clearing.value = false;
     loading.value = false; isCancelling.value = false; activeSeriesTaskId.value = ''; activeSeriesTask = null;
     hasRecoverableTask.value = false; recoveryRequiresReopen.value = false;
-    finishToast(Number(status.status) === 3 ? `任务已停止，已写入 ${task.writtenCount || 0} 条短剧`
-      : Number(status.status) === 2 ? (status.reason || '任务失败，已写入已有结果') : `处理完成，已写入 ${task.writtenCount || 0} 条短剧`);
+    const stopped = Number(status.status) === 3;
+    const failed = Number(status.status) === 2;
+    finishToast(stopped ? `任务已停止，已写入 ${task.writtenCount || 0} 条短剧`
+      : failed ? (status.reason || '任务失败，已写入已有结果') : `处理完成，已写入 ${task.writtenCount || 0} 条短剧`,
+      { stopped, type: failed ? 'error' : undefined, empty: !task.writtenCount });
   },
   onError: (error, task) => {
+    clearing.value = false;
     loading.value = false; isCancelling.value = false; activeSeriesTaskId.value = ''; activeSeriesTask = null;
     hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
     recoveryRequiresReopen.value = !!error.requiresReopen;
-    finishToast(error.message || '任务已暂停'); showErrorMsg(error.message || '任务已暂停');
+    feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: recoveryRequiresReopen.value });
   },
 });
 const resumeSeriesTask = async () => {
   if (componentUnmounted || isSubmitting.value || loading.value) return;
-  if (recoveryRequiresReopen.value) { showErrorMsg('上次操作尚未确认结束，请重新进入页面或重新打开插件'); return; }
+  if (recoveryRequiresReopen.value) return;
   isSubmitting.value = true;
+  loading.value = true;
+  feedback.begin('正在检查未完成任务…');
+  await nextTick();
   try {
     const resumed = await seriesStreamTask.resume(restoreSeriesTask);
-    if (!componentUnmounted && !resumed && hasRecoverableTask.value) showErrorMsg('未读取到恢复进度，请重新打开插件重试');
+    if (!componentUnmounted && !resumed) {
+      loading.value = false;
+      if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
+      else hideToast();
+    }
+    return resumed;
   } catch (error) {
     if (componentUnmounted) return;
     hasRecoverableTask.value = true; recoveryRequiresReopen.value = !!error.requiresReopen;
-    loading.value = false; showErrorMsg(error.message || '恢复任务失败');
+    loading.value = false;
+    feedback.fail(error, { persist: true, requiresReopen: recoveryRequiresReopen.value });
   } finally { if (!componentUnmounted) isSubmitting.value = false; }
 };
+
 const postSeriesTask = async (targetTableId = '', profileUrlText = '') => {
   if (componentUnmounted) return;
   const fields = [...selectedFieldKeys.value];
-  const mappings = mappingDraft.value.map(item => ({ ...item }));
+  const mappings = formData.value.radio === 2 ? mappingDraft.value.map(item => ({ ...item })) : [];
   const writeMode = formData.value.writeMode;
   showToast('正在提交短剧获取任务...', true);
   await seriesStreamTask.submit(async () => {
@@ -483,23 +499,27 @@ const postSeriesTask = async (targetTableId = '', profileUrlText = '') => {
     const data = res.data?.data || res.data || res;
     return { taskId: data.task_id, targetTableId,
       selectedFieldKeys: fields, fieldMappings: mappings, writeMode, pendingWrite: false };
-  }, restoreSeriesTask);
+  }, task => restoreSeriesTask(task, '任务已创建，正在准备获取短剧…'));
 };
 
 const cancelSeriesTask = async () => {
-  if (!activeSeriesTaskId.value || isCancelling.value) return;
+  const task = seriesStreamTask.getActiveTask();
+  if (!task?.taskId || isCancelling.value || clearing.value) return;
   isCancelling.value = true;
-  showToast(getStoppingText(activeSeriesTask), true);
+  showToast(getStoppingText(task), true);
   try {
     const response = await request({
       url: '/social/api/v1/feishu/series/list/cancel',
       method: 'post',
       headers: { authorization: `Bearer ${props.api_key}` },
-      data: { task_id: activeSeriesTaskId.value },
+      data: { task_id: task.taskId },
     });
     if (Number(response.data?.sta) !== 0) throw new Error(response.data?.msg || '停止任务失败');
   } catch (error) {
-    isCancelling.value = false;
+    if (seriesStreamTask.getActiveTask() !== task || clearing.value) return;
+    const status = task.latestStatus;
+    isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
+    showToast(isCancelling.value ? getStoppingText(task) : `任务继续执行，已写入 ${task.writtenCount || 0} 条短剧`, true);
     showErrorMsg(error.message || '停止任务失败');
   }
 };
@@ -521,56 +541,106 @@ const loadTableOptions = async () => {
 
 const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
 const loadTargetFieldOptions = async (tableId) => {
-  if (!tableId) { tableFieldOptions.value = []; return; }
+  if (componentUnmounted) return;
+  const readId = ++tableConfigReadId;
+  tableConfigLoadError.value = '';
+  tableFieldOptions.value = [];
+  if (!tableId) { tableConfigLoading.value = false; return; }
   tableConfigLoading.value = true;
   try {
     const table = await bitable.base.getTableById(tableId);
+    if (componentUnmounted || readId !== tableConfigReadId || formData.value.table_id !== tableId) return;
     const fields = await table.getFieldMetaList();
+    if (componentUnmounted || readId !== tableConfigReadId || formData.value.table_id !== tableId) return;
     tableFieldOptions.value = fields.map(field => ({ id: field.id, name: field.name, type: field.type }));
   } catch (error) {
-    tableFieldOptions.value = [];
+    if (componentUnmounted || readId !== tableConfigReadId || formData.value.table_id !== tableId) return;
+    tableConfigLoadError.value = `读取目标表字段失败：${error?.message || '请稍后重试'}`;
     console.error('读取目标表字段失败:', error);
-  } finally { tableConfigLoading.value = false; }
+  } finally {
+    if (!componentUnmounted && readId === tableConfigReadId) tableConfigLoading.value = false;
+  }
 };
 const loadTableOutputConfigs = async () => {
-  if (!props.api_key) return;
+  const token = ++tableConfigsLoadToken;
+  tableConfigsLoaded.value = false;
+  tableConfigsError = null;
+  if (!props.api_key) return false;
   try {
-    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
+    const baseId = await getBaseId();
+    if (componentUnmounted || token !== tableConfigsLoadToken) return false;
+    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
+    if (componentUnmounted || token !== tableConfigsLoadToken) return false;
+    if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '读取输出表配置失败');
     const data = response.data?.data || response.data;
-    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
+    const list = parseTableConfigList(data);
     tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
-  } catch (error) { console.error('读取短剧表格配置失败:', error); }
+    tableConfigsLoaded.value = true;
+    return true;
+  } catch (error) {
+    if (componentUnmounted || token !== tableConfigsLoadToken) return false;
+    tableConfigsError = error;
+    console.error('读取短剧表格配置失败:', error);
+    return false;
+  }
 };
 const applyTableOutputConfig = async (tableId) => {
+  if (!tableConfigsLoaded.value) return;
   tableConfigApplying.value = true;
   try {
-    const config = tableOutputConfigs.value[tableId];
+    const config = tableConfigSaves.get(tableId)?.config || tableOutputConfigs.value[tableId];
     formData.value.writeMode = config?.write_mode || 'upsert';
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
     await loadTargetFieldOptions(tableId);
   } finally { tableConfigApplying.value = false; }
 };
-const saveTableOutputConfig = async () => {
-  const targetTableId = formData.value.table_id;
-  if (formData.value.radio !== 2 || !targetTableId || tableConfigApplying.value || tableConfigSaving.value) return;
+const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, writeMode, fieldMappings }) => {
+  if (componentUnmounted) return;
   tableConfigSaving.value = true;
   try {
     const table = await bitable.base.getTableById(targetTableId);
-    const fields = tableFieldOptions.value;
-    const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => {
-      const target = fields.find(field => field.id === item.target_field_id);
-      return {
-        ...item,
-        source_name: FIELD_MAPPING.find(field => field.key === item.source_key)?.name || item.source_name || '',
-        target_field_name: target?.name || item.target_field_name || '',
-        target_field_type: target?.type ?? item.target_field_type,
-      };
-    });
-    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: formData.value.writeMode, field_mappings: fieldMappings } });
+    const payload = {
+      plugin_type: TASK_PLUGIN_TYPE,
+      base_id: await getBaseId(),
+      target_table_id: targetTableId,
+      target_table_name: await table.getName(),
+      write_mode: writeMode,
+      field_mappings: fieldMappings,
+    };
+    if (componentUnmounted) return;
+    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    if (componentUnmounted) return;
+    if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存短剧表格配置失败');
     const saved = response.data?.data || response.data;
     tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: saved };
-  } catch (error) { console.error('保存短剧表格配置失败:', error); }
-  finally { tableConfigSaving.value = false; }
+  } finally {
+    tableConfigSaving.value = false;
+  }
+});
+const saveTableOutputConfig = async () => {
+  if (!tableConfigsLoaded.value) return;
+  const targetTableId = formData.value.table_id;
+  if (componentUnmounted || formData.value.radio !== 2 || !targetTableId || tableConfigApplying.value) return;
+  const writeMode = formData.value.writeMode;
+  const fields = tableFieldOptions.value;
+  const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => {
+    const target = fields.find(field => field.id === item.target_field_id);
+    return {
+      ...item,
+      source_name: FIELD_MAPPING.find(field => field.key === item.source_key)?.name || item.source_name || '',
+      target_field_name: target?.name || item.target_field_name || '',
+      target_field_type: target?.type ?? item.target_field_type,
+    };
+  });
+  const saving = persistTableOutputConfig({ targetTableId, writeMode, fieldMappings });
+  tableConfigSaves.set(targetTableId, { saving, config: { write_mode: writeMode, field_mappings: fieldMappings } });
+  try {
+    await saving;
+  } catch (error) {
+    if (!componentUnmounted) console.error('保存短剧表格配置失败:', error);
+  } finally {
+    if (tableConfigSaves.get(targetTableId)?.saving === saving) tableConfigSaves.delete(targetTableId);
+  }
 };
 
 const loadFieldOptions = async ({ silent = false } = {}) => {
@@ -602,126 +672,16 @@ const handleLinkFieldDropdownVisibleChange = (visible) => {
   }
 };
 
-const parseManualUrls = (text) => {
-  if (!text || typeof text !== 'string') {
-    return [];
-  }
+const getRecordIdListByScope = (table, scope, rowCount) =>
+  readRecordIds(table, scope, rowCount, ElMessage);
 
-  return [...new Set(
-    text
-      .split(/[\n,，]+/)
-      .map(item => item.trim())
-      .filter(Boolean)
-  )];
-};
-
-const extractProfileLink = (value) => {
-  if (!value) return null;
-
-  if (typeof value === 'string') {
-    return value.trim() || null;
-  }
-
-  if (typeof value === 'object') {
-    const keys = ['link', 'url', 'text', 'content', 'value', 'displayText'];
-    for (const key of keys) {
-      const nested = extractProfileLink(value[key]);
-      if (nested) return nested;
-    }
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const nested = extractProfileLink(item);
-      if (nested) return nested;
-    }
-  }
-
-  return null;
-};
-
-const getAllVisibleRecordIdList = async (view) => {
-  const pageSize = 200;
-  let pageToken = undefined;
-  let allRecordIdList = [];
-  let loopCount = 0;
-  const maxLoops = 100;
-
-  while (loopCount < maxLoops) {
-    loopCount++;
-    const result = await view.getVisibleRecordIdListByPage({
-      pageSize,
-      pageToken
-    });
-
-    let recordIds = [];
-    let hasMore = false;
-
-    if (Array.isArray(result)) {
-      recordIds = result;
-      hasMore = result.length === pageSize;
-    } else if (result && typeof result === 'object') {
-      recordIds = result.recordIds || result.records || result.data || result.list || [];
-      hasMore = result.hasMore || result.hasNext || result.has_next || false;
-      pageToken = result.pageToken || result.nextPageToken || result.next_token;
-    }
-
-    if (recordIds.length > 0) {
-      allRecordIdList = allRecordIdList.concat(recordIds);
-    }
-
-    if (!hasMore || recordIds.length === 0) {
-      break;
-    }
-  }
-
-  return allRecordIdList;
-};
-
-const getRecordIdListByScope = async (scope, rowCount) => {
-  const table = await bitable.base.getActiveTable();
-  const view = await table.getActiveView();
-
-  if (scope === 'all') {
-    return await getAllVisibleRecordIdList(view);
-  }
-
-  if (scope === 'selected') {
-    const recordIdList = await view.getSelectedRecordIdList();
-    if (recordIdList.length === 0) {
-      ElNotification({ message: '请先在表格中选择至少一行数据', type: 'warning', duration: 0 });
-      return null;
-    }
-    return recordIdList;
-  }
-
-  const allRecordIdList = await getAllVisibleRecordIdList(view);
-  return allRecordIdList.slice(0, rowCount);
-};
-
-const getProfileUrlsByFieldId = async (recordIdList, fieldId) => {
-  const table = await bitable.base.getActiveTable();
-  const field = await table.getFieldById(fieldId);
-
-  const rows = await Promise.all(
-    recordIdList.map(async (recordId) => {
-      try {
-        const cell = await field.getCell(recordId);
-        const value = await cell.getValue();
-        return extractProfileLink(value);
-      } catch (error) {
-        return null;
-      }
-    })
-  );
-
-  return [...new Set(rows.filter(item => typeof item === 'string' && item.trim()))];
-};
+const getProfileUrlsByFieldId = (table, recordIds, fieldId) =>
+  readUniqueSourceLinks(table, recordIds, fieldId);
 
 const submitSeriesUrls = async (urlList, targetTableId = "") => {
   if (urlList.length === 0) {
-    finishToast('没有可处理的作者主页链接');
-    showErrorMsg("请至少输入一个有效的作者主页链接");
+    loading.value = false;
+    finishToast('没有可处理的作者主页链接', { empty: true });
     return;
   }
 
@@ -766,79 +726,68 @@ onMounted(async () => {
 onUnmounted(() => {
   componentUnmounted = true;
   seriesStreamTask.stop();
-  if (toastTimer) clearTimeout(toastTimer);
 });
 
 const commit = async () => {
   if (hasRecoverableTask.value) return resumeSeriesTask();
-  if (isSubmitting.value || loading.value) {
-    return;
-  }
-
+  if (isSubmitting.value || loading.value) return;
   isSubmitting.value = true;
   try {
-    if (!props.api_key) {
-      showErrorMsg("请输入API key");
+    if (!props.api_key) { showErrorMsg("请输入 API Key"); return; }
+    const { radio, table_id, mode, manualUrls, profileLinkFieldId, scope, rowCount } = formData.value;
+    if (radio === 2 && !table_id) { showErrorMsg("请选择现有表格"); return; }
+    if (mode === 'manual' && !String(manualUrls || '').trim()) { showErrorMsg("请输入作者主页链接"); return; }
+    if (mode !== 'manual' && !profileLinkFieldId) { showErrorMsg("请选择作者主页链接字段"); return; }
+    if (mode !== 'manual' && profileLinkFieldId === 'nodata') {
+      showErrorMsg("未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。");
       return;
     }
-    const { radio, table_id, mode, profileLinkFieldId, scope, rowCount, manualUrls } = formData.value;
-    if (radio === 2 && !table_id) {
-      showErrorMsg("请选择现有表格");
-      return;
-    }
-
-    showToast('正在启动博主短剧获取...请勿关闭插件，关闭将中断任务', true);
+    loading.value = true;
+    feedback.begin('正在启动博主短剧获取...请勿关闭插件，关闭将中断任务');
     await nextTick();
+    const sourceTable = mode === 'manual' ? null : await bitable.base.getActiveTable();
+    if (componentUnmounted) return;
+    if (radio === 2 && !tableConfigsLoaded.value) {
+      showToast('正在读取输出表配置…', true);
+      const loaded = await loadTableOutputConfigs();
+      if (componentUnmounted) return;
+      if (!loaded) throw tableConfigsError || new Error('读取输出表配置失败');
+      await applyTableOutputConfig(table_id);
+    }
     let urlList = [];
     if (mode === 'manual') {
-      if (!manualUrls || !manualUrls.trim()) {
-        finishToast('任务未开始');
-        showErrorMsg("请输入作者主页链接");
-        return;
-      }
       urlList = parseManualUrls(manualUrls);
     } else {
-      if (!profileLinkFieldId) {
-        finishToast('任务未开始');
-        showErrorMsg("请选择作者主页链接字段");
-        return;
-      }
-      if (profileLinkFieldId === 'nodata') {
-        finishToast('当前不在数据表页面，任务未开始');
-        showErrorMsg("未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。");
-        return;
-      }
       showToast('正在读取待处理记录...请勿关闭插件，关闭将中断任务', true);
-      const recordIdList = await getRecordIdListByScope(scope, rowCount);
+      const recordIdList = await getRecordIdListByScope(sourceTable, scope, rowCount);
       if (!recordIdList) {
-        finishToast('任务未开始');
+        loading.value = false;
+        hideToast();
         return;
       }
       showToast('正在读取作者主页链接...请勿关闭插件，关闭将中断任务', true);
-      urlList = await getProfileUrlsByFieldId(recordIdList, profileLinkFieldId);
+      urlList = await getProfileUrlsByFieldId(sourceTable, recordIdList, profileLinkFieldId);
     }
-
     if (radio === 2) {
-      const isValid = await validateTableFields(table_id, showFieldProgress);
-      if (isValid) {
-        await submitSeriesUrls(urlList, table_id);
-      } else {
-        finishToast('目标字段校验未通过，任务未开始');
-      }
+      showToast('正在检查目标表字段...请勿关闭插件，关闭将中断任务', true);
+      const isValid = await validateTableFields(table_id, showFieldProgress, { throwOnError: true });
+      if (isValid) await submitSeriesUrls(urlList, table_id);
+      else { loading.value = false; finishToast('目标字段校验未通过，任务未开始', { type: 'error' }); }
       return;
     }
-
     await submitSeriesUrls(urlList, "");
   } catch (error) {
-    console.error('提交博主短剧任务失败:', error);
-    finishToast(`任务提交失败：${error.message || '请稍后重试'}`);
-    showErrorMsg(error.message || '提交失败，请稍后重试');
+    console.error('提交博主短剧获取任务失败:', error);
+    loading.value = false;
+    recoveryRequiresReopen.value = !!error.requiresReopen;
+    feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: recoveryRequiresReopen.value });
   } finally {
     isSubmitting.value = false;
   }
 };
 
 const taskActionState = computed(() => {
+  if (clearing.value) return 'clearing';
   if (isCancelling.value) return 'stopping';
   if (loading.value && activeSeriesTaskId.value) return 'running';
   if (loading.value || isSubmitting.value) return 'submitting';
@@ -886,11 +835,11 @@ watch(selectedFieldKeys, (keys) => {
     <div class="form-card">
       <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
       <div class="group-label">作者主页链接来源</div>
-      <el-radio-group v-model="formData.mode" class="source-mode-radio radio-block">
+      <el-radio-group v-model="formData.mode" class="source-mode-radio radio-block" :disabled="loading || isSubmitting">
         <el-radio value="table">从表格选取</el-radio>
         <el-radio value="manual">手动输入</el-radio>
       </el-radio-group>
-      <el-form ref="form" class="form" :model="formData" label-position="top">
+      <el-form ref="form" class="form" :model="formData" label-position="top" :disabled="loading || isSubmitting" :inert="(loading || isSubmitting) ? '' : null" :aria-busy="loading || isSubmitting">
         <template v-if="formData.mode === 'table'">
           <el-form-item>
             <div class="c-label">
@@ -1032,7 +981,7 @@ watch(selectedFieldKeys, (keys) => {
         </el-form-item>
         <el-form-item v-if="formData.radio === 2" label="" style="margin-top: 12px">
           <div class="c-label">数据写入方式</div>
-          <el-radio-group v-model="formData.writeMode" class="radio-block">
+          <el-radio-group v-model="formData.writeMode" class="radio-block" :disabled="!outputConfigReady || loading || isSubmitting">
             <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
               {{ item.label }}
               <el-tooltip v-if="item.value === 'upsert'" effect="dark" placement="top">
@@ -1072,36 +1021,42 @@ watch(selectedFieldKeys, (keys) => {
             <span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }" aria-hidden="true"></span>
           </button>
           <div v-show="mappingExpanded" class="mapping-accordion-panel">
-            <p v-if="tableConfigLoading" class="mapping-empty">正在读取目标表字段...</p>
+            <p v-if="!formData.table_id" class="mapping-empty">选择目标表格后配置字段映射</p>
+            <p v-else-if="tableConfigLoading" class="mapping-empty">正在读取目标表字段...</p>
+            <div v-else-if="tableConfigLoadError" class="mapping-empty" role="alert">
+              {{ tableConfigLoadError }}
+              <el-button link type="primary" :disabled="loading || isSubmitting" @click="loadTargetFieldOptions(formData.table_id)">重新读取字段</el-button>
+            </div>
             <template v-else-if="tableFieldOptions.length">
               <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
               <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
-                <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+                <el-select v-model="mapping.source_key" :disabled="!outputConfigReady" placeholder="选择输出字段" size="small">
                   <el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                 </el-select>
                 <span class="mapping-arrow">→</span>
-                <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+                <el-select v-model="mapping.target_field_id" :disabled="!outputConfigReady" placeholder="选择目标字段" size="small">
                   <el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                 </el-select>
-                <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+                <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)" :disabled="!outputConfigReady">删除</el-button>
               </div>
               <div class="mapping-actions">
-                <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
+                <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })" :disabled="!outputConfigReady">+ 添加字段映射</el-button>
               </div>
             </template>
-            <p v-else class="mapping-empty">选择目标表格后配置字段映射</p>
+            <p v-else class="mapping-empty">目标表格暂无可用字段</p>
           </div>
         </div>
       </el-form>
 
+      <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
       <div class="task-actions">
         <el-button
           class="commit-btn"
           :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
-          :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
-          :disabled="taskActionState === 'submitting' || taskActionState === 'stopping'"
+          :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
+          :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || recoveryRequiresReopen"
           @click="handleTaskAction"
-        >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
+        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
       </div>
       <div v-if="profileProgress.text" class="profile-progress" :class="{ 'profile-progress--done': profileProgress.done }">
         <span v-if="profileProgress.done" class="profile-progress-check">✓</span>
@@ -1109,26 +1064,12 @@ watch(selectedFieldKeys, (keys) => {
       </div>
     </div>
 
-    <div class="toast-wrap" :class="{ show: toastVisible }">
-      <div class="toast" :class="{ 'toast-loading': toastLoading, 'toast-success': !toastLoading }">
-        <div class="toast-icon" v-if="toastLoading">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <path d="M12 2a10 10 0 0 1 10 10"></path>
-          </svg>
-        </div>
-        <div class="toast-icon" v-else>
-          <svg viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="10" fill="#00B42A"></circle>
-            <path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
-          </svg>
-        </div>
-        <span>{{ toastText }}</span>
-      </div>
-    </div>
+    <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>
 
 <style scoped>
+.sub-hint { margin: 8px 0; color: #86909c; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
 .sub-page {
   min-height: 100vh;
   background: #fffcfc;
@@ -1250,25 +1191,8 @@ watch(selectedFieldKeys, (keys) => {
 .form :deep(.el-form-item__content) {
   font-size: 14px;
 }
-.commit-btn {
-  background: #A8071A;
-  width: 100%;
-  height: 40px;
-  border-radius: 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 500;
-  margin-top: 0;
-  cursor: pointer;
-  border: none;
-  transition: background 0.2s ease;
-}
-.commit-btn:hover { background: #C11126; }
-.commit-btn:active { background: #8A0515; }
+
+.commit-btn { margin-top: 0; }
 .task-actions {
   display: flex;
   gap: 8px;
@@ -1276,19 +1200,6 @@ watch(selectedFieldKeys, (keys) => {
 }
 .task-actions .commit-btn {
   flex: 1;
-}
-.commit-btn.is-running {
-  background: #fff;
-  border: 1px solid #d5495c;
-  color: #a8071a;
-}
-.commit-btn.is-running:hover { background: #fff1f2; }
-.commit-btn.is-running:active { background: #ffe4e6; }
-.commit-btn.is-running.is-disabled {
-  background: #fafafa;
-  border-color: #e5e6eb;
-  color: #86909c;
-  cursor: not-allowed;
 }
 .profile-progress {
   text-align: center;
@@ -1499,14 +1410,13 @@ watch(selectedFieldKeys, (keys) => {
 }
 .source-mode-radio :deep(.el-radio__label) {
   padding-left: 8px;
-  color: #1D2129;
   font-size: 14px;
 }
-.source-mode-radio :deep(.el-radio__input.is-checked .el-radio__inner) {
+.source-mode-radio :deep(.el-radio__input.is-checked:not(.is-disabled) .el-radio__inner) {
   border-color: #A8071A;
   background: #A8071A;
 }
-.source-mode-radio :deep(.el-radio__input.is-checked + .el-radio__label) {
+.source-mode-radio :deep(.el-radio:not(.is-disabled) .el-radio__label) {
   color: #1D2129;
 }
 .required {
@@ -1602,56 +1512,6 @@ watch(selectedFieldKeys, (keys) => {
 .mapping-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
 .mapping-actions :deep(.el-button) { margin-left: 0; }
 
-.toast-wrap {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 500;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.3s ease, transform 0.3s ease;
-}
-.toast-wrap.show {
-  opacity: 1;
-  transform: translate(-50%, -50%) scale(1);
-}
-.toast {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 18px;
-  background: #FFFFFF;
-  border: 1px solid #E5E6EB;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  font-size: 14px;
-  font-weight: 500;
-  color: #1D2129;
-  white-space: nowrap;
-}
-.toast .toast-icon {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.toast .toast-icon svg {
-  width: 100%;
-  height: 100%;
-}
-.toast-loading .toast-icon {
-  animation: spin 0.8s linear infinite;
-  color: #A8071A;
-}
-.toast-success .toast-icon {
-  color: #00B42A;
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
 .sub-page { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
 .section-heading { font-size: 16px; font-weight: 500; line-height: 22px; }
 .group-label, .c-label { margin-bottom: 8px; font-size: 14px; font-weight: 500; line-height: 20px; }
@@ -1659,4 +1519,5 @@ watch(selectedFieldKeys, (keys) => {
 .source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
 .custom-radio-group { gap: 8px; }
 .sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
+
 </style>

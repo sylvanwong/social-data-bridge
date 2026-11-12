@@ -1,3 +1,4 @@
+import { resolveWritableField } from '../src/utils/tableFields.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -28,7 +29,7 @@ function fixture(component, engineName, key, failure) {
   const configs = [{ key, name: '稳定ID', type: 'text' }, { key: 'title', name: '标题', type: 'text' }];
   let saved, failed = false, created = 0, saveReadyFails = false;
   const fields = new Map(), rows = [], errors = [], adds = [];
-  const field = meta => ({ ...meta, getType: async () => meta.type, createCell: async value => ({ fieldId: meta.id, value }) });
+  const field = meta => ({ ...meta, getType: async () => meta.type, createCell: async value => ({ fieldId: meta.id, value, getValue: async () => value }) });
   const table = { id: 'created',
     getField: async name => { const meta = [...fields.values()].find(meta => meta.name === name); return meta && field(meta); },
     getFieldById: async id => field(fields.get(id)),
@@ -60,7 +61,7 @@ function fixture(component, engineName, key, failure) {
       },
     },
   };
-  const bindings = { bitable, fieldMapping: configs, getActiveFieldMapping: () => [...configs],
+  const bindings = { resolveWritableField, bitable, fieldMapping: configs, getActiveFieldMapping: () => [...configs],
     getTableName: () => 'test', createSequentialTable: async () => { created++; fields.set('default', { id: 'default', name: '文本', type: 'text' }); return { tableId: 'created' }; },
     resolveFieldMetaByConfig: (map, cfg) => ({ fieldMeta: map.get(cfg.name) }),
     isFieldTypeCompatible: () => true, applyFieldDisplayConfig: async () => {},

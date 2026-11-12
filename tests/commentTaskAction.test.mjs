@@ -1,3 +1,4 @@
+import { nextTick } from 'vue';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,6 +10,8 @@ const source = descriptor.scriptSetup.content;
 const declarations = parseJS(source, { sourceType: 'module' }).program.body
   .filter(node => node.type === 'VariableDeclaration').flatMap(node => node.declarations);
 function evaluate(node, scope) {
+  scope = { nextTick, ...scope };
+  scope.feedback ??= { begin() {}, progress() {}, finish: (text, options) => scope.showCompletionToast?.(text, options), fail: error => scope.showErrorMsg?.(error?.message || error), hide() {} };
   return new Function(...Object.keys(scope), `return (${source.slice(node.start, node.end)});`)(...Object.values(scope));
 }
 function load(name, scope) {
@@ -19,9 +22,9 @@ function load(name, scope) {
 function fixture() {
   const messages = []; let created = 0, resumed = 0, cancelled = 0;
   const scope = { commentSubmission: { pending: null }, componentUnmounted: false,
-    loading: { value: true }, isSubmitting: { value: false }, isCancelling: { value: false },
+    clearing: { value: false }, loading: { value: true }, isSubmitting: { value: false }, isCancelling: { value: false },
     activeCommentTaskId: { value: 'old-task' }, hasRecoverableTask: { value: false }, recoveryRequiresReopen: { value: false },
-    props: { api_key: '' },
+    props: { api_key: '' }, selectedFieldKeys: { value: ['cid'] },
     showCompletionToast: message => messages.push(message), showErrorMsg: message => messages.push(message), showToast() {},
     computed: fn => ({ get value() { return fn(); } }),
     commit: () => { created++; }, cancelCommentTask: () => { cancelled++; },
@@ -35,7 +38,7 @@ function fixture() {
   const action = load('handleTaskAction', scope);
   const labelExpression = descriptor.template.content.match(/\{\{ (taskActionState[^\n]+?) \}\}/)[1];
   return { scope, onError, onFinish, action, messages,
-    label: () => new Function('taskActionState', `return (${labelExpression});`)(scope.taskActionState.value),
+    label: () => new Function('taskActionState', 'recoveryRequiresReopen', `return (${labelExpression});`)(scope.taskActionState.value, scope.recoveryRequiresReopen.value),
     created: () => created, resumed: () => resumed, cancelled: () => cancelled,
   };
 }
@@ -58,6 +61,7 @@ test('恢复读取尚未完成时重复点击，不重复恢复也不创建新�
   };
   const first = f.action();
   await f.action();
+  await nextTick();
   assert.equal(reads, 1);
   assert.equal(f.created(), 0);
   release(); await first;
@@ -75,7 +79,8 @@ for (const result of ['read-error', 'missing']) {
     assert.equal(f.created(), 0);
     assert.equal(f.scope.loading.value, false);
     assert.equal(f.scope.isSubmitting.value, false);
-    assert.ok(f.messages.length > 2);
+    assert.equal(f.messages.length, 2, '每次异常仅一个浮动出口');
+    assert.match(f.messages.at(-1), result === 'read-error' ? /storage unavailable/ : /未读取到/);
   });
 }
 
@@ -100,8 +105,8 @@ test('超时且旧请求可能仍在执行时，恢复按钮要求重新打开�
   await f.action();
   assert.equal(f.resumed(), 0);
   assert.equal(f.created(), 0);
-  assert.equal(f.label(), '恢复任务');
-  assert.match(f.messages.at(-1), /重新打开/);
+  assert.equal(f.label(), '请重新进入插件恢复');
+  assert.equal(f.messages.at(-1), 'timeout');
 });
 
 
@@ -143,7 +148,8 @@ for (const blocked of ['getData', 'getSelection']) {
     timeout.fn(); await running;
     assert.equal(f.scope.isSubmitting.value, false);
     assert.equal(f.label(), '恢复任务');
-    assert.match(f.messages.at(-1), /超时/);
+    assert.match(f.messages.at(-1), /超时.*恢复任务/);
+    assert.doesNotMatch(f.messages.at(-1), /关闭|重新(?:打开|进入)/);
     assert.deepEqual(saved, snapshot);
     assert.equal(engine.getActiveTask(), null);
     assert.equal(timers.size, 0);
@@ -154,7 +160,7 @@ for (const blocked of ['getData', 'getSelection']) {
     assert.deepEqual(saved, snapshot);
     owner[blocked] = original;
     await f.action();
-    assert.equal(statusReads, 1);
+    assert.equal(statusReads, 1, '显式恢复后读取原任务，迟到的旧读取不能自行启动');
     assert.equal(f.created(), 0);
     assert.equal(f.label(), '立即执行');
   });
@@ -188,7 +194,7 @@ test('提交接口在页面卸载后返回，保存任务但不在旧页面启�
   let release, releaseSave, starts = 0, saved;
   const scope = { request: () => new Promise(resolve => { release = resolve; }), showToast() {},
     props: { api_key: 'test' }, formData: { value: { pages: 1, reply_pages: -1 } },
-    mappingDraft: { value: [] }, activeCommentTaskId: { value: '' },
+    selectedFieldKeys: { value: ['cid'] }, mappingDraft: { value: [] }, activeCommentTaskId: { value: '' },
     commentSubmission: { pending: null },
     commentStreamTask: { stop() {}, saveForResume: async task => { await new Promise(resolve => { releaseSave = resolve; }); saved = task; }, resume: async () => { starts++; }, start: () => { starts++; } }, closeNoteInterval() {}, toastTimer: null,
   };
@@ -269,7 +275,7 @@ test('保存任务身份超时后保留恢复保护，不能新建任务等待�
     commentStreamTask: { saveForResume: async () => { throw error; } },
   });
   await load('postNoteTask', f.scope)('table', 'url');
-  assert.equal(f.label(), '恢复任务');
+  assert.equal(f.label(), '请重新进入插件恢复');
   assert.equal(f.scope.recoveryRequiresReopen.value, true);
   assert.ok(f.scope.commentSubmission.pending, '保存失败不能被新页面当成无待处理任务');
   const mounted = parseJS(source, { sourceType: 'module' }).program.body.find(node => node.type === 'ExpressionStatement'
@@ -283,7 +289,7 @@ test('保存任务身份超时后保留恢复保护，不能新建任务等待�
     fieldSelectionReady: { value: false },
   });
   await evaluate(mounted, reopened.scope)();
-  assert.equal(reopened.label(), '恢复任务');
+  assert.equal(reopened.label(), '请重新进入插件恢复');
   assert.equal(reopened.scope.recoveryRequiresReopen.value, true);
   assert.equal(reopened.resumed(), 0);
   await reopened.action();
@@ -308,7 +314,7 @@ for (const timeout of [false, true]) {
     };
     await f.scope.resumeCommentTask();
     assert.equal(resumes, 0);
-    assert.equal(f.label(), '恢复任务');
+    assert.equal(f.label(), timeout ? '请重新进入插件恢复' : '恢复任务');
     assert.equal(f.scope.recoveryRequiresReopen.value, timeout);
     const error = await f.scope.commentSubmission.pending.catch(error => error);
     assert.deepEqual(error.createdTask, task);
@@ -354,7 +360,7 @@ test('真实任务清理超时后不能新建，旧清理晚返回仍保持保�
   for (let i = 0; i < 40; i++) await Promise.resolve();
   assert.ok(release);
   [...timers.values()].find(timer => timer.delay === 180000).fn(); await running;
-  assert.equal(f.label(), '恢复任务');
+  assert.equal(f.label(), '请重新进入插件恢复');
   assert.equal(f.scope.recoveryRequiresReopen.value, true);
   await f.action(); assert.equal(f.created(), 0);
   engine.stop();
@@ -366,13 +372,13 @@ test('真实任务清理超时后不能新建，旧清理晚返回仍保持保�
     onError: next.onError, onFinish: next.onFinish,
   });
   await next.scope.resumeCommentTask();
-  assert.equal(next.label(), '恢复任务');
+  assert.equal(next.label(), '请重新进入插件恢复');
   assert.equal(next.scope.recoveryRequiresReopen.value, true);
   await next.action(); assert.equal(next.created(), 0);
   release(); for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(next.label(), '恢复任务');
+  assert.equal(next.label(), '请重新进入插件恢复');
   await next.action(); assert.equal(next.created(), 0);
-  assert.equal(f.label(), '恢复任务');
+  assert.equal(f.label(), '请重新进入插件恢复');
   await f.action(); assert.equal(f.created(), 0);
   assert.equal(engine.getActiveTask(), null);
 });

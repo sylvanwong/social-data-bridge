@@ -1,7 +1,9 @@
 <script setup>
+import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import { getTaskStoppingText } from '@/utils/taskStopText';
+import TaskFeedback from './TaskFeedback.vue';
+import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { bitable } from "@lark-base-open/js-sdk";
-import { ElNotification } from "element-plus";
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import request from '@/utils/request'
 import { useSocialData, showErrorMsg, KEYWORD_SEARCH_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
@@ -44,21 +46,26 @@ const tableFieldOptions = ref([]);
 const mappingDraft = ref([]);
 const mappingExpanded = ref(false);
 const tableOutputConfigs = ref({});
+const tableConfigsLoaded = ref(false);
+let tableConfigsError = null;
+let tableConfigsLoadToken = 0;
 const tableConfigSaving = ref(false);
 const tableConfigApplying = ref(false);
+const outputConfigReady = computed(() => tableConfigsLoaded.value && !!formData1.value.table_id && !tableConfigApplying.value && !tableConfigLoadError.value);
+const tableConfigLoadError = ref('');
 const tableConfigSaveStatus = ref('');
+const tableConfigSaves = new Map();
+let tableConfigReadId = 0;
 const FIELD_SELECTION_STORAGE_KEY = 'keyword_search_selected_fields_v1';
 const STREAM_TASK_STORAGE_KEY = 'keyword_search_stream_task_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
-const toastVisible = ref(false);
-const toastText = ref('');
-const toastLoading = ref(false);
+const feedback = useTaskFeedback();
+const { toastVisible, toastText, toastLoading, toastType, taskNotice } = feedback;
 const currentTableName = ref('');
 const isSubmitting = ref(false);
 const isCancelling = ref(false);
 const activeKeywordTaskId = ref('');
-let toastTimer = null;
 
 const pages_options = [
   { value: 0, label: "全量获取" },
@@ -290,26 +297,12 @@ const {
   validateTableFields,
 } = useSocialData(getTableName, props.api_key, KEYWORD_SEARCH_FIELD_MAPPING);
 
-const showToast = (text, isLoading = true) => {
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = null;
-  toastText.value = text;
-  toastLoading.value = isLoading;
-  toastVisible.value = true;
+const showToast = (text, isLoading = true, options = {}) => {
+  if (isLoading) feedback.progress(text, { stopping: isCancelling.value });
+  else feedback.finish(text, options);
 };
-
-const hideToast = () => {
-  if (toastTimer) {
-    clearTimeout(toastTimer);
-    toastTimer = null;
-  }
-  toastVisible.value = false;
-};
-
-const showCompletionToast = (text) => {
-  showToast(text, false);
-  toastTimer = setTimeout(hideToast, 3000);
-};
+const hideToast = () => feedback.hide();
+const showCompletionToast = (text, options = {}) => feedback.finish(text, options);
 
 const showFieldProgress = (message) => {
   showToast(isCancelling.value
@@ -351,25 +344,34 @@ const saveSelectedFieldKeys = async (keys) => {
 const getStoppingText = task => getTaskStoppingText(task, '作品');
 
 const hasRecoverableTask = ref(false);
+const clearing = ref(false);
 const requiresReopen = ref(false);
 let componentUnmounted = false;
-const restoreTask = (task) => {
+const restoreTask = (task, progressText = '正在恢复未完成的数据获取任务…') => {
   hasRecoverableTask.value = true;
   loading.value = true;
   activeKeywordTaskId.value = task.taskId;
-  showToast('正在恢复未完成的数据获取任务…');
+  const status = task.latestStatus;
+  isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
+  showToast(isCancelling.value ? getStoppingText(task) : progressText);
 };
 const resumeSavedTask = async () => {
-  if (requiresReopen.value || componentUnmounted) return;
+  if (requiresReopen.value || componentUnmounted || loading.value) return;
   loading.value = true;
+  feedback.begin('正在检查未完成任务…');
   try {
+    await nextTick();
     const resumed = await keywordStreamTask.resume(restoreTask);
-    if (!resumed) loading.value = false;
+    if (!resumed) {
+      loading.value = false;
+      if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
+      else hideToast();
+    }
   } catch (error) {
     hasRecoverableTask.value = true;
     requiresReopen.value = !!error.requiresReopen;
     loading.value = false;
-    showErrorMsg(error.message || '恢复任务失败，请重试');
+    feedback.fail(error, { persist: true, requiresReopen: requiresReopen.value });
   }
 };
 
@@ -414,7 +416,12 @@ const keywordStreamTask = useIncrementalTask({
     task.targetTableId = result?.tableId || task.targetTableId;
     task.pendingWrite = false;
   },
-  onProgress: (status, task) => {
+  onProgress: (status, task, phase) => {
+    clearing.value = phase === 'clearing';
+    if (clearing.value) {
+      feedback.progress('正在清理任务进度…');
+      return;
+    }
     const processed = Number(status.processed) || 0;
     const total = Number(status.total) || 0;
     if (Number(status.status) === 3 || status.status_text === 'cancel_requested' || status.cancel_requested) {
@@ -431,31 +438,32 @@ const keywordStreamTask = useIncrementalTask({
     ? getStoppingText(task)
     : `正在写入 ${items.length} 条作品，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true),
   onFinish: async (status, task) => {
+    clearing.value = false;
     hasRecoverableTask.value = false;
     loading.value = false;
     isCancelling.value = false;
     activeKeywordTaskId.value = '';
     if (Number(status.status) === 3) {
-      showCompletionToast(`任务已停止，已写入 ${task.writtenCount || 0} 条作品`);
+      showCompletionToast(`任务已停止，已写入 ${task.writtenCount || 0} 条作品`, { stopped: true });
       return;
     }
-    showCompletionToast(Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条作品`);
-    if (Number(status.status) === 2) showErrorMsg(status.reason || '获取数据失败，请稍后重试');
+    if (Number(status.status) === 2) feedback.fail(status.reason || '获取数据失败，请稍后重试');
+    else showCompletionToast(`处理完成，已写入 ${task.writtenCount || 0} 条作品`, { empty: !task.writtenCount });
   },
   onError: async (error, task) => {
+    clearing.value = false;
     hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
     requiresReopen.value = !!error.requiresReopen;
     loading.value = false;
     isCancelling.value = false;
     activeKeywordTaskId.value = '';
-    showCompletionToast(error.message || '任务长时间没有进度');
-    showErrorMsg(error.message || '任务长时间没有进度');
+    feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: requiresReopen.value });
   },
 });
 
 const cancelKeywordTask = async () => {
   const task = keywordStreamTask.getActiveTask();
-  if (!task?.taskId || isCancelling.value) return;
+  if (!task?.taskId || isCancelling.value || clearing.value) return;
 
   isCancelling.value = true;
   showToast(getStoppingText(task), true);
@@ -469,9 +477,12 @@ const cancelKeywordTask = async () => {
     const res = response.data;
     if (res?.sta !== 0) throw new Error(res?.msg || '停止任务失败');
   } catch (error) {
-    isCancelling.value = false;
+    if (keywordStreamTask.getActiveTask() !== task || clearing.value) return;
+    const status = task.latestStatus;
+    isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
     console.error('停止关键词搜索任务失败:', error);
-    showErrorMsg(error.message || '停止任务失败，请稍后重试');
+    showToast(isCancelling.value ? getStoppingText(task) : `任务继续执行，已写入 ${task.writtenCount || 0} 条作品`);
+    showErrorMsg(error?.response?.data?.msg || error.message || '停止任务失败');
   }
 };
 
@@ -479,7 +490,7 @@ const postSearchTask = async (targetTableId = "") => {
   const outputSnapshot = {
     targetTableId, selectedFieldKeys: [...selectedFieldKeys.value],
     writeMode: formData1.value.writeMode,
-    fieldMappings: mappingDraft.value.map(item => ({ ...item })),
+    fieldMappings: formData1.value.radio === 2 ? mappingDraft.value.map(item => ({ ...item })) : [],
   };
   let filter_config = {};
   const socialType = formData1.value.social_type;
@@ -551,7 +562,7 @@ const postSearchTask = async (targetTableId = "") => {
       taskId: res.data.task_id, pendingWrite: false,
       ...outputSnapshot,
     };
-  }, restoreTask);
+  }, task => restoreTask(task, '任务已创建，正在准备获取作品…'));
 };
 
 const getSearchData = async (targetTableId = "") => {
@@ -577,22 +588,34 @@ const loadTableOptions = async () => {
 };
 
 const loadMappingFields = async (tableId) => {
+  const readId = ++tableConfigReadId;
+  const pendingConfig = tableConfigSaves.get(tableId)?.config;
   tableConfigApplying.value = true;
+  tableConfigLoadError.value = '';
   try {
     tableFieldOptions.value = [];
     mappingDraft.value = [];
     if (!tableId) return;
     const table = await bitable.base.getTableById(tableId);
-    tableFieldOptions.value = await table.getFieldMetaList();
-    const config = tableOutputConfigs.value[tableId];
+    const fields = await table.getFieldMetaList();
+    if (componentUnmounted || readId !== tableConfigReadId) return;
+    tableFieldOptions.value = fields;
+    if (!tableConfigsLoaded.value) return;
+    const pending = tableConfigSaves.get(tableId);
+    const config = pending?.config || pendingConfig || tableOutputConfigs.value[tableId];
     formData1.value.writeMode = config?.write_mode || 'upsert';
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
-    tableConfigSaveStatus.value = '';
+    if (pending) tableConfigSaveStatus.value = '保存中';
+    else if (!pendingConfig) tableConfigSaveStatus.value = '';
   } catch (error) {
+    if (componentUnmounted || readId !== tableConfigReadId) return;
     console.error('获取目标表格字段失败:', error);
-    showErrorMsg('获取目标表格字段失败，请稍后重试');
+    tableConfigLoadError.value = `读取目标表配置失败：${error?.message || '请稍后重试'}`;
+    showErrorMsg(tableConfigLoadError.value);
   } finally {
-    tableConfigApplying.value = false;
+    // 缓存应用触发的保存watcher执行完后，再允许用户编辑触发保存。
+    await nextTick();
+    if (!componentUnmounted && readId === tableConfigReadId) tableConfigApplying.value = false;
   }
 };
 
@@ -604,34 +627,77 @@ watch(
 );
 const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
 const loadTableOutputConfigs = async () => {
-  if (!props.api_key) return;
+  const token = ++tableConfigsLoadToken;
+  tableConfigsLoaded.value = false;
+  tableConfigsError = null;
+  if (!props.api_key) return false;
   try {
-    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
+    const baseId = await getBaseId();
+    if (componentUnmounted || token !== tableConfigsLoadToken) return false;
+    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
+    if (componentUnmounted || token !== tableConfigsLoadToken) return false;
+    if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '读取输出表配置失败');
     const data = response.data?.data || response.data;
-    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
+    const list = parseTableConfigList(data);
     tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
-  } catch (error) { console.error('读取关键词搜索表格配置失败:', error); }
+    tableConfigsLoaded.value = true;
+    return true;
+  } catch (error) {
+    if (componentUnmounted || token !== tableConfigsLoadToken) return false;
+    tableConfigsError = error;
+    console.error('读取关键词搜索表格配置失败:', error);
+    return false;
+  }
 };
-const saveTableOutputConfig = async () => {
-  const targetTableId = formData1.value.table_id;
-  if (formData1.value.radio !== 2 || !targetTableId || tableConfigSaving.value || tableConfigApplying.value) return;
+const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, writeMode, fieldMappings }) => {
+  if (componentUnmounted) return;
   tableConfigSaving.value = true;
-  tableConfigSaveStatus.value = '保存中';
+  if (formData1.value.table_id === targetTableId) tableConfigSaveStatus.value = '保存中';
   try {
     const table = await bitable.base.getTableById(targetTableId);
-    const fields = tableFieldOptions.value;
-    const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({
-      ...item,
-      source_name: KEYWORD_SEARCH_FIELD_MAPPING.find(field => field.key === item.source_key)?.name || '',
-      target_field_name: fields.find(field => field.id === item.target_field_id)?.name || '',
-      target_field_type: fields.find(field => field.id === item.target_field_id)?.type,
-    }));
-    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: formData1.value.writeMode, field_mappings: fieldMappings } });
+    const payload = {
+      plugin_type: TASK_PLUGIN_TYPE,
+      base_id: await getBaseId(),
+      target_table_id: targetTableId,
+      target_table_name: await table.getName(),
+      write_mode: writeMode,
+      field_mappings: fieldMappings,
+    };
+    if (componentUnmounted) return;
+    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    if (componentUnmounted) return;
+    if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存关键词搜索表格配置失败');
     const saved = response.data?.data || response.data;
     tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: saved };
-    tableConfigSaveStatus.value = '已保存';
-  } catch (error) { tableConfigSaveStatus.value = '保存失败'; console.error('保存关键词搜索表格配置失败:', error); }
-  finally { tableConfigSaving.value = false; }
+    if (formData1.value.table_id === targetTableId) tableConfigSaveStatus.value = '已保存';
+  } catch (error) {
+    if (!componentUnmounted && formData1.value.table_id === targetTableId) tableConfigSaveStatus.value = '保存失败';
+    throw error;
+  } finally {
+    tableConfigSaving.value = false;
+  }
+});
+const saveTableOutputConfig = async () => {
+  if (!tableConfigsLoaded.value) return;
+  const targetTableId = formData1.value.table_id;
+  if (componentUnmounted || formData1.value.radio !== 2 || !targetTableId || tableConfigApplying.value || tableConfigLoadError.value) return;
+  const writeMode = formData1.value.writeMode;
+  const fields = tableFieldOptions.value;
+  const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({
+    ...item,
+    source_name: KEYWORD_SEARCH_FIELD_MAPPING.find(field => field.key === item.source_key)?.name || '',
+    target_field_name: fields.find(field => field.id === item.target_field_id)?.name || '',
+    target_field_type: fields.find(field => field.id === item.target_field_id)?.type,
+  }));
+  const saving = persistTableOutputConfig({ targetTableId, writeMode, fieldMappings });
+  tableConfigSaves.set(targetTableId, { saving, config: { write_mode: writeMode, field_mappings: fieldMappings } });
+  try {
+    await saving;
+  } catch (error) {
+    if (!componentUnmounted) console.error('保存关键词搜索表格配置失败:', error);
+  } finally {
+    if (tableConfigSaves.get(targetTableId)?.saving === saving) tableConfigSaves.delete(targetTableId);
+  }
 };
 watch(() => formData1.value.table_id, loadMappingFields);
 watch([() => formData1.value.writeMode, mappingDraft], saveTableOutputConfig, { deep: true });
@@ -683,17 +749,19 @@ onMounted(async () => {
     await resumeSavedTask();
   } catch (error) {
     hasRecoverableTask.value = true;
-    showErrorMsg(error.message || '读取任务状态失败，请重试恢复');
+    loading.value = false;
+    requiresReopen.value = !!error.requiresReopen;
+    feedback.fail(error, { persist: true });
   } finally { isSubmitting.value = false; }
 });
 
 onUnmounted(() => {
   componentUnmounted = true;
   keywordStreamTask.stop();
-  if (toastTimer) clearTimeout(toastTimer);
 });
 
 const commit = async () => {
+  if (requiresReopen.value || componentUnmounted) return;
   if (hasRecoverableTask.value) return resumeSavedTask();
   if (isSubmitting.value || loading.value) {
     return;
@@ -702,7 +770,7 @@ const commit = async () => {
   isSubmitting.value = true;
   try {
     if (!props.api_key) {
-      showErrorMsg("请输入API key");
+      showErrorMsg("请输入 API Key");
       return;
     }
     const { social_type, keyword, radio, table_id } = formData1.value;
@@ -730,13 +798,30 @@ const commit = async () => {
       showErrorMsg("请选择现有表格");
       return;
     }
+    if (radio === 2 && !tableConfigsLoaded.value) {
+      loading.value = true;
+      feedback.begin('正在读取输出表配置…');
+      const loaded = await loadTableOutputConfigs();
+      if (componentUnmounted) return;
+      if (!loaded) throw tableConfigsError || new Error('读取输出表配置失败');
+      await loadMappingFields(table_id);
+    }
+    if (radio === 2 && tableConfigApplying.value) {
+      showErrorMsg('正在读取目标表配置，请稍后重试');
+      return;
+    }
+    if (radio === 2 && tableConfigLoadError.value) {
+      showErrorMsg(tableConfigLoadError.value);
+      return;
+    }
 
-    showToast(`正在启动关键词搜索...${TASK_TOAST_SUFFIX}`, true);
+    loading.value = true;
+    feedback.begin('正在启动关键词搜索...');
     await nextTick();
     if (radio === 2) {
       showToast(`正在检查目标表字段...${TASK_TOAST_SUFFIX}`, true);
       const isValid = await validateTableFields(table_id, selectedFieldKeys.value, {
-        successMessageSuffix: `，${TASK_TOAST_SUFFIX}`,
+        throwOnError: true,
         writeMode: formData1.value.writeMode,
         fieldMappings: mappingDraft.value,
         onProgress: showFieldProgress,
@@ -744,7 +829,8 @@ const commit = async () => {
       if (isValid) {
         await getSearchData(table_id);
       } else {
-        showCompletionToast('目标字段校验未通过，任务未开始');
+        loading.value = false;
+        showCompletionToast('目标字段校验未通过，任务未开始', { type: 'error' });
       }
       return;
     }
@@ -753,15 +839,16 @@ const commit = async () => {
     bitable.bridge.setData("search_platform", formData1.value.social_type);
     bitable.bridge.setData("search_keyword", formData1.value.keyword);
   } catch (error) {
-    console.error("提交关键词搜索任务失败:", error);
-    showCompletionToast(`任务提交失败：${error.message || '请稍后重试'}`);
-    showErrorMsg(error.message || "提交失败，请稍后重试");
+    loading.value = false;
+    requiresReopen.value = !!error.requiresReopen;
+    feedback.fail(error, { persist: requiresReopen.value });
   } finally {
     isSubmitting.value = false;
   }
 };
 
 const taskActionState = computed(() => {
+  if (clearing.value) return 'clearing';
   if (isCancelling.value) return 'stopping';
   if (loading.value && activeKeywordTaskId.value) return 'running';
   if (loading.value || isSubmitting.value) return 'submitting';
@@ -808,7 +895,7 @@ watch(selectedFieldKeys, (keys) => {
       <span class="sub-page-title">关键词搜索获取</span>
     </div>
     <div class="form-card">
-      <el-form ref="form" class="form" :model="formData1" label-position="top">
+      <el-form ref="form" class="form" :model="formData1" label-position="top" :disabled="loading || isSubmitting" :inert="(loading || isSubmitting) ? '' : null" :aria-busy="loading || isSubmitting">
         <section class="settings-section" aria-labelledby="keyword-fetch-settings-title">
           <h2 id="keyword-fetch-settings-title" class="settings-section-heading">
             <span class="settings-step">1</span>
@@ -1077,10 +1164,15 @@ watch(selectedFieldKeys, (keys) => {
           <el-select v-model="formData1.table_id" placeholder="请选择" style="width: 100%">
             <el-option v-for="tl in table_options" :key="tl.id" :label="tl.name" :value="tl.id" />
           </el-select>
+          <p v-if="tableConfigApplying" class="sub-hint">正在读取目标表配置…</p>
+          <div v-else-if="tableConfigLoadError" class="sub-hint" role="alert">
+            {{ tableConfigLoadError }}
+            <el-button link type="primary" :disabled="loading || isSubmitting" @click="loadMappingFields(formData1.table_id)">重新读取配置</el-button>
+          </div>
         </el-form-item>
         <el-form-item v-if="formData1.radio === 2" label="" style="margin-top: 0">
           <div class="c-label">数据写入方式</div>
-          <el-radio-group v-model="formData1.writeMode" class="radio-block">
+          <el-radio-group v-model="formData1.writeMode" class="radio-block" :disabled="!outputConfigReady">
             <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
               {{ item.label }}
               <el-tooltip v-if="item.value === 'upsert'" effect="dark" placement="top">
@@ -1124,43 +1216,34 @@ watch(selectedFieldKeys, (keys) => {
           <div v-show="mappingExpanded" class="mapping-accordion-panel">
             <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
             <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
-              <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+              <el-select v-model="mapping.source_key" :disabled="!outputConfigReady" placeholder="选择输出字段" size="small">
                 <el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
               </el-select>
               <span class="mapping-arrow">→</span>
-              <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+              <el-select v-model="mapping.target_field_id" :disabled="!outputConfigReady" placeholder="选择目标字段" size="small">
                 <el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
               </el-select>
-              <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+              <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)" :disabled="!outputConfigReady">删除</el-button>
             </div>
             <div class="mapping-actions">
-              <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button>
+              <el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })" :disabled="!outputConfigReady">+ 添加字段映射</el-button>
             </div>
           </div>
         </div>
         </section>
       </el-form>
+      <p v-if="taskNotice" class="sub-hint" role="status">{{ taskNotice }}</p>
 
       <el-button
         class="commit-btn"
         :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
-        :loading="taskActionState === 'submitting' || taskActionState === 'stopping'"
-        :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'reopen'"
+        :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
+        :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || taskActionState === 'reopen' || (taskActionState === 'idle' && formData1.radio === 2 && (tableConfigApplying || !!tableConfigLoadError))"
         @click="handleTaskAction"
-      >{{ taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
+      >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
     </div>
 
-    <div class="toast-wrap" :class="{ show: toastVisible }">
-      <div class="toast" :class="{ 'toast-loading': toastLoading }">
-        <div class="toast-icon" v-if="toastLoading">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 2a10 10 0 0 1 10 10" /></svg>
-        </div>
-        <div class="toast-icon" v-else>
-          <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="#00B42A" /><path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
-        </div>
-        <span>{{ toastText }}</span>
-      </div>
-    </div>
+    <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>
 
@@ -1279,45 +1362,10 @@ watch(selectedFieldKeys, (keys) => {
   min-height: 80px;
   padding: 8px 12px;
 }
-.commit-btn {
-  background: #A8071A;
-  width: 100%;
-  height: 36px;
-  border-radius: 6px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 500;
-  margin-top: 0;
-  cursor: pointer;
-  border: none;
-  transition: background 0.2s ease;
-}
-.commit-btn:hover { background: #C11126; }
-.commit-btn:active { background: #8A0515; }
-.commit-btn.is-running {
-  background: #fff;
-  border: 1px solid #d5495c;
-  color: #a8071a;
-}
-.commit-btn.is-running:hover { background: #fff1f2; }
-.commit-btn.is-running:active { background: #ffe4e6; }
-.commit-btn.is-running.is-disabled {
-  background: #fafafa;
-  border-color: #e5e6eb;
-  color: #86909c;
-  cursor: not-allowed;
-}
-.toast-wrap { width: max-content; max-width: calc(100vw - 32px); position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.95); z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; }
-.toast-wrap.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-.toast { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; background: #FFFFFF; border: 1px solid #E5E6EB; border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12); font-size: 14px; font-weight: 500; color: #1D2129; line-height: 22px; max-width: calc(100vw - 32px); box-sizing: border-box; white-space: normal; overflow-wrap: anywhere; }
-.toast-icon { width: 18px; height: 18px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
-.toast-icon svg { width: 100%; height: 100%; }
-.toast-loading .toast-icon { animation: spin 0.8s linear infinite; color: #A8071A; }
-@keyframes spin { to { transform: rotate(360deg); } }
+
+.commit-btn { margin-top: 0; }
+.sub-hint { margin:0 0 16px; color:#86909c; font-size:12px; line-height:18px; overflow-wrap:anywhere; }
+
 .c-label {
   display: flex;
   align-items: center;
@@ -1540,4 +1588,5 @@ watch(selectedFieldKeys, (keys) => {
 .source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
 .custom-radio-group { gap: 8px; }
 .sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: 14px; font-weight: 400; line-height: 20px; }
+
 </style>

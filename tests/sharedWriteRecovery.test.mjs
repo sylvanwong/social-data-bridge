@@ -1,3 +1,4 @@
+import { resolveWritableField } from '../src/utils/tableFields.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -23,7 +24,7 @@ function fixture({ mapped = false, loseResponse = true, fallback = false, fallba
   const config = { key: 'user_id', name: '作者ID', type: 'text' };
   const fallbackConfig = { key: 'identity_key', name: '作者标识', type: 'text' };
   const rows = [], events = [];
-  const makeField = id => ({ id, getType: async () => 'text', createCell: async value => ({ fieldId: id, value }) });
+  const makeField = id => ({ id, getType: async () => 'text', createCell: async value => ({ fieldId: id, value, getValue: async () => value }) });
   const field = makeField('mapped-id');
   const metadata = [{ id: field.id, name: mapped ? '自定义ID' : '作者ID' }];
   if (fallbackColumn) metadata.push({ id: 'fallback-id', name: mapped ? '自定义标识' : '作者标识' });
@@ -51,7 +52,7 @@ function fixture({ mapped = false, loseResponse = true, fallback = false, fallba
       return records.map(record => record.recordId);
     },
   };
-  const bindings = {
+  const bindings = { resolveWritableField,
     fieldMapping: fallback ? [config, fallbackConfig] : [config], getActiveFieldMapping: () => [],
     bitable: { base: { getTableById: async () => table } },
     resolveFieldMetaByConfig: (map, cfg) => ({ fieldMeta: map.get(cfg.name) }),

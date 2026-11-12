@@ -1,10 +1,16 @@
 <script setup>
-import { createTableConfigSaver } from '@/utils/tableOutputConfig.mjs';
+import { nextTableName } from '../utils/tableNames.mjs';
+import { parseManualUrls, extractCellLink } from '../utils/sourceLinks.mjs';
+import { readRecordIds, readSourceRows } from '../utils/sourceTableRows.mjs';
+import { resolveWritableField } from "../utils/tableFields.js";
+import TaskFeedback from "./TaskFeedback.vue";
+import { useTaskFeedback } from "../composables/useTaskFeedback.mjs";
+import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import InputFilterEditor from './InputFilterEditor.vue';
 import { cloneInputFilter, prepareInputFilter, filterRecordIds } from '@/utils/inputFilter.mjs';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
-import { ElNotification } from "element-plus";
+import { ElMessage } from "element-plus";
 import request from '@/utils/request';
 
 const emit = defineEmits(['back']);
@@ -72,7 +78,7 @@ const FIELD_CONFIG = [
   { key: "verification_category", name: "认证类型", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.verification_category ?? "" },
   { key: "social_type", name: "平台", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.social_type ?? "" },
   { key: "ip_location", name: "IP属地", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.ip_location ?? "" },
-  { key: "ctime", name: "提取时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime ? new Date(item.ctime * 1000).getTime() : "") },
+  { key: "ctime", name: "提取时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime == null || item.ctime === '' ? null : new Date(item.ctime * 1000).getTime()) },
 ];
 
 const FIELD_TYPE_NAME = {
@@ -161,10 +167,8 @@ const fieldOptions = ref([]);
 const tableOptions = ref([]);
 const loading = ref(false);
 const stopRequested = ref(false);
-const toastVisible = ref(false);
-const toastText = ref('');
-const toastLoading = ref(false);
-let toastTimer = null;
+const taskFeedback = useTaskFeedback();
+const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const selectedFieldKeys = ref([]);
 const writeMode = ref('upsert');
 const mappingDraft = ref([]);
@@ -179,8 +183,9 @@ const taskOutputLoading = ref(false);
 const taskOutputError = ref('');
 const taskOutputConfigReady = computed(() => {
   const config = taskDialogForm.value;
-  if (config.targetType !== 'existing') return true;
-  return !!config.targetTableId && taskOutputTableId.value === config.targetTableId;
+  if (!['current', 'existing'].includes(config.targetType)) return true;
+  const tableId = config.targetType === 'current' ? config.sourceTableId : config.targetTableId;
+  return !!tableId && taskOutputTableId.value === tableId;
 });
 const fieldReadRequests = new WeakMap();
 const tableOutputConfigs = ref({});
@@ -188,7 +193,11 @@ const mappingExpanded = ref(false);
 const tableConfigLoading = ref(false);
 const loadedTableConfigs = ref(new Set());
 const tableConfigSaving = ref(false);
+const tableConfigSaves = new Map();
+let tableConfigSaveSequence = 0;
+const tableConfigSaveRevisions = new Map();
 const tableConfigApplying = ref(false);
+const outputConfigReady = computed(() => !tableConfigLoading.value && !tableConfigApplying.value && !!mainOutputTableId.value && loadedTableConfigs.value.has(mainOutputTableId.value) && (formData.value.targetType !== 'existing' || mainOutputTableId.value === formData.value.targetTableId));
 const tableConfigSaveStatus = ref('');
 const fieldSelectionReady = ref(false);
 
@@ -235,6 +244,9 @@ const getWriteFieldConfigs = (keys = selectedFieldKeys.value, mode = writeMode.v
 };
 
 const getAllowedFieldTypes = (config) => {
+  if (config.key === 'profile_url') {
+    return [FieldType.Url, FieldType.Text];
+  }
   if (config.type === FieldType.Number) {
     return [FieldType.Number, FieldType.Text];
   }
@@ -249,6 +261,7 @@ const isFieldTypeCompatible = (fieldType, config) => {
 };
 
 const normalizeFieldValue = (value, config, fieldType) => {
+  if ((fieldType === FieldType.Number || fieldType === FieldType.DateTime) && (value == null || value === '')) return null;
   if (config.type === FieldType.Number && fieldType === FieldType.Text) {
     return String(value ?? '');
   }
@@ -388,7 +401,7 @@ const getFieldListByType = async ({ silent = false } = {}) => {
     console.error('获取字段列表失败:', error);
     fieldOptions.value = [{ id: 'nodata', name: '获取字段列表失败' }];
     if (!silent) {
-      ElNotification({ message: '当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
+      ElMessage({ plain: true, message: '当前未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 5000 });
     }
   }
 };
@@ -411,11 +424,11 @@ const loadTableOptions = async () => {
   } catch (error) {
     console.error('获取表格列表失败:', error);
     tableOptions.value = [];
-    ElNotification({ message: '获取表格列表失败，请稍后重试', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: '获取表格列表失败，请稍后重试', type: 'error', duration: 5000 });
   }
 };
 
-const getTableFields = async (tableId, targetFields = tableFieldOptions) => {
+const getTableFields = async (tableId, targetFields = tableFieldOptions, { throwOnError = false } = {}) => {
   const requestId = Symbol();
   fieldReadRequests.set(targetFields, requestId);
   if (!tableId) { targetFields.value = []; return; }
@@ -429,6 +442,7 @@ const getTableFields = async (tableId, targetFields = tableFieldOptions) => {
     if (fieldReadRequests.get(targetFields) !== requestId) return;
     targetFields.value = [];
     console.error('读取目标表字段失败:', error);
+    if (throwOnError) throw error;
     return false;
   }
 };
@@ -444,16 +458,22 @@ const loadCurrentTableFields = async () => {
 };
 
 const loadCurrentTableOutputConfig = async () => {
+  const requestId = ++mainConfigReadId.value;
   try {
     const table = await bitable.base.getActiveTable();
+    if (requestId !== mainConfigReadId.value || formData.value.targetType !== 'current') return;
     await loadTableOutputConfig(table.id);
   } catch (error) {
     console.error('读取当前表格映射配置失败:', error);
   }
 };
 
-const loadTableOutputConfig = async (tableId) => {
+const loadTableOutputConfig = async (tableId, { throwOnError = false } = {}) => {
   const requestId = ++mainConfigReadId.value;
+  const pendingSave = tableConfigSaves.get(tableId);
+  const pendingConfig = pendingSave?.config;
+  const capturedSaveRevision = pendingSave?.saveRevision ?? tableConfigSaveSequence;
+  const savedRevisions = new Map(tableConfigSaveRevisions);
   mainOutputTableId.value = '';
   loadedTableConfigs.value.delete(tableId);
   if (!props.api_key || !tableId) return;
@@ -461,26 +481,42 @@ const loadTableOutputConfig = async (tableId) => {
   tableConfigApplying.value = true;
   try {
     const selection = await bitable.base.getSelection();
-    const response = await request({
-      url: TABLE_CONFIGS_API_PATH,
-      method: 'get',
-      headers: { authorization: `Bearer ${props.api_key}` },
-      params: { plugin_type: TASK_PLUGIN_TYPE, base_id: selection.baseId || '' },
-    });
+    let list, readError;
+    try {
+      const response = await request({
+        url: TABLE_CONFIGS_API_PATH,
+        method: 'get',
+        headers: { authorization: `Bearer ${props.api_key}` },
+        params: { plugin_type: TASK_PLUGIN_TYPE, base_id: selection.baseId || '' },
+      });
+      if (response?.data?.sta !== 0) throw new Error(response?.data?.msg || '读取输出表配置失败');
+      list = parseTableConfigList(response.data.data);
+    } catch (error) { readError = error; }
     if (requestId !== mainConfigReadId.value) return;
-    if (response.data?.sta !== 0) throw new Error(response.data?.msg || '读取输出表配置失败');
-    const data = response.data?.data;
-    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
-    tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
-    const config = tableOutputConfigs.value[tableId];
+    const savedRevision = tableConfigSaveRevisions.get(tableId) || 0;
+    // 捕获的待保存配置自身成功，也能确认当前配置；读取前的历史保存不能掩盖新错误。
+    const savedDuringRead = savedRevision > capturedSaveRevision
+      || (!!pendingSave && savedRevision === capturedSaveRevision);
+    if (!savedDuringRead && readError) throw readError;
+    if (list) {
+      const configs = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
+      // 旧列表不能回退读取期间已成功保存的任意表配置。
+      for (const [id, revision] of tableConfigSaveRevisions) {
+        if (revision !== savedRevisions.get(id)) configs[id] = tableOutputConfigs.value[id];
+      }
+      tableOutputConfigs.value = configs;
+    }
+    const config = tableConfigSaves.get(tableId)?.config
+      || (savedDuringRead ? tableOutputConfigs.value[tableId] : pendingConfig || tableOutputConfigs.value[tableId]);
     writeMode.value = config?.write_mode || 'upsert';
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
     loadedTableConfigs.value.add(tableId);
     mainOutputTableId.value = tableId;
   } catch (error) {
     if (requestId !== mainConfigReadId.value) return;
+    if (throwOnError) throw error;
     console.error('读取目标表配置失败:', error);
-    ElNotification({ message: error.message || '读取输出表配置失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '读取输出表配置失败', type: 'error', duration: 5000 });
   } finally {
     if (requestId === mainConfigReadId.value) {
       tableConfigLoading.value = false;
@@ -489,8 +525,22 @@ const loadTableOutputConfig = async (tableId) => {
   }
 };
 
+const ensureMainTableOutputConfig = async (sourceTable = null) => {
+  if (!['existing', 'current'].includes(formData.value.targetType)) return;
+  const tableId = formData.value.targetType === 'current' ? sourceTable.id : formData.value.targetTableId;
+  if (!loadedTableConfigs.value.has(tableId) || mainOutputTableId.value !== tableId) {
+    await loadTableOutputConfig(tableId, { throwOnError: true });
+    if (!loadedTableConfigs.value.has(tableId) || mainOutputTableId.value !== tableId) throw new Error('输出表配置尚未加载完成，请重试');
+    return true;
+  }
+  return false;
+};
+
 const applyTaskTableOutputConfig = async (tableId) => {
   const requestId = ++taskConfigReadId.value;
+  const pendingSave = tableConfigSaves.get(tableId);
+  const pendingConfig = pendingSave?.config;
+  const capturedSaveRevision = pendingSave?.saveRevision ?? tableConfigSaveSequence;
   taskOutputTableId.value = '';
   taskOutputLoading.value = false;
   taskOutputError.value = '';
@@ -504,22 +554,29 @@ const applyTaskTableOutputConfig = async (tableId) => {
   }
   taskOutputLoading.value = true;
   try {
-    const fieldsLoaded = await getTableFields(tableId, taskTableFieldOptions);
+    const fieldsLoaded = await getTableFields(tableId, taskTableFieldOptions, { throwOnError: true });
     if (requestId !== taskConfigReadId.value) return;
     if (fieldsLoaded === false) throw new Error('读取目标表字段失败');
     if (!props.api_key) throw new Error('请先设置 API Key');
     const selection = await bitable.base.getSelection();
-    const response = await request({
-      url: TABLE_CONFIGS_API_PATH,
-      method: 'get',
-      headers: { authorization: `Bearer ${props.api_key}` },
-      params: { plugin_type: TASK_PLUGIN_TYPE, base_id: selection.baseId || '' },
-    });
+    let list, readError;
+    try {
+      const response = await request({
+        url: TABLE_CONFIGS_API_PATH,
+        method: 'get',
+        headers: { authorization: `Bearer ${props.api_key}` },
+        params: { plugin_type: TASK_PLUGIN_TYPE, base_id: selection.baseId || '' },
+      });
+      if (response?.data?.sta !== 0) throw new Error(response?.data?.msg || '读取输出表配置失败');
+      list = parseTableConfigList(response.data.data);
+    } catch (error) { readError = error; }
     if (requestId !== taskConfigReadId.value) return;
-    if (response.data?.sta !== 0) throw new Error(response.data?.msg || '读取输出表配置失败');
-    const data = response.data?.data;
-    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
-    const config = list.find(item => item?.target_table_id === tableId);
+    const savedRevision = tableConfigSaveRevisions.get(tableId) || 0;
+    const savedDuringRead = savedRevision > capturedSaveRevision
+      || (!!pendingSave && savedRevision === capturedSaveRevision);
+    if (!savedDuringRead && readError) throw readError;
+    const config = tableConfigSaves.get(tableId)?.config
+      || (savedDuringRead ? tableOutputConfigs.value[tableId] : pendingConfig || list.find(item => item?.target_table_id === tableId));
     taskDialogForm.value.writeMode = config?.write_mode || 'upsert';
     taskMappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
     taskDialogForm.value.fieldMappings = taskMappingDraft.value.map(item => ({ ...item }));
@@ -552,6 +609,7 @@ const persistTableOutputConfig = createTableConfigSaver(async (config) => {
     if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存输出表配置失败');
     const saved = response.data.data || payload;
     tableOutputConfigs.value = { ...tableOutputConfigs.value, [config.targetTableId]: saved };
+    tableConfigSaveRevisions.set(config.targetTableId, config.saveRevision);
     tableConfigSaveStatus.value = '已保存';
     return true;
   } catch (error) {
@@ -572,20 +630,21 @@ const saveTableOutputConfig = async (outputConfig = null) => {
   };
   const targetTableId = source.targetType === 'current'
     ? source.resolvedTargetTableId || mainOutputTableId.value : source.targetTableId;
-  if (source.targetType !== 'existing') return true;
+  if (!['current', 'existing'].includes(source.targetType)) return true;
   if (outputConfig && taskDialogVisible.value && taskOutputTableId.value !== targetTableId) {
     throw new Error('输出表配置尚未加载完成，请加载完成后再保存');
   }
   if (!targetTableId || (!outputConfig && source.targetType === 'existing' && targetTableId !== formData.value.targetTableId)) {
     throw new Error('输出表配置尚未成功读取，请重新选择目标表后再保存');
   }
-  if (!loadedTableConfigs.value.has(targetTableId)) throw new Error('输出表配置尚未成功读取，请重新打开页面后再保存');
+  if (!loadedTableConfigs.value.has(targetTableId)) throw new Error('输出表配置尚未成功读取，请重试加载后再保存');
   const targetFields = source.targetFieldOptions || tableFieldOptions.value;
   const fieldMappings = (source.fieldMappings || []).map(item => ({ ...item }));
   if (fieldMappings.some(item => !item.source_key || !item.target_field_id)) {
     throw new Error('请完成字段映射后再保存');
   }
-  return persistTableOutputConfig({
+  const config = {
+    saveRevision: ++tableConfigSaveSequence,
     targetTableId,
     writeMode: source.writeMode || 'upsert',
     fieldMappings: fieldMappings.map(item => ({
@@ -593,7 +652,11 @@ const saveTableOutputConfig = async (outputConfig = null) => {
       source_name: FIELD_CONFIG.find(field => field.key === item.source_key)?.name || item.source_name || '',
       target_field_name: targetFields.find(field => field.id === item.target_field_id)?.name || item.target_field_name || '',
     })),
-  });
+  };
+  const saving = persistTableOutputConfig(config);
+  tableConfigSaves.set(targetTableId, { saving, saveRevision: config.saveRevision, config: { write_mode: config.writeMode, field_mappings: config.fieldMappings } });
+  try { return await saving; }
+  finally { if (tableConfigSaves.get(targetTableId)?.saving === saving) tableConfigSaves.delete(targetTableId); }
 };
 
 const saveMainTableOutputConfig = () => {
@@ -604,43 +667,11 @@ const saveMainTableOutputConfig = () => {
 };
 
 
-const parseManualUrls = (text) => {
-  if (!text || typeof text !== 'string') {
-    return [];
-  }
-
-  return [...new Set(
-    text
-      .split(/[\n,，]+/)
-      .map(item => item.trim())
-      .filter(Boolean)
-  )];
-};
-
 const createSequentialTable = async (baseTableName) => {
   try {
     const existingTables = await bitable.base.getTableMetaList();
-    const tableNames = existingTables.map(table => table.name);
-
-    const existsBaseTable = tableNames.includes(baseTableName);
-    const existsSequentialTable = tableNames.some(name => name.startsWith(`${baseTableName}`) && /\d+$/.test(name.slice(baseTableName.length)));
-    if (!existsBaseTable && !existsSequentialTable) {
-      return await bitable.base.addTable({ name: baseTableName });
-    }
-
-    const reg = new RegExp(`^${baseTableName}(\\d+)$`);
-    let maxIndex = 0;
-    tableNames.forEach(name => {
-      const match = name.match(reg);
-      if (match) {
-        const index = parseInt(match[1], 10);
-        if (index > maxIndex) {
-          maxIndex = index;
-        }
-      }
-    });
-
-    return await bitable.base.addTable({ name: `${baseTableName}${maxIndex + 1}` });
+    const name = nextTableName(baseTableName, existingTables.map(table => table.name));
+    return await bitable.base.addTable({ name });
   } catch (error) {
     console.error('创建表格失败:', error);
     throw error;
@@ -682,22 +713,23 @@ const setupNewTableFields = async (tableId, activeFieldConfigs, onProgress = nul
 
   onProgress?.('正在设置字段格式...');
   const latestFieldList = await table.getFieldList();
-  for (const field of latestFieldList) {
-    const name = await field.getName();
+  for (const sourceField of latestFieldList) {
+    const name = await sourceField.getName();
     const config = activeFieldConfigs.find(item => item.name === name);
-    if (!config) {
+    if (!config || (!config.formatter && !config.dateFormat)) {
       continue;
     }
-    if (config.formatter && field.type === FieldType.Number) {
+    const { field, fieldType } = await resolveWritableField(table, sourceField);
+    if (config.formatter && fieldType === FieldType.Number) {
       await field.setFormatter(config.formatter);
     }
-    if (config.dateFormat && field.type === FieldType.DateTime) {
+    if (config.dateFormat && fieldType === FieldType.DateTime) {
       await field.setDateFormat(config.dateFormat);
     }
   }
 };
 
-const resolveTargetTableId = async (targetType, activeFieldConfigs, onProgress = null) => {
+const resolveTargetTableId = async (targetType, activeFieldConfigs, onProgress = null, fieldMappings = []) => {
   if (targetType === 'new') {
     onProgress?.('正在创建目标表...');
     const tableId = await createManualTargetTable();
@@ -709,13 +741,11 @@ const resolveTargetTableId = async (targetType, activeFieldConfigs, onProgress =
 
   if (targetType === 'existing') {
     const tableId = formData.value.targetTableId;
-    const mappedKeys = new Set(mappingDraft.value
-      .filter(item => item?.source_key && item?.target_field_id)
-      .map(item => item.source_key));
     const fieldNameToId = await validateAndAddFields(
       tableId,
-      activeFieldConfigs.filter(field => !mappedKeys.has(field.key)),
-      onProgress
+      activeFieldConfigs,
+      onProgress,
+      fieldMappings
     );
     if (!fieldNameToId) {
       return null;
@@ -726,65 +756,12 @@ const resolveTargetTableId = async (targetType, activeFieldConfigs, onProgress =
   return null;
 };
 
-const getAllVisibleRecordIdList = async (view, limit = Infinity) => {
-  const pageSize = 200;
-  let pageToken = undefined;
-  let allRecordIdList = [];
-  let loopCount = 0;
-  const maxLoops = 100;
+const getRecordIdListByScope = (table, scope, rowCount) =>
+  readRecordIds(table, scope, rowCount, ElMessage);
 
-  while (loopCount < maxLoops) {
-    loopCount++;
-    const result = await view.getVisibleRecordIdListByPage({
-      pageSize,
-      pageToken
-    });
-
-    let recordIds = [];
-    let hasMore = false;
-
-    if (Array.isArray(result)) {
-      recordIds = result;
-      hasMore = result.length === pageSize;
-    } else if (result && typeof result === 'object') {
-      recordIds = result.recordIds || result.records || result.data || result.list || [];
-      hasMore = result.hasMore || result.hasNext || result.has_next || false;
-      pageToken = result.pageToken || result.nextPageToken || result.next_token;
-    }
-
-    if (recordIds.length > 0) {
-      allRecordIdList = allRecordIdList.concat(recordIds);
-    }
-
-    if (allRecordIdList.length >= limit || !hasMore || recordIds.length === 0) {
-      break;
-    }
-  }
-
-  return allRecordIdList;
-};
-
-const getRecordIdListByScope = async (table, scope, rowCount) => {
-  const view = await table.getActiveView();
-
-  let recordIdList = [];
-  if (scope === 'all') {
-    recordIdList = await getAllVisibleRecordIdList(view);
-  } else if (scope === 'selected') {
-    recordIdList = await view.getSelectedRecordIdList();
-    if (recordIdList.length === 0) {
-      ElNotification({ message: '请先在表格中选择至少一行数据', type: 'warning', duration: 0 });
-      return null;
-    }
-  } else {
-    const allRecordIdList = await getAllVisibleRecordIdList(view, rowCount);
-    recordIdList = allRecordIdList.slice(0, rowCount);
-  }
-  return recordIdList;
-};
-
-const validateAndAddFields = async (tableId, activeFieldConfigs, onProgress = null) => {
+const validateAndAddFields = async (tableId, activeFieldConfigs, onProgress = null, fieldMappings = []) => {
   try {
+    if (fieldMappings.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
     onProgress?.('正在检查目标表字段...');
     const table = tableId
       ? await bitable.base.getTableById(tableId)
@@ -794,7 +771,20 @@ const validateAndAddFields = async (tableId, activeFieldConfigs, onProgress = nu
 
     for (const field of fieldList) {
       const name = await field.getName();
-      fieldMetaMap.set(name, { id: field.id, type: field.type });
+      fieldMetaMap.set(name, { id: field.id, type: await field.getType() });
+    }
+
+    const explicitMappings = new Map(fieldMappings
+      .filter(mapping => mapping?.source_key && mapping?.target_field_id)
+      .map(mapping => [mapping.source_key, mapping.target_field_id]));
+    for (const config of activeFieldConfigs) {
+      const targetFieldId = explicitMappings.get(config.key);
+      if (!targetFieldId) continue;
+      const targetField = fieldList.find(field => field.id === targetFieldId);
+      if (!targetField) {
+        throw new Error(`字段"${config.name}"映射的目标字段不存在，请重新选择目标字段后重试`);
+      }
+      fieldMetaMap.set(config.name, { id: targetField.id, type: await targetField.getType() });
     }
 
     const missingFields = [];
@@ -815,17 +805,18 @@ const validateAndAddFields = async (tableId, activeFieldConfigs, onProgress = nu
 
     if (typeMismatchFields.length > 0) {
       const errorMsg = typeMismatchFields.map(f => `"${f.name}" 类型不匹配，仅支持${f.expected}`).join(', ');
-      ElNotification({ message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 0 });
+      if (loading.value) throw new Error(`字段类型错误: ${errorMsg}`);
+      ElMessage({ plain: true, message: `字段类型错误: ${errorMsg}`, type: 'error', duration: 8000 });
       return null;
     }
 
     const ensureFieldDisplayConfig = async (fieldId, fieldConfig) => {
-      if (!fieldId) return;
-      const field = await table.getFieldById(fieldId);
-      if (fieldConfig.formatter && field.type === FieldType.Number) {
+      if (!fieldId || (!fieldConfig.formatter && !fieldConfig.dateFormat)) return;
+      const { field, fieldType } = await resolveWritableField(table, await table.getFieldById(fieldId));
+      if (fieldConfig.formatter && fieldType === FieldType.Number) {
         await field.setFormatter(fieldConfig.formatter);
       }
-      if (fieldConfig.dateFormat && field.type === FieldType.DateTime) {
+      if (fieldConfig.dateFormat && fieldType === FieldType.DateTime) {
         await field.setDateFormat(fieldConfig.dateFormat);
       }
     };
@@ -869,7 +860,8 @@ const validateAndAddFields = async (tableId, activeFieldConfigs, onProgress = nu
         await ensureFieldDisplayConfig(fieldMetaMap.get(fieldConfig.name)?.id, fieldConfig);
         createdFieldCount++;
       } catch (e) {
-        ElNotification({ message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 0 });
+        if (loading.value) throw e;
+        ElMessage({ plain: true, message: `添加字段 "${fieldConfig.name}" 失败`, type: 'error', duration: 5000 });
         return null;
       }
     }
@@ -880,12 +872,14 @@ const validateAndAddFields = async (tableId, activeFieldConfigs, onProgress = nu
     }
 
     if (missingFields.length > 0) {
-      ElNotification({ message: `已自动添加 ${missingFields.length} 个字段`, type: 'success' });
+      if (loading.value) showToast(`已自动添加 ${missingFields.length} 个字段`);
+      else ElMessage({ plain: true, message: `已自动添加 ${missingFields.length} 个字段`, type: 'success', duration: 3000 });
     }
 
     return fieldNameToId;
   } catch (error) {
-    ElNotification({ message: `字段操作失败: ${error.message || error}`, type: 'error', duration: 0});
+    if (loading.value) throw error;
+    ElMessage({ plain: true, message: `字段操作失败: ${error.message || error}`, type: 'error', duration: 5000});
     return null;
   }
 };
@@ -904,8 +898,10 @@ const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFie
       if (!fieldId) throw new Error(`未找到输出字段「${config.name}」`);
 
       try {
-        const field = await table.getFieldById(fieldId);
-        const fieldType = await field.getType();
+        const { field, fieldType } = await resolveWritableField(table, await table.getFieldById(fieldId));
+        if (!isFieldTypeCompatible(fieldType, config)) {
+          throw new Error(`字段类型不匹配:字段"${config.name}"，仅支持${getAllowedFieldTypes(config).map(type => FIELD_TYPE_NAME[type] || type).join(' / ')}`);
+        }
         const value = normalizeFieldValue(config.getValue(item), config, fieldType);
         const cell = await field.createCell(value);
         fields[fieldId] = await cell.getValue();
@@ -924,8 +920,10 @@ const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFie
 };
 
 const createCellValue = async (table, fieldId, item, config) => {
-  const field = await table.getFieldById(fieldId);
-  const fieldType = await field.getType();
+  const { field, fieldType } = await resolveWritableField(table, await table.getFieldById(fieldId));
+  if (!isFieldTypeCompatible(fieldType, config)) {
+    throw new Error(`字段类型不匹配:字段"${config.name}"，仅支持${getAllowedFieldTypes(config).map(type => FIELD_TYPE_NAME[type] || type).join(' / ')}`);
+  }
   const value = normalizeFieldValue(config.getValue(item), config, fieldType);
   return await field.createCell(value);
 };
@@ -1047,14 +1045,14 @@ const fetchBloggerInfoByRows = async (rowList, { onSuccess = null } = {}) => {
         }
         successCount++;
       } else {
-        ElNotification({ message: res.msg || '获取博主信息失败', type: 'error', duration: 0 });
+        taskFeedback.recordFailure(res.msg || '获取博主信息失败', { index: i + 1 });
         failCount++;
       }
     } catch (error) {
       if (error?.code === 'INVALID_API_KEY') {
         throw error;
       }
-      ElNotification({ message: error.message || '请求失败', type: 'error', duration: 0 });
+      taskFeedback.recordFailure(error, { index: i + 1 });
       failCount++;
     }
   }
@@ -1071,62 +1069,20 @@ const requestStop = () => {
   showToast('正在停止，等待当前请求完成...', true);
 };
 
-const extractProfileLink = (value) => {
-  if (!value) return null;
+const getCellValuesByFieldId = (table, recordIds, fieldId) =>
+  readSourceRows(table, recordIds, fieldId, (recordId, value) => {
+    const url = extractCellLink(value);
+    return url ? { recordId, url } : null;
+  });
 
-  if (typeof value === 'string') {
-    return value.trim() || null;
+const showToast = (text, isLoading = true, options = {}) => {
+  if (isLoading) {
+    const progressOptions = { stopping: stopRequested.value, ...options };
+    if (options.begin) taskFeedback.begin(text, progressOptions);
+    else taskFeedback.progress(text, progressOptions);
+  } else {
+    taskFeedback.finish(text, options);
   }
-
-  if (typeof value === 'object') {
-    const keys = ['link', 'url', 'text', 'content', 'value', 'displayText'];
-    for (const key of keys) {
-      const nested = extractProfileLink(value[key]);
-      if (nested) return nested;
-    }
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const nested = extractProfileLink(item);
-      if (nested) return nested;
-    }
-  }
-
-  return null;
-};
-
-const getCellValuesByFieldId = async (table, recordIdList, fieldId) => {
-  const field = await table.getFieldById(fieldId);
-
-  const rows = await Promise.all(
-    recordIdList.map(async (recordId) => {
-      try {
-        const cell = await field.getCell(recordId);
-        const value = await cell.getValue();
-        const url = extractProfileLink(value);
-        if (!url) {
-          return null;
-        }
-
-        return { recordId, url };
-      } catch (e) {
-        return null;
-      }
-    })
-  );
-
-  return rows.filter(item => item && typeof item.url === 'string' && item.url.trim());
-};
-
-const showToast = (text, isLoading = true) => {
-  if (toastTimer) {
-    clearTimeout(toastTimer);
-    toastTimer = null;
-  }
-  toastText.value = text;
-  toastLoading.value = isLoading;
-  toastVisible.value = true;
 };
 
 const showExecutionProgress = (message) => {
@@ -1135,55 +1091,48 @@ const showExecutionProgress = (message) => {
     : message);
 };
 
-const finishToast = (text) => {
-  showToast(text, false);
-  toastTimer = setTimeout(hideToast, 3000);
+const finishToast = (text, options = {}) => {
+  showToast(text, false, options);
 };
 
-const hideToast = () => {
-  if (toastTimer) {
-    clearTimeout(toastTimer);
-    toastTimer = null;
-  }
-  toastVisible.value = false;
-};
+const hideToast = () => { taskFeedback.hide(); };
 
 const validateBaseForm = (config) => {
   if (!props.api_key) {
-    ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请先设置 API Key', type: 'warning', duration: 3000 });
     return false;
   }
 
   if (config.mode === 'table') {
     if (!config.profileLinkFieldId) {
-      ElNotification({ message: '请选择作者主页链接字段', type: 'warning', duration: 0 });
+      ElMessage({ plain: true, message: '请选择作者主页链接字段', type: 'warning', duration: 3000 });
       return false;
     }
 
     if (config.profileLinkFieldId === 'nodata') {
-      ElNotification({ message: '未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 0 });
+      ElMessage({ plain: true, message: '未在数据表页面，无法读取字段信息。请先打开目标数据表，再重试操作。', type: 'error', duration: 3000 });
       return false;
     }
   } else {
     if (!config.manualUrls || !config.manualUrls.trim()) {
-      ElNotification({ message: '请输入作者主页链接', type: 'warning', duration: 0 });
+      ElMessage({ plain: true, message: '请输入作者主页链接', type: 'warning', duration: 3000 });
       return false;
     }
 
     const urls = parseManualUrls(config.manualUrls);
     if (urls.length === 0) {
-      ElNotification({ message: '请至少输入一个有效的作者主页链接', type: 'warning', duration: 0 });
+      ElMessage({ plain: true, message: '请至少输入一个有效的作者主页链接', type: 'warning', duration: 3000 });
       return false;
     }
   }
 
   if (config.targetType === 'existing' && !config.targetTableId) {
-    ElNotification({ message: '请选择现有表格', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请选择现有表格', type: 'warning', duration: 3000 });
     return false;
   }
 
   if (getActiveFieldConfigs(config.selectedFieldKeys || selectedFieldKeys.value).length === 0) {
-    ElNotification({ message: '请至少选择一个需要更新的字段', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请至少选择一个需要更新的字段', type: 'warning', duration: 3000 });
     return false;
   }
 
@@ -1204,12 +1153,12 @@ const ensureScheduleTableContext = async (config) => {
     return true;
   } catch (error) {
     console.error('读取定时任务表格上下文失败:', error);
-    ElNotification({
+    ElMessage({ plain: true,
       message: config.sourceTableId && taskDialogMode.value === 'edit'
         ? `无法访问任务来源表「${config.sourceTableName || config.sourceTableId}」，请检查该表是否存在及访问权限。`
         : '请先打开目标数据表，再保存定时任务。',
       type: 'error',
-      duration: 0,
+      duration: 5000,
     });
     return false;
   }
@@ -1267,27 +1216,27 @@ const buildTaskPayload = async (inputFilter, config = taskDialogForm.value) => {
   }
 
   if (!config.personalBaseToken.trim()) {
-    ElNotification({ message: '请输入授权码', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请输入授权码', type: 'warning', duration: 3000 });
     return null;
   }
 
   if (!config.triggerTime) {
-    ElNotification({ message: '请选择触发时间', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请选择触发时间', type: 'warning', duration: 3000 });
     return null;
   }
 
   if (config.repeatType !== 'hourly' && !config.triggerDate) {
-    ElNotification({ message: '请选择触发日期', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请选择触发日期', type: 'warning', duration: 3000 });
     return null;
   }
 
   if (config.repeatType === 'custom' && config.deadlineType === 'date' && !config.deadlineDate) {
-    ElNotification({ message: '请选择截止日期', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请选择截止日期', type: 'warning', duration: 3000 });
     return null;
   }
 
   if (config.mode === 'table' && config.scope === 'selected') {
-    ElNotification({ message: '定时任务不支持“选中行”，请改为“全部行”或“前 N 行”', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '定时任务不支持“选中行”，请改为“全部行”或“前 N 行”', type: 'warning', duration: 3000 });
     return null;
   }
 
@@ -1480,7 +1429,7 @@ const loadTaskList = async () => {
     taskList.value = parseTaskList(res.data);
   } catch (error) {
     console.error('获取定时任务失败:', error);
-    ElNotification({ message: error.message || '获取定时任务失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '获取定时任务失败', type: 'error', duration: 5000 });
     taskList.value = [];
   } finally {
     taskListLoading.value = false;
@@ -1535,7 +1484,7 @@ const copyCurrentFormToTaskDialog = async () => {
 
 const openCreateTaskDialog = async () => {
   if (!props.api_key) {
-    ElNotification({ message: '请先设置API Key', type: 'warning', duration: 0 });
+    ElMessage({ plain: true, message: '请先设置 API Key', type: 'warning', duration: 3000 });
     return;
   }
 
@@ -1551,6 +1500,9 @@ const openCreateTaskDialog = async () => {
   editingTaskId.value = null;
   await copyCurrentFormToTaskDialog();
   taskDialogVisible.value = true;
+  if (taskDialogForm.value.targetType === 'current' && !taskOutputConfigReady.value) {
+    await applyTaskTableOutputConfig(taskDialogForm.value.sourceTableId);
+  }
 };
 
 const prepareInlineScheduleForm = async () => {
@@ -1629,8 +1581,10 @@ const openEditTaskDialog = async (task) => {
   taskDialogVisible.value = true;
   if (shouldLoadTables) void loadTableOptions();
 
-  if (taskDialogForm.value.targetType === 'existing' && taskDialogForm.value.targetTableId) {
-    await applyTaskTableOutputConfig(taskDialogForm.value.targetTableId);
+  const outputTableId = taskDialogForm.value.targetType === 'current'
+    ? taskDialogForm.value.sourceTableId : taskDialogForm.value.targetTableId;
+  if (['current', 'existing'].includes(taskDialogForm.value.targetType) && outputTableId) {
+    await applyTaskTableOutputConfig(outputTableId);
   }
 
   if (!taskDialogVisible.value || taskDialogForm.value !== dialogForm) return;
@@ -1648,6 +1602,7 @@ const saveTask = async () => {
 
   try {
     const config = JSON.parse(JSON.stringify(form));
+    const configTableId = inDialog ? taskOutputTableId.value : mainOutputTableId.value;
     const targetFieldOptions = JSON.parse(JSON.stringify(inDialog ? taskTableFieldOptions.value : tableFieldOptions.value));
     config.fieldMappings = JSON.parse(JSON.stringify(inDialog ? taskMappingDraft.value : mappingDraft.value));
     if (taskDialogVisible.value && !taskOutputConfigReady.value) {
@@ -1661,20 +1616,21 @@ const saveTask = async () => {
     if (taskDialogVisible.value && !taskOutputConfigReady.value) {
       throw new Error('输出表配置尚未加载完成，请等待加载完成或点击重试');
     }
-    if (config.targetType === 'existing') {
-      const fieldMappings = config.fieldMappings
-        .map(item => ({ ...item }));
-      const hasIncompleteMapping = fieldMappings.some(item => !item.source_key || !item.target_field_id);
-      if (hasIncompleteMapping) {
-        ElNotification({ message: '请完成字段映射后再保存任务', type: 'warning', duration: 0 });
-        return;
-      }
-      config.fieldMappings = fieldMappings;
+    const hasIncompleteMapping = config.fieldMappings.some(item => !item.source_key || !item.target_field_id);
+    if (['current', 'existing'].includes(config.targetType) && hasIncompleteMapping) {
+      ElMessage({ plain: true, message: '请完成字段映射后再保存任务', type: 'warning', duration: 3000 });
+      return;
+    }
+    if (config.targetType === 'current' && configTableId !== payload.snapshot.resolved_target_table_id) {
+      throw new Error('来源表已变化，请重新加载该表的字段映射后再保存');
+    }
+    if (['current', 'existing'].includes(config.targetType)) {
       await saveTableOutputConfig({
         targetType: config.targetType,
         targetTableId: config.targetTableId,
+        resolvedTargetTableId: config.targetType === 'current' ? payload.snapshot.resolved_target_table_id : '',
         writeMode: config.writeMode,
-        fieldMappings,
+        fieldMappings: config.fieldMappings,
         targetFieldOptions,
       });
     }
@@ -1691,9 +1647,10 @@ const saveTask = async () => {
       throw new Error(res.msg || '保存定时任务失败');
     }
 
-    ElNotification({
+    ElMessage({ plain: true,
       message: taskId ? '定时任务已更新' : '定时任务已创建',
       type: 'success',
+      duration: 3000,
     });
 
     if (taskDialogForm.value === form) {
@@ -1703,7 +1660,7 @@ const saveTask = async () => {
     await loadTaskList();
   } catch (error) {
     console.error('保存定时任务失败:', error);
-    ElNotification({ message: error.message || '保存定时任务失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '保存定时任务失败', type: 'error', duration: 5000 });
   } finally {
     taskDialogLoading.value = false;
   }
@@ -1727,11 +1684,11 @@ const deleteTask = async (task) => {
       throw new Error(res.msg || '删除定时任务失败');
     }
 
-    ElNotification({ message: '定时任务已删除', type: 'success' });
+    ElMessage({ plain: true, message: '定时任务已删除', type: 'success' , duration: 3000 });
     await loadTaskList();
   } catch (error) {
     console.error('删除定时任务失败:', error);
-    ElNotification({ message: error.message || '删除定时任务失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '删除定时任务失败', type: 'error', duration: 5000 });
   }
 };
 
@@ -1764,14 +1721,15 @@ const toggleTaskStatus = async (task) => {
       });
     }
 
-    ElNotification({ message: '任务状态已更新', type: 'success' });
+    ElMessage({ plain: true, message: '任务状态已更新', type: 'success' , duration: 3000 });
   } catch (error) {
     console.error('更新任务状态失败:', error);
-    ElNotification({ message: error.message || '更新任务状态失败', type: 'error', duration: 0 });
+    ElMessage({ plain: true, message: error.message || '更新任务状态失败', type: 'error', duration: 5000 });
   }
 };
 
 const handleTableModeSubmit = async () => {
+  if (loading.value) return;
   if (!validateBaseForm({
     ...formData.value,
     selectedFieldKeys: selectedFieldKeys.value,
@@ -1779,16 +1737,20 @@ const handleTableModeSubmit = async () => {
     return;
   }
 
-  const executionMappings = JSON.parse(JSON.stringify(mappingDraft.value));
-  const executionWriteMode = writeMode.value;
+  let executionMappings = JSON.parse(JSON.stringify(mappingDraft.value));
+  let executionWriteMode = writeMode.value;
   stopRequested.value = false;
   loading.value = true;
-  showToast('正在启动作者信息获取...');
+  showToast('正在启动作者信息获取...', true, { begin: true });
   await nextTick();
 
   try {
     showToast('正在读取来源表数据...');
     const sourceTable = await bitable.base.getActiveTable();
+    if (await ensureMainTableOutputConfig(sourceTable)) {
+      executionMappings = JSON.parse(JSON.stringify(mappingDraft.value));
+      executionWriteMode = writeMode.value;
+    }
     const inputFilter = await validateConfiguredInputFilter(formData.value, sourceTable);
     const activeFieldConfigs = getActiveFieldConfigs();
     showToast('正在读取待处理记录...');
@@ -1799,7 +1761,7 @@ const handleTableModeSubmit = async () => {
     );
 
     if (!recordIdList) {
-      finishToast('任务未开始');
+      finishToast('任务未开始', { type: 'info' });
       return;
     }
 
@@ -1807,12 +1769,11 @@ const handleTableModeSubmit = async () => {
       showToast('正在筛选符合条件的记录...');
       recordIdList = await filterRecordIds(sourceTable, recordIdList, inputFilter);
       if (stopRequested.value) {
-        finishToast('任务已停止');
+        finishToast('任务已停止', { stopped: true, successCount: 0, failCount: 0 });
         return;
       }
       if (!recordIdList.length) {
-        finishToast('没有符合筛选条件的数据');
-        ElNotification({ message: '没有符合筛选条件的数据', type: 'info' });
+        finishToast('没有符合筛选条件的数据', { empty: true });
         return;
       }
     }
@@ -1820,18 +1781,17 @@ const handleTableModeSubmit = async () => {
     showToast('正在读取作者主页链接...');
     const rowList = await getCellValuesByFieldId(sourceTable, recordIdList, formData.value.profileLinkFieldId);
     if (stopRequested.value) {
-      finishToast('任务已停止');
+      finishToast('任务已停止', { stopped: true, successCount: 0, failCount: 0 });
       return;
     }
     if (inputFilter && !rowList.length) {
-      finishToast('符合条件的行中没有可用链接');
-      ElNotification({ message: '符合条件的行中没有可用链接', type: 'info' });
+      finishToast('符合条件的行中没有可用链接', { empty: true });
       return;
     }
     if (formData.value.targetType === 'current') {
-      const fieldNameToId = await validateAndAddFields(sourceTable.id, activeFieldConfigs, showExecutionProgress);
+      const fieldNameToId = await validateAndAddFields(sourceTable.id, activeFieldConfigs, showExecutionProgress, executionMappings);
       if (!fieldNameToId) {
-        finishToast('目标字段校验未通过，任务未开始');
+        if (taskFeedback.toastLoading.value) finishToast('目标字段校验未通过，任务未开始', { type: 'info' });
         return;
       }
       const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
@@ -1841,14 +1801,15 @@ const handleTableModeSubmit = async () => {
       finishToast(
         stopped
           ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`
+          : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+        { stopped, successCount, failCount, empty: successCount === 0 && failCount === 0 }
       );
       return;
     }
 
-    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs, showExecutionProgress);
+    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs, showExecutionProgress, executionMappings);
     if (!targetTableId) {
-      finishToast('目标表字段校验未通过，任务未开始');
+      if (taskFeedback.toastLoading.value) finishToast('目标表字段校验未通过，任务未开始', { type: 'info' });
       return;
     }
 
@@ -1862,12 +1823,12 @@ const handleTableModeSubmit = async () => {
     finishToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+      { stopped, successCount, failCount, empty: successCount === 0 && failCount === 0 }
     );
   } catch (error) {
     const errorMessage = error.message || '获取数据失败';
-    finishToast(`处理失败：${errorMessage}`);
-    ElNotification({ message: errorMessage, type: 'error', duration: 0 });
+    taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
     stopRequested.value = false;
@@ -1875,6 +1836,7 @@ const handleTableModeSubmit = async () => {
 };
 
 const handleManualModeSubmit = async () => {
+  if (loading.value) return;
   if (!validateBaseForm({
     ...formData.value,
     selectedFieldKeys: selectedFieldKeys.value,
@@ -1883,20 +1845,24 @@ const handleManualModeSubmit = async () => {
   }
 
   const urls = parseManualUrls(formData.value.manualUrls);
-  const activeFieldConfigs = getWriteFieldConfigs();
-  const executionMappings = JSON.parse(JSON.stringify(mappingDraft.value));
-  const executionWriteMode = writeMode.value;
+  let executionMappings = JSON.parse(JSON.stringify(mappingDraft.value));
+  let executionWriteMode = writeMode.value;
   stopRequested.value = false;
   loading.value = true;
-  showToast('正在启动作者信息获取...');
+  showToast('正在启动作者信息获取...', true, { begin: true });
   await nextTick();
 
   try {
+    if (await ensureMainTableOutputConfig()) {
+      executionMappings = JSON.parse(JSON.stringify(mappingDraft.value));
+      executionWriteMode = writeMode.value;
+    }
+    const activeFieldConfigs = getWriteFieldConfigs();
     showToast('正在整理作者主页链接...');
     const rowList = urls.map(url => ({ url }));
-    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs, showExecutionProgress);
+    const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs, showExecutionProgress, executionMappings);
     if (!targetTableId) {
-      finishToast('目标表字段校验未通过，任务未开始');
+      if (taskFeedback.toastLoading.value) finishToast('目标表字段校验未通过，任务未开始', { type: 'info' });
       return;
     }
 
@@ -1910,12 +1876,12 @@ const handleManualModeSubmit = async () => {
     finishToast(
       stopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
-        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`
+        : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
+      { stopped, successCount, failCount, empty: successCount === 0 && failCount === 0 }
     );
   } catch (error) {
     const errorMessage = error.message || '获取数据失败';
-    finishToast(`处理失败：${errorMessage}`);
-    ElNotification({ message: errorMessage, type: 'error', duration: 0 });
+    taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
     stopRequested.value = false;
@@ -1923,6 +1889,7 @@ const handleManualModeSubmit = async () => {
 };
 
 const handleSubmit = async () => {
+  if (loading.value) return;
   stopRequested.value = false;
   if (formData.value.mode === 'manual') {
     await handleManualModeSubmit();
@@ -1933,7 +1900,7 @@ const handleSubmit = async () => {
 };
 
 const handleTaskAction = () => {
-  if (stopRequested.value) return;
+  if (stopRequested.value || noticeRequiresReopen.value) return;
   if (loading.value) {
     requestStop();
     return;
@@ -1953,10 +1920,30 @@ const stepTaskNumber = (delta) => {
   taskDialogForm.value.rowCount = val;
 };
 
-const handleTaskModeChange = (mode) => {
-  taskDialogForm.value.targetType = mode === 'table' ? 'current' : 'new';
-  taskDialogForm.value.targetTableId = '';
+const handleTaskModeChange = async (mode) => {
+  const form = taskDialogForm.value;
+  const requestId = ++taskConfigReadId.value;
+  form.targetType = mode === 'table' ? 'current' : 'new';
+  form.targetTableId = '';
   taskMappingDraft.value = [];
+  taskOutputTableId.value = '';
+  taskOutputError.value = '';
+  taskOutputLoading.value = false;
+  if (mode !== 'table') return;
+
+  taskOutputLoading.value = true;
+  try {
+    const table = taskDialogMode.value === 'edit' && form.sourceTableId
+      ? await bitable.base.getTableById(form.sourceTableId) : await bitable.base.getActiveTable();
+    if (taskDialogForm.value !== form || requestId !== taskConfigReadId.value) return;
+    form.sourceTableId = table.id;
+    await applyTaskTableOutputConfig(table.id);
+  } catch (error) {
+    if (taskDialogForm.value !== form || requestId !== taskConfigReadId.value) return;
+    taskOutputError.value = error.message || '读取来源表配置失败';
+  } finally {
+    if (requestId === taskConfigReadId.value) taskOutputLoading.value = false;
+  }
 };
 
 onMounted(() => {
@@ -1975,7 +1962,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  if (toastTimer) clearTimeout(toastTimer);
+  ++mainConfigReadId.value;
+  ++taskConfigReadId.value;
 });
 
 const getMappingSourceFields = (mappings, index, selectedKeys) => {
@@ -2077,6 +2065,11 @@ watch(
 watch(
   () => formData.value.targetType,
   (targetType) => {
+    ++mainConfigReadId.value;
+    mainOutputTableId.value = '';
+    tableConfigLoading.value = false;
+    tableConfigApplying.value = false;
+    if (targetType === 'current') loadCurrentTableOutputConfig();
     if (targetType === 'existing' && tableOptions.value.length === 0) {
       loadTableOptions();
       return;
@@ -2279,7 +2272,7 @@ watch(
 
           <el-form-item v-if="formData.mode === 'manual' && formData.targetType === 'existing'" label="">
             <div class="c-label">数据写入方式</div>
-            <el-radio-group v-model="writeMode" class="radio-block">
+            <el-radio-group v-model="writeMode" class="radio-block" :disabled="!outputConfigReady">
               <el-radio v-for="item in writeModeOptions" :key="item.value" :value="item.value">
                 {{ item.label }}
                 <el-tooltip v-if="item.value === 'upsert'" effect="dark" placement="top">
@@ -2315,16 +2308,16 @@ watch(
               <template v-else>
                 <p class="mapping-note">同名字段将自动写入；不同名时请在下方指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
                 <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
-                  <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+                  <el-select v-model="mapping.source_key" :disabled="!outputConfigReady" placeholder="选择输出字段" size="small">
                     <el-option v-for="field in mappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                   </el-select>
                   <span class="mapping-arrow">→</span>
-                  <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+                  <el-select v-model="mapping.target_field_id" :disabled="!outputConfigReady" placeholder="选择目标字段" size="small">
                     <el-option v-for="field in getMappingTargetFields(mappingDraft, index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                   </el-select>
-                  <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+                  <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)" :disabled="!outputConfigReady">删除</el-button>
                 </div>
-                <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
+                <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })" :disabled="!outputConfigReady">+ 添加字段映射</el-button></div>
               </template>
             </div>
           </div>
@@ -2362,9 +2355,10 @@ watch(
           class="commit-btn"
           :class="{ 'is-running': loading }"
           :loading="stopRequested"
-          :disabled="stopRequested"
+          :disabled="stopRequested || noticeRequiresReopen"
           @click="handleTaskAction"
-        >{{ stopRequested ? '正在停止…' : loading ? '停止任务' : '立即执行' }}</el-button>
+        >{{ stopRequested ? '正在停止…' : loading ? '停止任务' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
+        <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
       </div>
 
       <div v-else class="schedule-inline-panel">
@@ -2532,22 +2526,7 @@ watch(
       </div>
     </div>
 
-    <div class="toast-wrap" :class="{ show: toastVisible }">
-      <div class="toast" :class="{ 'toast-loading': toastLoading, 'toast-success': !toastLoading }">
-        <div class="toast-icon" v-if="toastLoading">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <path d="M12 2a10 10 0 0 1 10 10"></path>
-          </svg>
-        </div>
-        <div class="toast-icon" v-else>
-          <svg viewBox="0 0 24 24" fill="none">
-            <circle cx="12" cy="12" r="10" fill="#00B42A"></circle>
-            <path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path>
-          </svg>
-        </div>
-        <span>{{ toastText }}</span>
-      </div>
-    </div>
+    <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
 
     <el-dialog
       v-model="taskDialogVisible"
@@ -2651,14 +2630,14 @@ watch(
                 <el-option v-for="table in tableOptions" :key="table.id" :label="table.name" :value="table.id" />
               </el-select>
             </el-form-item>
-            <div v-if="taskDialogForm.targetType === 'existing' && (taskOutputLoading || taskOutputError)" class="table-config-feedback sub-hint" role="status" aria-live="polite">
+            <div v-if="['current', 'existing'].includes(taskDialogForm.targetType) && (taskOutputLoading || taskOutputError)" class="table-config-feedback sub-hint" role="status" aria-live="polite">
               <template v-if="taskOutputLoading">
                 <svg class="table-config-spinner" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="42 16" /></svg>
                 <span>正在加载表格配置…</span>
               </template>
               <template v-else>
-                <span>表格配置加载失败，请重试</span>
-                <el-button link type="primary" size="small" @click="applyTaskTableOutputConfig(taskDialogForm.targetTableId)">重试</el-button>
+                <span>{{ taskOutputError }}</span>
+                <el-button link type="primary" size="small" @click="applyTaskTableOutputConfig(taskDialogForm.targetType === 'current' ? taskDialogForm.sourceTableId : taskDialogForm.targetTableId)">重试</el-button>
               </template>
             </div>
 
@@ -2693,7 +2672,7 @@ watch(
               </div>
             </el-form-item>
 
-            <div v-if="taskDialogForm.mode === 'manual' && taskDialogForm.targetType === 'existing'" class="mapping-accordion">
+            <div v-if="taskDialogForm.targetType === 'current' || (taskDialogForm.mode === 'manual' && taskDialogForm.targetType === 'existing')" class="mapping-accordion">
               <button type="button" class="mapping-accordion-trigger" @click="mappingExpanded = !mappingExpanded">
                 <span class="ui-disclosure-label">字段映射 <span class="mapping-optional ui-disclosure-meta">（可选）</span></span>
                 <span class="mapping-chevron" :class="{ 'is-expanded': mappingExpanded }"></span>
@@ -3002,28 +2981,6 @@ watch(
   font-weight: var(--app-font-weight-medium);
   margin-top: 0;
   cursor: pointer;
-}
-
-.commit-btn {
-  background: #A8071A;
-  color: #fff;
-  border: none;
-}
-.commit-btn:hover { background: #C11126; }
-.commit-btn:active { background: #8A0515; }
-
-.commit-btn.is-running {
-  background: #fff;
-  border: 1px solid #d5495c;
-  color: #a8071a;
-}
-.commit-btn.is-running:hover { background: #fff1f2; }
-.commit-btn.is-running:active { background: #ffe4e6; }
-.commit-btn.is-running.is-disabled {
-  background: #fafafa;
-  border-color: #e5e6eb;
-  color: #86909c;
-  cursor: not-allowed;
 }
 
 .secondary-btn {
@@ -3763,6 +3720,7 @@ watch(
 .source-mode-radio :deep(.el-radio), .radio-block :deep(.el-radio) { min-height: 28px; margin-right: 0; }
 .custom-radio-group { gap: 8px; }
 .sub-page :deep(.el-radio__label), .sub-page :deep(.el-checkbox__label) { font-family: inherit; font-size: var(--app-font-size-body); font-weight: var(--app-font-weight-regular); line-height: 20px; }
+
 </style>
 
 <style scoped src="../assets/output-layout.css"></style>

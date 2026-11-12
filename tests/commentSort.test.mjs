@@ -40,7 +40,7 @@ for (const targetTableId of ['', 'existing-table']) {
     const scope = {
       componentUnmounted: false, commentSubmission: { pending: null }, props: { api_key: 'test-key' },
       formData: { value: { pages: 2, reply_pages: -1, sortType: 'default', writeMode: 'upsert' } },
-      mappingDraft: { value: [] }, loading: { value: false }, hasRecoverableTask: { value: false },
+      selectedFieldKeys: { value: ['cid'] }, mappingDraft: { value: [] }, loading: { value: false }, hasRecoverableTask: { value: false },
       activeCommentTaskId: { value: '' }, recoveryRequiresReopen: { value: false },
       showToast() {}, showCompletionToast() {}, showErrorMsg() {},
       request: async config => { requests.push(config); return { data: { sta: 0, data: { task_id: 'created' } } }; },
@@ -63,6 +63,7 @@ for (const targetTableId of ['', 'existing-table']) {
 test('任务完成时展示实际降级数，旧后端缺少该字段时正常完成', async () => {
   const messages = [];
   const scope = {
+    clearing: { value: false },
     hasRecoverableTask: { value: true }, recoveryRequiresReopen: { value: false },
     loading: { value: true }, isCancelling: { value: false }, activeCommentTaskId: { value: 'task' },
     showCompletionToast: message => messages.push(message), showErrorMsg: message => messages.push(message),

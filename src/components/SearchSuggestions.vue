@@ -1,4 +1,7 @@
 <script setup>
+import { parseTableConfigList } from '../utils/tableOutputConfig.mjs';
+import TaskFeedback from './TaskFeedback.vue';
+import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import axios from 'axios';
 import { bitable, DateFormatter, FieldType } from '@lark-base-open/js-sdk';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
@@ -7,6 +10,10 @@ import request, { buildApiUrl } from '@/utils/request';
 import { getDefaultSelectedFieldKeys, useSocialData } from '@/composables/useSocialData';
 
 const props = defineProps({ api_key: String });
+let disposed = false;
+const assertActive = () => { if (disposed) throw new Error('页面已卸载'); };
+onUnmounted(() => { disposed = true; });
+
 const TASK_PLUGIN_TYPE = 'search_suggestions';
 const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
 const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
@@ -45,14 +52,22 @@ const fieldSelectionReady = ref(false);
 const mappingDraft = ref([]);
 const mappingExpanded = ref(false);
 const mappingLoading = ref(false);
+let tableFieldsLoadToken = 0;
+let tableFieldsError = null;
 const loading = ref(false);
-const toastVisible = ref(false);
-const toastText = ref('');
-const toastLoading = ref(false);
-let toastTimer = null;
+const busy = computed(() => !fieldSelectionReady.value || loading.value);
+const collecting = ref(false);
+const stopRequested = ref(false);
+const taskFeedback = useTaskFeedback();
+const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const tableOutputConfigs = ref({});
+const tableConfigsLoaded = ref(false);
+let tableConfigsError = null;
+let tableConfigsLoadToken = 0;
 const tableConfigSaving = ref(false);
 const tableConfigApplying = ref(false);
+const outputConfigReady = computed(() => tableConfigsLoaded.value && !!form.value.table_id && !tableConfigApplying.value && !mappingLoading.value && !tableFieldsError);
+const tableConfigSaves = new Map();
 let tableConfigSaveQueued = false;
 
 const allKeys = FIELD_MAPPING.map(field => field.key);
@@ -64,15 +79,14 @@ const mappingStatus = computed(() => {
 });
 const { createAndWriteData, validateTableFields } = useSocialData(() => '搜索推荐词', props.api_key, FIELD_MAPPING);
 
-const showToast = (text, isLoading = true) => {
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = null;
-  toastText.value = text;
-  toastLoading.value = isLoading;
-  toastVisible.value = true;
+const showToast = (text, isLoading = true, options = {}) => {
+  if (disposed) return;
+  if (isLoading) return options.begin ? taskFeedback.begin(text, options) : taskFeedback.progress(text, { stopping: stopRequested.value, ...options });
+  taskFeedback.finish(text, options);
 };
-const hideToast = () => { toastVisible.value = false; };
-const showError = message => ElMessage({ message, type: 'error', plain: true });
+const hideToast = () => taskFeedback.hide();
+
+const showError = (message, duration = 3000) => !disposed && ElMessage({ message, type: 'error', plain: true, duration });
 const parseKeywords = text => [...new Set(String(text || '').split(/[\n,，]+/).map(item => item.trim()).filter(Boolean))];
 const toggleAll = checked => {
   selectedFieldKeys.value = checked ? [...allKeys] : FIELD_MAPPING.filter(field => field.required).map(field => field.key);
@@ -81,6 +95,7 @@ const loadSelectedFieldKeys = async () => {
   const defaultKeys = getDefaultSelectedFieldKeys(FIELD_MAPPING);
   try {
     const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+    if (disposed) return;
     if (!Array.isArray(savedValue)) {
       selectedFieldKeys.value = defaultKeys;
       return;
@@ -89,6 +104,7 @@ const loadSelectedFieldKeys = async () => {
     const requiredKeys = FIELD_MAPPING.filter(field => field.required).map(field => field.key);
     selectedFieldKeys.value = Array.from(new Set([...validKeys, ...requiredKeys]));
   } catch (error) {
+    if (disposed) return;
     console.error('读取推荐词输出字段失败:', error);
     selectedFieldKeys.value = defaultKeys;
   }
@@ -107,60 +123,81 @@ const loadTables = async () => {
     const tables = await bitable.base.getTableList();
     tableOptions.value = await Promise.all(tables.map(async table => ({ id: table.id, name: await table.getName() })));
   } catch (error) {
-    showError('获取表格列表失败，请稍后重试');
+    showError(error.message || '获取表格列表失败，请稍后重试', 5000);
   }
 };
 const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
 const loadTableOutputConfigs = async () => {
-  if (!props.api_key) return;
+  const token = ++tableConfigsLoadToken;
+  tableConfigsLoaded.value = false;
+  tableConfigsError = null;
+  if (!props.api_key) return false;
   try {
+    const baseId = await getBaseId();
+    if (disposed || token !== tableConfigsLoadToken) return false;
     const response = await request({
       url: TABLE_CONFIGS_API_PATH,
       method: 'get',
       headers: { authorization: `Bearer ${props.api_key}` },
-      params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() },
+      params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId },
     });
+    if (disposed || token !== tableConfigsLoadToken) return false;
+    if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '读取输出表配置失败');
     const data = response.data?.data || response.data;
-    const list = Array.isArray(data) ? data : (data?.list || data?.items || []);
+    const list = parseTableConfigList(data);
     tableOutputConfigs.value = Object.fromEntries(list.filter(item => item?.target_table_id).map(item => [item.target_table_id, item]));
+    tableConfigsLoaded.value = true;
+    if (form.value.outputType === 2 && form.value.table_id) await loadTableFields(form.value.table_id);
+    return true;
   } catch (error) {
+    if (disposed || token !== tableConfigsLoadToken) return false;
+    tableConfigsError = error;
     console.error('读取推荐词表格配置失败:', error);
+    return false;
   }
 };
 const loadTableFields = async tableId => {
+  const token = ++tableFieldsLoadToken;
+  const pendingConfig = tableConfigSaves.get(tableId)?.config;
+  tableFieldsError = null;
   tableConfigApplying.value = true;
   tableFieldOptions.value = [];
   mappingDraft.value = [];
   if (!tableId) {
     mappingLoading.value = false;
     tableConfigApplying.value = false;
-    return;
+    return true;
   }
   mappingLoading.value = true;
   try {
     const table = await bitable.base.getTableById(tableId);
+    if (disposed || token !== tableFieldsLoadToken) return;
     const fields = await table.getFieldMetaList();
+    if (disposed || token !== tableFieldsLoadToken) return;
     tableFieldOptions.value = fields.map(field => ({ id: field.id, name: field.name, type: field.type }));
-    const config = tableOutputConfigs.value[tableId];
+    if (!tableConfigsLoaded.value) return false;
+    const config = tableConfigSaves.get(tableId)?.config || pendingConfig || tableOutputConfigs.value[tableId];
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
+    return true;
   } catch (error) {
-    showError('读取目标表字段失败，请稍后重试');
+    if (disposed || token !== tableFieldsLoadToken) return;
+    tableFieldsError = error;
+    if (!loading.value) showError(error.message || '读取目标表字段失败，请稍后重试', 5000);
+    return false;
   } finally {
+    if (disposed || token !== tableFieldsLoadToken) return;
     mappingLoading.value = false;
     tableConfigApplying.value = false;
   }
 };
-const saveTableOutputConfig = async () => {
-  if (form.value.outputType !== 2 || !form.value.table_id || tableConfigApplying.value) return;
-  if (tableConfigSaving.value) {
-    tableConfigSaveQueued = true;
-    return;
-  }
-  if (!props.api_key || !tableFieldOptions.value.length) return;
-  tableConfigSaving.value = true;
-  try {
-    const targetTableId = form.value.table_id;
-    const table = await bitable.base.getTableById(targetTableId);
+const saveTableOutputConfig = async (outputConfig = null) => {
+  outputConfig = outputConfig?.targetTableId ? outputConfig : null;
+  if (disposed || !tableConfigsLoaded.value) return;
+  if (!outputConfig && (form.value.outputType !== 2 || !form.value.table_id || tableConfigApplying.value)) return;
+  if (!props.api_key || (!outputConfig && !tableFieldOptions.value.length)) return;
+  let snapshot = outputConfig;
+  if (!snapshot) {
+    const targetTableId = form.value.table_id, writeMode = 'append';
     const fieldMappings = mappingDraft.value
       .filter(item => item.source_key && item.target_field_id)
       .map(item => {
@@ -173,31 +210,31 @@ const saveTableOutputConfig = async () => {
           target_field_type: target?.type ?? item.target_field_type,
         };
       });
-    const response = await request({
-      url: TABLE_CONFIG_API_PATH,
-      method: 'put',
-      headers: { authorization: `Bearer ${props.api_key}` },
-      data: {
-        plugin_type: TASK_PLUGIN_TYPE,
-        base_id: await getBaseId(),
-        target_table_id: targetTableId,
-        target_table_name: await table.getName(),
-        write_mode: 'append',
-        field_mappings: fieldMappings,
-      },
-    });
-    const saved = response.data?.data || response.data;
-    tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: saved };
-  } catch (error) {
-    console.error('保存推荐词表格配置失败:', error);
-  } finally {
+    snapshot = { targetTableId, writeMode, fieldMappings };
+  }
+  const { targetTableId, writeMode, fieldMappings } = snapshot;
+  const pending = { snapshot, config: { write_mode: writeMode, field_mappings: fieldMappings } };
+  tableConfigSaves.set(targetTableId, pending);
+  if (tableConfigSaving.value) { tableConfigSaveQueued = true; return; }
+  tableConfigSaveQueued = false;
+  tableConfigSaving.value = true;
+  try {
+    const table = await bitable.base.getTableById(targetTableId);
+    const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: writeMode, field_mappings: fieldMappings };
+    if (disposed) return;
+    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    if (disposed) return;
+    if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '保存推荐词表格配置失败');
+    tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: response.data?.data || response.data };
+  } catch (error) { if (!disposed) console.error('保存推荐词表格配置失败:', error); }
+  finally {
+    if (tableConfigSaves.get(targetTableId) === pending) tableConfigSaves.delete(targetTableId);
     tableConfigSaving.value = false;
-    if (tableConfigSaveQueued) {
-      tableConfigSaveQueued = false;
-      saveTableOutputConfig();
-    }
+    tableConfigSaveQueued = tableConfigSaves.size > 0;
+    if (tableConfigSaveQueued && !disposed) saveTableOutputConfig(tableConfigSaves.values().next().value.snapshot);
   }
 };
+
 const getMappingSourceFields = index => {
   const usedKeys = new Set(mappingDraft.value.filter((item, itemIndex) => itemIndex !== index).map(item => item.source_key).filter(Boolean));
   return FIELD_MAPPING.filter(field => field.required || selectedFieldKeys.value.includes(field.key))
@@ -215,21 +252,33 @@ const fetchSuggestions = async keyword => {
     { timeout: 60000, headers: { authorization: `Bearer ${props.api_key}` } },
   );
   const result = response.data;
-  if (result?.sta !== 0) throw new Error(result?.msg || '获取推荐词失败');
+  if (result?.sta !== 0) {
+    const error = new Error(result?.msg || '获取推荐词失败');
+    if (Number(result?.sta) === 4001) error.code = 'INVALID_API_KEY';
+    throw error;
+  }
   return Array.isArray(result.data?.items) ? result.data.items : [];
 };
 
 const execute = async keywords => {
+  if (disposed) return;
   loading.value = true;
+  collecting.value = true;
+  stopRequested.value = false;
   const rows = [];
   const emptyKeywords = [];
   const failedKeywords = [];
+  const errors = [];
+  let authFailureReason = '';
+  taskFeedback.begin('正在准备获取推荐词…');
   try {
     for (let index = 0; index < keywords.length; index += 1) {
+      if (stopRequested.value) break;
       const keyword = keywords[index];
       showToast(`正在获取「${keyword}」（${index + 1}/${keywords.length}）…`);
       try {
         const items = await fetchSuggestions(keyword);
+        if (disposed) return;
         if (!items.length) {
           emptyKeywords.push(keyword);
           continue;
@@ -244,25 +293,40 @@ const execute = async keywords => {
           ctime: item.ctime || '',
         })));
       } catch (error) {
+        if (disposed) return;
         failedKeywords.push(keyword);
+        errors.push(error);
+        if (error.code === 'INVALID_API_KEY' || [401, 403].includes(error.response?.status)) {
+          authFailureReason = error?.response?.data?.msg || error.message || 'API Key 已失效';
+          break;
+        }
+        if (!stopRequested.value) taskFeedback.recordFailure(error, { index: index + 1 });
         console.error(`获取关键词「${keyword}」的推荐词失败:`, error);
       }
     }
 
+    collecting.value = false;
     if (!rows.length) {
-      const reason = failedKeywords.length === keywords.length
-        ? '所有关键词均获取失败，请检查 API Key 或稍后重试'
-        : '未获取到推荐词，请更换关键词后重试';
-      throw new Error(reason);
+      if (authFailureReason) throw new Error(authFailureReason);
+      if (stopRequested.value) {
+        showToast(`任务已停止，已写入 0 条推荐词${failedKeywords.length ? `（${failedKeywords.length} 个关键词获取失败）` : ''}`, false, { stopped: true, failCount: failedKeywords.length });
+        return;
+      }
+      if (failedKeywords.length === keywords.length) throw new Error(`所有关键词均获取失败：${errors[0]?.response?.data?.msg || errors[0]?.message || '获取推荐词失败'}`);
+      showToast(`未获取到推荐词${failedKeywords.length ? `（${emptyKeywords.length} 个关键词无结果，${failedKeywords.length} 个关键词获取失败），请稍后重试` : '，请更换关键词后重试'}`, false, { type: failedKeywords.length ? 'warning' : 'info' });
+      return;
     }
 
     const targetTableId = form.value.outputType === 2 ? form.value.table_id : '';
     if (targetTableId) {
-      const valid = await validateTableFields(targetTableId, selectedFieldKeys.value, { fieldMappings: mappingDraft.value });
+      showToast('正在检查目标表字段…');
+      const valid = await validateTableFields(targetTableId, selectedFieldKeys.value, { fieldMappings: mappingDraft.value, throwOnError: true, onProgress: showToast, assertActive });
+      if (disposed) return;
       if (!valid) throw new Error('目标表字段校验失败，请检查表格字段类型');
     }
     showToast('正在写入多维表格…');
     const result = await createAndWriteData(rows, targetTableId ? 'stream' : '', '', targetTableId, selectedFieldKeys.value, {
+      assertActive,
       stopAfterCurrentBatch: true,
       writeMode: 'append',
       parallelCellCreation: true,
@@ -270,23 +334,32 @@ const execute = async keywords => {
       skipFieldDisplayConfig: true,
       fieldMappings: targetTableId ? mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({ ...item })) : [],
     });
+    if (disposed) return;
     if (!targetTableId && result?.tableId) await bitable.ui.switchToTable(result.tableId);
+    if (disposed) return;
 
     const notes = [];
     if (emptyKeywords.length) notes.push(`${emptyKeywords.length} 个关键词无结果`);
     if (failedKeywords.length) notes.push(`${failedKeywords.length} 个关键词获取失败`);
-    showToast(`处理完成，已写入 ${rows.length} 条${notes.length ? `（${notes.join('，')}）` : ''}`, false);
-    toastTimer = setTimeout(hideToast, 3500);
+    if (authFailureReason) notes.push(`获取已中止：${authFailureReason}`);
+    const stopped = stopRequested.value;
+    showToast(`${stopped ? '任务已停止，' : authFailureReason ? '' : '处理完成，'}已写入 ${rows.length} 条${stopped ? '推荐词' : ''}${notes.length ? `（${notes.join('，')}）` : ''}`, false, { stopped, failCount: failedKeywords.length, type: failedKeywords.length ? 'warning' : 'success' });
   } catch (error) {
-    hideToast();
-    showError(error?.response?.data?.msg || error.message || '执行失败，请稍后重试');
+    if (disposed) return;
+    if (error.stopPolling) {
+      taskFeedback.fail(`${error.cause?.message || '写入失败'}；请核对表格结果，勿重复启动任务`, { persist: true });
+    } else {
+      taskFeedback.fail(error);
+    }
   } finally {
     loading.value = false;
+    collecting.value = false;
+    stopRequested.value = false;
   }
 };
 
-const submit = () => {
-  if (loading.value) return;
+const submit = async () => {
+  if (disposed || !fieldSelectionReady.value || loading.value || noticeRequiresReopen.value) return;
   if (!props.api_key) return showError('请先在首页配置 API Key');
   if (!form.value.social_type) return showError('请选择平台');
   const keywords = parseKeywords(form.value.keyword);
@@ -294,15 +367,46 @@ const submit = () => {
   if (form.value.outputType === 2 && !form.value.table_id) return showError('请选择现有表格');
   if (form.value.outputType === 2 && mappingLoading.value) return showError('正在读取目标表字段，请稍后重试');
   if (form.value.outputType === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) return showError('请完成字段映射，或删除未完成的映射');
-  execute(keywords);
+  loading.value = true;
+  try {
+    if (form.value.outputType === 2 && !tableConfigsLoaded.value) {
+      taskFeedback.begin('正在读取输出表配置…');
+      const loaded = await loadTableOutputConfigs();
+      if (disposed) return;
+      if (!loaded) throw tableConfigsError || new Error('读取输出表配置失败');
+      await loadTableFields(form.value.table_id);
+    }
+    if (form.value.outputType === 2 && tableFieldsError) {
+      taskFeedback.begin('正在读取目标表字段…');
+      const loaded = await loadTableFields(form.value.table_id);
+      if (disposed) return;
+      if (!loaded) throw tableFieldsError || new Error('读取目标表字段失败，请稍后重试');
+    }
+    if (form.value.outputType === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
+    return await execute(keywords);
+  } catch (error) {
+    if (!disposed) taskFeedback.fail(error);
+  } finally {
+    if (!disposed) loading.value = false;
+  }
+};
+
+const requestStop = () => {
+  if (disposed || !collecting.value || stopRequested.value) return;
+  stopRequested.value = true;
+  showToast('正在停止获取推荐词，等待当前请求完成…');
+};
+const taskActionState = computed(() => stopRequested.value && loading.value ? 'stopping' : collecting.value ? 'running' : loading.value ? 'submitting' : 'idle');
+const handleTaskAction = () => {
+  if (taskActionState.value === 'running') return requestStop();
+  if (taskActionState.value === 'idle') return submit();
 };
 
 watch(() => form.value.outputType, value => {
   if (value === 2) loadTables();
   else {
     form.value.table_id = '';
-    tableFieldOptions.value = [];
-    mappingDraft.value = [];
+    loadTableFields('');
   }
 });
 watch(() => form.value.table_id, loadTableFields);
@@ -318,10 +422,11 @@ watch(selectedFieldKeys, keys => {
   saveSelectedFieldKeys(mergedKeys);
 }, { deep: true });
 onMounted(async () => {
-  await Promise.all([loadSelectedFieldKeys(), loadTableOutputConfigs()]);
-  fieldSelectionReady.value = true;
+  await Promise.all([
+    loadSelectedFieldKeys().then(() => { if (!disposed) fieldSelectionReady.value = true; }),
+    loadTableOutputConfigs(),
+  ]);
 });
-onUnmounted(() => { if (toastTimer) clearTimeout(toastTimer); });
 </script>
 
 <template>
@@ -333,7 +438,7 @@ onUnmounted(() => { if (toastTimer) clearTimeout(toastTimer); });
       <span class="sub-page-title">搜索推荐词</span>
     </div>
     <div class="form-card">
-      <el-form class="form" :model="form" label-position="top">
+      <el-form class="form" :model="form" :disabled="busy" label-position="top">
         <section class="settings-section" aria-labelledby="suggestions-settings-title">
           <h2 id="suggestions-settings-title" class="settings-section-heading"><span class="settings-step">1</span><span>获取设置</span></h2>
           <el-form-item label="">
@@ -385,30 +490,25 @@ onUnmounted(() => { if (toastTimer) clearTimeout(toastTimer); });
               <template v-else>
                 <p class="mapping-note">同名字段会自动匹配；不同名时可指定目标列。未映射且没有同名列时，将自动新建同名列。</p>
                 <div v-for="(mapping, index) in mappingDraft" :key="`${mapping.source_key}-${index}`" class="mapping-row">
-                  <el-select v-model="mapping.source_key" placeholder="选择输出字段" size="small">
+                  <el-select v-model="mapping.source_key" :disabled="busy || !outputConfigReady" placeholder="选择输出字段" size="small">
                     <el-option v-for="field in getMappingSourceFields(index)" :key="field.key" :label="field.name" :value="field.key" :disabled="field.disabled" />
                   </el-select>
                   <span class="mapping-arrow">→</span>
-                  <el-select v-model="mapping.target_field_id" placeholder="选择目标字段" size="small">
+                  <el-select v-model="mapping.target_field_id" :disabled="busy || !outputConfigReady" placeholder="选择目标字段" size="small">
                     <el-option v-for="field in getMappingTargetFields(index)" :key="field.id" :label="field.name" :value="field.id" :disabled="field.disabled" />
                   </el-select>
-                  <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)">删除</el-button>
+                  <el-button link type="danger" class="mapping-delete" @click="mappingDraft.splice(index, 1)" :disabled="busy || !outputConfigReady">删除</el-button>
                 </div>
-                <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })">+ 添加字段映射</el-button></div>
+                <div class="mapping-actions"><el-button link type="primary" @click="mappingDraft.push({ source_key: '', target_field_id: '' })" :disabled="busy || !outputConfigReady">+ 添加字段映射</el-button></div>
               </template>
             </div>
           </div>
         </section>
-        <el-button class="commit-btn" :loading="loading" :disabled="loading" @click="submit">{{ loading ? '执行中…' : '立即执行' }}</el-button>
       </el-form>
+      <p v-if="taskNotice" class="sub-hint" role="status">{{ taskNotice }}</p>
+      <el-button class="commit-btn" :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }" :loading="!fieldSelectionReady || taskActionState === 'submitting' || taskActionState === 'stopping'" :disabled="!fieldSelectionReady || taskActionState === 'submitting' || taskActionState === 'stopping' || noticeRequiresReopen" @click="handleTaskAction">{{ !fieldSelectionReady ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : loading ? '执行中…' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
     </div>
-    <div class="toast-wrap" :class="{ show: toastVisible }">
-      <div class="toast" :class="{ 'toast-loading': toastLoading }">
-        <div class="toast-icon" v-if="toastLoading"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 2a10 10 0 0 1 10 10"></path></svg></div>
-        <div class="toast-icon" v-else><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="#00B42A"></circle><path d="M8 12l2.5 2.5L16 9" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
-        <span>{{ toastText }}</span>
-      </div>
-    </div>
+    <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>
 
@@ -464,14 +564,7 @@ onUnmounted(() => { if (toastTimer) clearTimeout(toastTimer); });
   .mapping-row { grid-template-columns:minmax(0,1fr) 12px minmax(0,1fr); }
   .mapping-delete { grid-column:3; justify-self:end; }
 }
-.commit-btn { width:100%; height:36px; margin-top:0; border:0; border-radius:6px; background:#a8071a; color:#fff; font-size:14px; font-weight:500; }
-.commit-btn:hover { background:#c11126; }
-.commit-btn:active { background:#8a0515; }
-.toast-wrap { position:fixed; top:50%; left:50%; z-index:9999; width:max-content; max-width:calc(100vw - 32px); pointer-events:none; opacity:0; transform:translate(-50%,-50%) scale(.95); transition:opacity .3s ease,transform .3s ease; }
-.toast-wrap.show { opacity:1; transform:translate(-50%,-50%) scale(1); }
-.toast { display:inline-flex; align-items:center; gap:8px; box-sizing:border-box; max-width:calc(100vw - 32px); padding:8px 16px; border:1px solid #e5e6eb; border-radius:8px; background:#fff; box-shadow:0 8px 24px rgba(0,0,0,.12); color:#1d2129; font-size:14px; font-weight:500; line-height:22px; white-space:normal; overflow-wrap:anywhere; }
-.toast-icon { display:flex; align-items:center; justify-content:center; flex-shrink:0; width:18px; height:18px; }
-.toast-icon svg { width:100%; height:100%; }
-.toast-loading .toast-icon { color:#a8071a; animation:spin .8s linear infinite; }
-@keyframes spin { to { transform:rotate(360deg); } }
+
+.commit-btn { margin-top:0; }
+
 </style>
