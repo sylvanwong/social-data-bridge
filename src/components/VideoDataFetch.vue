@@ -1375,6 +1375,8 @@ const fetchVideoDataByRows = async (rowList, {
       const response = await request({
         url: '/social/api/v1/feishu/social_info',
         method: 'post',
+        // Cover the Dewu backend's 105s request and API processing overhead.
+        timeout: 120000,
         headers: { 'authorization': `Bearer ${props.api_key}` },
         data: {
           url,
