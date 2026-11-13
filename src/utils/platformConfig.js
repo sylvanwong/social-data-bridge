@@ -1,4 +1,4 @@
-import request from '@/utils/request'
+import { buildFeishuApiPath, feishuRequest } from '@/utils/request'
 
 export const PLATFORM_LABELS = {
   xhs: '小红书',
@@ -25,8 +25,8 @@ export const mapPlatformOptions = (platforms = []) =>
   }));
 
 export const fetchPlatformConfigOptions = async (apiKey, name, fallbackOptions = []) => {
-  const response = await request({
-    url: "/social/api/v1/feishu/social/config",
+  const response = await feishuRequest({
+    url: buildFeishuApiPath('/v1/feishu/social/config'),
     method: "get",
     params: { name },
     headers: { authorization: `Bearer ${apiKey}` },

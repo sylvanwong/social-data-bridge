@@ -1,9 +1,9 @@
 import { computed, ref, shallowReactive, onMounted, onUnmounted, watch } from 'vue';
 import { bitable, FieldType } from '@lark-base-open/js-sdk';
-import request from '@/utils/request';
+import { feishuRequest, buildFeishuApiPath } from '@/utils/request';
 import { parseTableConfigList } from '../utils/tableOutputConfig.mjs';
 
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 
 export function useToolOutputConfig({ props, formData, pluginType, sourceFieldKey, loading, stopRequested, taskFeedback, isUnmounted, selectSavedMappings = rows => rows }) {
   const fieldOptions = ref([]);
@@ -63,7 +63,7 @@ export function useToolOutputConfig({ props, formData, pluginType, sourceFieldKe
       try {
         const baseId = await getBaseId();
         if (isUnmounted()) return false;
-        const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: pluginType, base_id: baseId } });
+        const response = await feishuRequest({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: pluginType, base_id: baseId } });
         if (isUnmounted()) return false;
         if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '读取表格输出配置失败');
         const data = response.data?.data || response.data;

@@ -1,5 +1,7 @@
 # 热榜、视频文案、小红书下载、链接转附件：后端对接说明
 
+2026-11-13：下述配置接口已统一接入新服务，原配置三元键和数据直接共用；完整 12 类页面及定时任务管理范围见 `config-schedule-backend-update.md`。
+
 ## 结论
 
 四个页面新增了“字段映射”配置，并复用既有表格输出配置接口持久化。业务数据获取、下载和附件转换接口均不需要增加参数或修改响应结构。
@@ -22,7 +24,7 @@
 接口：
 
 ```http
-GET /social/api/v1/feishu/profile-fetch/table-output-configs?plugin_type=<plugin_type>&base_id=<base_id>
+GET /socialdatax/api/v1/feishu/profile-fetch/table-output-configs?plugin_type=<plugin_type>&base_id=<base_id>
 Authorization: Bearer <api_key>
 ```
 
@@ -51,7 +53,7 @@ Authorization: Bearer <api_key>
 接口：
 
 ```http
-PUT /social/api/v1/feishu/profile-fetch/table-output-config
+PUT /socialdatax/api/v1/feishu/profile-fetch/table-output-config
 Authorization: Bearer <api_key>
 Content-Type: application/json
 ```

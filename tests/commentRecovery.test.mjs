@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
+import { loadRequestModule } from './helpers/requestService.mjs';
 
 const source = parse(fs.readFileSync(new URL('../src/components/CommentFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
 const declarations = parseJS(source, { sourceType: 'module' }).program.body
@@ -21,7 +22,8 @@ function load(name, bindings = {}) {
     bindings.isFieldTypeCompatible ??= load('isFieldTypeCompatible', bindings);
   }
   const node = declarations.find(node => node.id.name === name).init;
-  bindings = { resolveWritableField, nextTick, ...bindings };
+  bindings = { ...loadRequestModule(), resolveWritableField, nextTick, ...bindings };
+  if (bindings.request) bindings.feishuRequest = config => bindings.request(config);
   bindings.feedback ??= { begin() {}, progress() {}, finish: (text, options) => bindings.showCompletionToast?.(text, options), fail: error => bindings.showErrorMsg?.(error?.message || error), hide() {} };
   return new Function(...Object.keys(bindings), `const ${name} = ${source.slice(node.start, node.end)}; return ${name};`)(...Object.values(bindings));
 }

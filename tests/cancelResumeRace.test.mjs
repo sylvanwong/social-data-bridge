@@ -5,6 +5,7 @@ import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { computed, createRenderer, nextTick, ref } from 'vue';
 import { useTaskFeedback } from '../src/composables/useTaskFeedback.mjs';
+import { loadRequestModule } from './helpers/requestService.mjs';
 
 const pages = [
   ['BloggerSearch', 'searchTask', 'cancel', 'resumeSavedTask'],
@@ -36,6 +37,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
     'showFieldProgress', 'showProfileFieldProgress', 'getStreamProgressText',
     'getStoppingText', 'stoppedCommentProgress', 'unwrapApiData', 'auth',
     'getProfileTaskStatus', 'readAvailablePosts', 'getSeriesTask', 'getSeriesResults',
+    'profileTaskApiPath', 'seriesTaskApiPath', 'keywordTaskApiPath', 'commentTaskApiPath', 'bloggerTaskApiPath',
     'restoreTask', 'restoreProfileTask', 'restoreSeriesTask', 'taskActionState', 'handleTaskAction', engineName, cancelName, resumeName,
   ]);
   const statements = parseJS(source, { sourceType: 'module' }).program.body
@@ -56,6 +58,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
   const useIncrementalTask = new Function('bitable', 'setTimeout', 'clearTimeout', `${engineSource}; return useIncrementalTask;`)(
     bitable, (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; }, id => timers.delete(id));
   const dependencies = {
+    ...loadRequestModule(),
     computed, ref, nextTick, useTaskFeedback, useIncrementalTask, getTaskStoppingText,
     loading: ref(false), props: { api_key: 'test-key' }, commentSubmission: { pending: null },
     ElMessage: notice => notices.push(notice), showErrorMsg: message => notices.push({ message }),
@@ -82,6 +85,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
       return { tableId: 'target' };
     },
   };
+  dependencies.feishuRequest = config => dependencies.request(config);
   // Some pages import showErrorMsg; others declare it locally.
   if (statements.includes('const showErrorMsg =')) delete dependencies.showErrorMsg;
   const create = new Function(...Object.keys(dependencies), `${statements}

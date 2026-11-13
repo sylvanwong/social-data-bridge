@@ -67,13 +67,13 @@ for (const auth of ['business-4001', 'http-401', 'http-403']) {
     test(`聚合推荐词${auth}停止后续关键词，已有结果=${partial}按实际数量写入`, async t => {
       const calls = [], written = [];
       const { f, b, run } = setup(t, 'SearchSuggestions', {
-        axios: { post: async (_, data) => {
+        feishuRequest: async ({ data }) => {
           calls.push(data.keyword);
           if (partial && data.keyword === 'a') return { data: { sta: 0, data: { items: [{ keyword: 'a', recommendation: '已获取结果' }] } } };
           if (auth === 'business-4001') return { data: { sta: 4001, msg: '测试密钥已失效' } };
           throw Object.assign(new Error('HTTP 鉴权失败'), { response: { status: Number(auth.slice(-3)), data: { msg: '测试密钥已失效' } } });
-        } },
-        buildApiUrl: path => path,
+        },
+        buildFeishuApiPath: path => `/socialdatax/api${path}`,
         createAndWriteData: async rows => { written.push(...rows); return { tableId: 'created' }; },
       });
       b.fetchSuggestions = extract('SearchSuggestions', 'fetchSuggestions', b);

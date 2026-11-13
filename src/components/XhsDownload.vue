@@ -10,7 +10,7 @@ import { useTaskFeedback } from "../composables/useTaskFeedback.mjs";
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
-import request, { buildApiUrl } from '@/utils/request';
+import request, { buildFeishuApiPath, buildFeishuApiUrl, feishuRequest } from '@/utils/request';
 
 let componentUnmounted = false;
 // 异步结果返回后核对实例，卸载后不再发起后续请求或写入。
@@ -104,7 +104,7 @@ const buildProxyDownloadUrl = (url, fileName, xhsCover = false) => {
     file_name: fileName
   });
   if (xhsCover) params.set('image_mode', 'xhs_cover');
-  return buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`);
+  return buildFeishuApiUrl(`${buildFeishuApiPath('/v1/feishu/xhs_download_proxy')}?${params.toString()}`);
 };
 
 const shouldProxyAttachmentDownload = (item, fieldName) => {
@@ -149,7 +149,7 @@ const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
 const mappingExpanded = ref(false);
 const TASK_PLUGIN_TYPE = 'xhs_download';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
 const {
   fieldOptions, sourceFieldLoading, sourceFieldLoadError, loadFieldOptions, retrySourceFields, handleLinkFieldDropdownVisibleChange,
   tableConfigSaveError, tableConfigSaving, trackMappingSave, mappingDraft, targetFieldOptions, mainOutputTableId, targetFieldTableId, tableConfigLoadError,
@@ -234,7 +234,7 @@ const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, 
     field_mappings: fieldMappings,
   };
   if (componentUnmounted) return;
-  const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+  const response = await feishuRequest({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
   if (componentUnmounted) return;
   if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存小红书下载表格配置失败');
   const saved = response.data?.data || response.data || payload;
@@ -608,8 +608,8 @@ const fetchXhsByRows = async (rowList, { onSuccess = null } = {}) => {
     try {
       showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
 
-      const response = assertMounted(await request({
-        url: '/social/api/v1/feishu/social_info',
+      const response = assertMounted(await feishuRequest({
+        url: buildFeishuApiPath('/v1/feishu/social_info'),
         method: 'post',
         timeout: 60000,
         headers: { 'authorization': `Bearer ${props.api_key}` },

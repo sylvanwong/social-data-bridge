@@ -10,7 +10,7 @@ import { useTaskFeedback } from "../composables/useTaskFeedback.mjs";
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
-import request from '@/utils/request';
+import request, { feishuRequest, buildFeishuApiPath } from '@/utils/request';
 
 let componentUnmounted = false;
 // 异步结果返回后核对实例，卸载后不再发起后续请求或写入。
@@ -58,7 +58,7 @@ const taskFeedback = useTaskFeedback();
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const mappingExpanded = ref(false);
 const TASK_PLUGIN_TYPE = 'url_to_attachment';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
 const {
   fieldOptions, sourceFieldLoading, sourceFieldLoadError, loadFieldOptions, retrySourceFields, handleLinkFieldDropdownVisibleChange,
   tableConfigSaveError, tableConfigSaving, trackMappingSave, mappingDraft, targetFieldOptions, mainOutputTableId, targetFieldTableId, tableConfigLoadError,
@@ -105,7 +105,7 @@ const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, 
     field_mappings: fieldMappings,
   };
   if (componentUnmounted) return;
-  const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+  const response = await feishuRequest({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
   if (componentUnmounted) return;
   if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存链接转附件表格配置失败');
   const saved = response.data?.data || response.data || payload;
@@ -277,8 +277,8 @@ const convertUrlsToAttachments = async (urls) => {
 
   const attachmentSources = [];
   for (let index = 0; index < links.length; index += ATTACHMENT_BATCH_SIZE) {
-    const response = assertMounted(await request({
-      url: '/social/api/v1/feishu/attch',
+    const response = assertMounted(await feishuRequest({
+      url: buildFeishuApiPath('/v1/feishu/attch'),
       method: 'post',
       headers: { authorization: `Bearer ${props.api_key}` },
       data: { links: links.slice(index, index + ATTACHMENT_BATCH_SIZE) },

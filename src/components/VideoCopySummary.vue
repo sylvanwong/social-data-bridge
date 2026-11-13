@@ -10,7 +10,7 @@ import { useTaskFeedback } from "../composables/useTaskFeedback.mjs";
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
-import request from "@/utils/request";
+import request, { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, buildFeishuApiPath, feishuRequest } from "@/utils/request";
 
 const emit = defineEmits(["back"]);
 
@@ -63,7 +63,7 @@ const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
 const mappingExpanded = ref(false);
 const TASK_PLUGIN_TYPE = 'video_copy_summary';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
 const {
   fieldOptions, sourceFieldLoading, sourceFieldLoadError, loadFieldOptions, retrySourceFields, handleLinkFieldDropdownVisibleChange,
   tableConfigSaveError, tableConfigSaving, trackMappingSave, mappingDraft, targetFieldOptions, mainOutputTableId, targetFieldTableId, tableConfigLoadError,
@@ -155,7 +155,7 @@ const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, 
     field_mappings: fieldMappings,
   };
   if (isUnmounted) return;
-  const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+  const response = await feishuRequest({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
   if (isUnmounted) return;
   if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存视频文案表格配置失败');
   const saved = response.data?.data || response.data || payload;
@@ -471,8 +471,8 @@ const sleep = (ms) =>
   });
 
 const createMediaTask = async (url) => {
-  const response = assertMounted(await request({
-    url: "/social/api/v1/feishu/media/task",
+  const response = assertMounted(await feishuRequest({
+    url: buildFeishuApiPath('/v1/feishu/media/task'),
     method: "post",
     headers: { authorization: `Bearer ${props.api_key}` },
     data: { url, force_refresh: false },
@@ -482,10 +482,11 @@ const createMediaTask = async (url) => {
   if (res.sta !== 0 || !res.data?.task_id) {
     throw new Error(res.msg || "创建提取任务失败");
   }
-  return res.data;
+  return { ...res.data, apiBaseUrl: FEISHU_API_BASE_URL, apiPathPrefix: FEISHU_API_PATH_PREFIX };
 };
 
-const pollMediaTask = async (taskId, initialNextPollSeconds = 3) => {
+const pollMediaTask = async (mediaTask, initialNextPollSeconds = 3) => {
+  const task = mediaTask !== null && typeof mediaTask === 'object' ? mediaTask : { task_id: mediaTask };
   const maxPollCount = 120;
   let nextPollSeconds = initialNextPollSeconds || 3;
 
@@ -494,11 +495,12 @@ const pollMediaTask = async (taskId, initialNextPollSeconds = 3) => {
 
     assertMounted(await sleep(Math.max(nextPollSeconds, 1) * 1000));
 
-    const response = assertMounted(await request({
-      url: "/social/api/v1/feishu/media/task/get",
+    const response = assertMounted(await feishuRequest({
+      url: buildFeishuApiPath('/v1/feishu/media/task/get', task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX),
       method: "post",
+      baseURL: task.apiBaseUrl ?? API_BASE_URL,
       headers: { authorization: `Bearer ${props.api_key}` },
-      data: { task_id: taskId },
+      data: { task_id: task.task_id },
     }));
 
     const res = response.data;
@@ -564,7 +566,7 @@ const fetchSummaryByEntries = async (recordEntries, { onSuccess = null } = {}) =
       const task = assertMounted(await createMediaTask(url));
 
       showToast(`第 ${i + 1}/${recordEntries.length} 条任务处理中...`, true);
-      const result = assertMounted(await pollMediaTask(task.task_id, task.next_poll_after_seconds));
+      const result = assertMounted(await pollMediaTask(task, task.next_poll_after_seconds));
 
       const item = { ...result, __recordId: recordId };
       if (onSuccess) {

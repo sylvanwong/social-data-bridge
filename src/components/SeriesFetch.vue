@@ -9,7 +9,7 @@ import { getTaskStoppingText } from '@/utils/taskStopText';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage } from "element-plus";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
-import request from '@/utils/request'
+import request, { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, buildFeishuApiPath, feishuRequest } from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
 import { useSocialData } from '@/composables/useSocialData'
 
@@ -65,8 +65,8 @@ const clearing = ref(false);
 const recoveryRequiresReopen = ref(false);
 let componentUnmounted = false;
 const TASK_PLUGIN_TYPE = 'series_fetch';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 
 watch(seriesPagesType, (type) => {
   if (type === 'all') {
@@ -351,10 +351,14 @@ const validateTableFields = async (tableId, onProgress = null, options = {}) => 
 
 
 
-const getSeriesTask = async (taskId) => {
-  const response = await request({
-    url: `/social/api/v1/feishu/series/list?task_id=${encodeURIComponent(taskId)}`,
+const seriesTaskApiPath = (task, path) => buildFeishuApiPath(path,
+  task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX);
+
+const getSeriesTask = async (task) => {
+  const response = await feishuRequest({
+    url: seriesTaskApiPath(task, `/v1/feishu/series/list?task_id=${encodeURIComponent(task.taskId)}`),
     method: 'get',
+    baseURL: task.apiBaseUrl ?? API_BASE_URL,
     headers: { authorization: `Bearer ${props.api_key}` },
   });
   const res = response.data || {};
@@ -367,9 +371,10 @@ const getSeriesTask = async (taskId) => {
 };
 
 const getSeriesResults = async (task) => {
-  const response = await request({
-    url: '/social/api/v1/feishu/post/list',
+  const response = await feishuRequest({
+    url: seriesTaskApiPath(task, '/v1/feishu/post/list'),
     method: 'post',
+    baseURL: task.apiBaseUrl ?? API_BASE_URL,
     headers: { authorization: `Bearer ${props.api_key}` },
     data: {
       task_id: task.taskId,
@@ -402,7 +407,7 @@ const restoreSeriesTask = (task, progressText = '正在恢复未完成的短剧�
 const seriesStreamTask = useIncrementalTask({
   storageKey: 'series_fetch_stream_task_v1', operationTimeoutMs: 180000,
   isTerminal: status => [1, 2, 3].includes(Number(status.status)),
-  getStatus: task => getSeriesTask(task.taskId),
+  getStatus: getSeriesTask,
   getResults: getSeriesResults,
   writeBatch: async (items, task, controls) => {
     const reconcile = task.pendingWrite ?? !!task.targetTableId;
@@ -491,14 +496,15 @@ const postSeriesTask = async (targetTableId = '', profileUrlText = '') => {
   const writeMode = formData.value.writeMode;
   showToast('正在提交短剧获取任务...', true);
   await seriesStreamTask.submit(async () => {
-    const response = await request({ url: '/social/api/v1/feishu/series/list', method: 'post',
+    const response = await feishuRequest({ url: buildFeishuApiPath('/v1/feishu/series/list'), method: 'post',
       headers: { authorization: `Bearer ${props.api_key}` },
       data: { profile_url: profileUrlText, pages: Number(formData.value.pages) } });
     const res = response.data || {};
     if (Number(res.sta) !== 0) throw new Error(res.msg || '创建短剧任务失败');
     const data = res.data?.data || res.data || res;
     return { taskId: data.task_id, targetTableId,
-      selectedFieldKeys: fields, fieldMappings: mappings, writeMode, pendingWrite: false };
+      selectedFieldKeys: fields, fieldMappings: mappings, writeMode, pendingWrite: false,
+      apiBaseUrl: FEISHU_API_BASE_URL, apiPathPrefix: FEISHU_API_PATH_PREFIX };
   }, task => restoreSeriesTask(task, '任务已创建，正在准备获取短剧…'));
 };
 
@@ -508,9 +514,10 @@ const cancelSeriesTask = async () => {
   isCancelling.value = true;
   showToast(getStoppingText(task), true);
   try {
-    const response = await request({
-      url: '/social/api/v1/feishu/series/list/cancel',
+    const response = await feishuRequest({
+      url: seriesTaskApiPath(task, '/v1/feishu/series/list/cancel'),
       method: 'post',
+      baseURL: task.apiBaseUrl ?? API_BASE_URL,
       headers: { authorization: `Bearer ${props.api_key}` },
       data: { task_id: task.taskId },
     });
@@ -569,7 +576,7 @@ const loadTableOutputConfigs = async () => {
   try {
     const baseId = await getBaseId();
     if (componentUnmounted || token !== tableConfigsLoadToken) return false;
-    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
+    const response = await feishuRequest({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
     if (componentUnmounted || token !== tableConfigsLoadToken) return false;
     if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '读取输出表配置失败');
     const data = response.data?.data || response.data;
@@ -608,7 +615,7 @@ const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, 
       field_mappings: fieldMappings,
     };
     if (componentUnmounted) return;
-    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    const response = await feishuRequest({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
     if (componentUnmounted) return;
     if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存短剧表格配置失败');
     const saved = response.data?.data || response.data;

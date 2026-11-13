@@ -3,7 +3,7 @@ import { resolveWritableField } from "../utils/tableFields.js";
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage } from "element-plus";
 import { ref, onUnmounted } from "vue";
-import request, { buildApiUrl } from '@/utils/request'
+import request, { buildFeishuApiPath, buildFeishuApiUrl } from '@/utils/request'
 
 export const FIELD_MAPPING = [
   { key: 'aweme_id', name: '视频编号', type: FieldType.Text, defaultSelected: true, required: true },
@@ -264,7 +264,7 @@ const downloadAttachmentAsFile = async (url, fileName, apiKey, xhsCover = false)
   const timeoutId = setTimeout(() => controller.abort(), ATTACHMENT_DOWNLOAD_TIMEOUT);
   const proxyParams = new URLSearchParams({ url, file_name: fileName });
   if (xhsCover) proxyParams.set('image_mode', 'xhs_cover');
-  const proxyUrl = buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${proxyParams.toString()}`);
+  const proxyUrl = buildFeishuApiUrl(`${buildFeishuApiPath('/v1/feishu/xhs_download_proxy')}?${proxyParams.toString()}`);
   const download = async (requestUrl, useProxy = false) => {
     const response = await fetch(requestUrl, {
       signal: controller.signal,

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
+import { loadRequestModule } from './helpers/requestService.mjs';
 
 for (const [page, handler, engineName] of [['KeywordSearch', 'postSearchTask', 'keywordStreamTask'], ['BloggerSearch', 'submit', 'searchTask']]) {
   test(`${page}: creating HTTP keeps original output target, fields and mode`, async () => {
@@ -15,6 +16,7 @@ for (const [page, handler, engineName] of [['KeywordSearch', 'postSearchTask', '
     const fields = { value: ['user_id'] }, mappings = { value: [{ source_key: 'user_id', target_field_id: 'original-field' }] };
     let finishRequest, saved;
     const bindings = {
+      ...loadRequestModule(),
       feedback: { begin() {}, fail: e => assert.fail(e?.message || e) }, nextTick, requiresReopen: { value: false },
       form, formData1: form, selectedFieldKeys: fields, mappingDraft: mappings,
       props: { api_key: 'test' }, [engineName]: { submit: async create => { saved = await create(); } },
@@ -27,6 +29,7 @@ for (const [page, handler, engineName] of [['KeywordSearch', 'postSearchTask', '
         assert.equal(table, 'original-table'); assert.equal(options.writeMode, 'upsert'); return true;
       }, showErrorMsg: message => assert.fail(message),
     };
+    bindings.feishuRequest = config => bindings.request(config);
     const submit = new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
     const pending = submit('original-table');
     await new Promise(resolve => setImmediate(resolve));

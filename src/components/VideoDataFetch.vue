@@ -11,7 +11,7 @@ import { cloneInputFilter, prepareInputFilter, filterRecordIds } from '@/utils/i
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ref, onMounted, onUnmounted, watch, computed, nextTick } from "vue";
 import { ElMessage } from "element-plus";
-import request, { buildApiUrl } from '@/utils/request';
+import request, { buildFeishuApiPath, buildFeishuApiUrl, feishuRequest } from '@/utils/request';
 
 const emit = defineEmits(['back']);
 
@@ -20,9 +20,9 @@ const props = defineProps({
 })
 
 const TASK_PLUGIN_TYPE = 'video_data';
-const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TASK_API_PATH = buildFeishuApiPath('/v1/feishu/schedule/tasks');
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 const formData = ref({
   mode: 'table',
   targetType: 'current',
@@ -316,7 +316,7 @@ const buildProxyDownloadUrl = (url, fileName, xhsCover = false) => {
     file_name: fileName,
   });
   if (xhsCover) params.set('image_mode', 'xhs_cover');
-  return buildApiUrl(`/social/api/v1/feishu/xhs_download_proxy?${params.toString()}`);
+  return buildFeishuApiUrl(`${buildFeishuApiPath('/v1/feishu/xhs_download_proxy')}?${params.toString()}`);
 };
 
 const shouldUseProxyFirst = (item, config) => {
@@ -586,7 +586,7 @@ const loadTableOutputConfigs = async ({ throwOnError = false } = {}) => {
   tableConfigLoading.value = true;
   try {
     const baseId = (await bitable.base.getSelection()).baseId || '';
-    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
+    const response = await feishuRequest({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
     if (requestId !== tableConfigsReadId.value) return false;
     if (response.data?.sta !== 0) throw new Error(response.data?.msg || '读取输出表配置失败');
     const data = response.data?.data || response.data || {};
@@ -677,7 +677,7 @@ const persistTableOutputConfig = createTableConfigSaver(async (config) => {
       write_mode: config.writeMode,
       field_mappings: config.fieldMappings,
     };
-    const response = await request({
+    const response = await feishuRequest({
       url: TABLE_CONFIG_API_PATH, method: 'put',
       headers: { authorization: `Bearer ${props.api_key}` }, data: payload,
     });
@@ -1372,8 +1372,8 @@ const fetchVideoDataByRows = async (rowList, {
       showToast(`正在处理 ${Math.min(index + 1, rowList.length)}/${rowList.length} 条...`, true);
       console.log(`正在处理第 ${index + 1}/${rowList.length} 条:`, { url, rawValue });
 
-      const response = await request({
-        url: '/social/api/v1/feishu/social_info',
+      const response = await feishuRequest({
+        url: buildFeishuApiPath('/v1/feishu/social_info'),
         method: 'post',
         headers: { 'authorization': `Bearer ${props.api_key}` },
         data: {
@@ -1777,7 +1777,7 @@ const loadTaskList = async () => {
 
   try {
     const selection = await bitable.base.getSelection();
-    const response = await request({
+    const response = await feishuRequest({
       url: TASK_API_PATH,
       method: 'get',
       headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -1976,7 +1976,7 @@ const saveTask = async () => {
       });
     }
 
-    const response = await request({
+    const response = await feishuRequest({
       url: taskId ? `${TASK_API_PATH}/${taskId}` : TASK_API_PATH,
       method: taskId ? 'put' : 'post',
       headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -2013,7 +2013,7 @@ const deleteTask = async (task) => {
   }
 
   try {
-    const response = await request({
+    const response = await feishuRequest({
       url: `${TASK_API_PATH}/${task.id}`,
       method: 'delete',
       headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -2036,7 +2036,7 @@ const deleteTask = async (task) => {
 const toggleTaskStatus = async (task) => {
   try {
     const nextEnabled = !(task.enabled ?? task.schedule?.enabled);
-    const response = await request({
+    const response = await feishuRequest({
       url: `${TASK_API_PATH}/${task.id}/toggle`,
       method: 'post',
       headers: { 'authorization': `Bearer ${props.api_key}` },

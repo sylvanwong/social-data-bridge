@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
+import { loadRequestModule } from './helpers/requestService.mjs';
 
 for (const [component, engineName, key] of [['ProfileFetch', 'profileStreamTask', 'aweme_id'], ['SeriesFetch', 'seriesStreamTask', 'series_id']]) {
   test(`${component}：新表部分写入失败后恢复同一表，核对原批并排空后续结果`, async () => {
@@ -55,9 +56,9 @@ for (const [page, engine] of [['CommentFetch', 'commentStreamTask'], ['ProfileFe
 }
 
 for (const [page, engine, helpers, limit] of [
-  ['ProfileFetch', 'profileStreamTask', ['unwrapApiData', 'readAvailablePosts'], 40],
-  ['SeriesFetch', 'seriesStreamTask', ['getSeriesResults'], 20],
-  ['KeywordSearch', 'keywordStreamTask', [], 40],
+  ['ProfileFetch', 'profileStreamTask', ['profileTaskApiPath', 'unwrapApiData', 'readAvailablePosts'], 40],
+  ['SeriesFetch', 'seriesStreamTask', ['seriesTaskApiPath', 'getSeriesResults'], 20],
+  ['KeywordSearch', 'keywordStreamTask', ['keywordTaskApiPath'], 40],
 ]) {
   for (const count of [2, null, undefined]) {
     test(`${page}：真实结果读取接入轮询，总数 ${count}、读取失败重试后仍写完`, async () => {
@@ -83,8 +84,10 @@ for (const [page, engine, helpers, limit] of [
         // 保留短剧已有的嵌套响应兼容。
         return { data: { sta: 0, data: page === 'SeriesFetch' && count === undefined ? { data: payload } : payload } };
       };
-      const getResults = new Function('request', 'props', 'STREAM_RESULT_LIMIT', 'listPageSize',
-        `${helperSource}; return (${source.slice(reader.start, reader.end)});`)(request, { api_key: 'test-only' }, 40, 20);
+      const routing = loadRequestModule();
+      const bindings = { ...routing, request, feishuRequest: request, props: { api_key: 'test-only' }, STREAM_RESULT_LIMIT: 40, listPageSize: 20 };
+      const getResults = new Function(...Object.keys(bindings),
+        `${helperSource}; return (${source.slice(reader.start, reader.end)});`)(...Object.values(bindings));
       const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
         .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
       const bitable = { base: { getSelection: async () => ({ baseId: 'base' }) },
