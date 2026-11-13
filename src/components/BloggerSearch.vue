@@ -5,7 +5,7 @@ import TaskFeedback from './TaskFeedback.vue';
 import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { bitable, FieldType } from '@lark-base-open/js-sdk';
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
-import request from '@/utils/request';
+import { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, feishuRequest, buildFeishuApiPath } from '@/utils/request';
 import { BLOGGER_FIELD_MAPPING, getDefaultSelectedFieldKeys, showErrorMsg, useSocialData } from '@/composables/useSocialData';
 import { useIncrementalTask } from '@/composables/useIncrementalTask';
 
@@ -13,8 +13,8 @@ const props = defineProps({ api_key: String, social_type_options: Array });
 const TASK_PLUGIN_TYPE = 'blogger_search';
 const SEARCH_FIELD_MAPPING = [...BLOGGER_FIELD_MAPPING,
   { key: 'identity_key', name: '作者标识', type: FieldType.Text, defaultSelected: false }];
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 const form = ref({ social_type: '', keyword: '', rangeType: 'pages', pages: 1, radio: 1, table_id: '', writeMode: 'upsert', follower_count_range: 'all', user_type: 'all' });
 const tableOptions = ref([]);
 const tableFieldOptions = ref([]);
@@ -54,7 +54,7 @@ const socialOptions = computed(() => [
 ]);
 const isDouyin = computed(() => form.value.social_type === 'douyin');
 
-const getTableName = () => form.value.keyword.split(/[\n,，]+/).map(item => item.trim()).find(Boolean) || '作者搜索';
+const getTableName = () => (searchTask.getActiveTask()?.formData?.keyword || form.value.keyword).split(/[\n,，]+/).map(item => item.trim()).find(Boolean) || '作者搜索';
 const { createAndWriteData, validateTableFields } = useSocialData(getTableName, props.api_key, SEARCH_FIELD_MAPPING);
 const auth = () => ({ authorization: `Bearer ${props.api_key}` });
 
@@ -71,13 +71,22 @@ const hasRecoverableTask = ref(false);
 const clearing = ref(false);
 const requiresReopen = ref(false);
 let componentUnmounted = false;
-const restoreTask = (task, progressText = '正在恢复未完成的作者搜索任务…') => {
+const restoreTask = async (task, progressText = '正在恢复未完成的作者搜索任务…', restoring = false) => {
+  const restoreForm = restoring && taskId.value !== task.taskId && task.formData;
   hasRecoverableTask.value = true;
   loading.value = true;
   taskId.value = task.taskId;
   const status = task.latestStatus;
   cancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
   showToast(cancelling.value ? getStoppingText(task) : progressText);
+  if (restoreForm) {
+    Object.assign(form.value, JSON.parse(JSON.stringify(task.formData)));
+    if (Array.isArray(task.selectedFieldKeys)) selectedFieldKeys.value = [...task.selectedFieldKeys];
+    await nextTick();
+    if (componentUnmounted || searchTask.getActiveTask() !== task) return;
+    // 字段仅用于回显，不能阻塞原任务轮询和停止确认。
+    loadTableFields(form.value.radio === 2 ? form.value.table_id : '', task);
+  }
 };
 const resumeSavedTask = async () => {
   if (requiresReopen.value || componentUnmounted || loading.value) return;
@@ -85,7 +94,7 @@ const resumeSavedTask = async () => {
   feedback.begin('正在检查未完成任务…');
   try {
     await nextTick();
-    const resumed = await searchTask.resume(restoreTask);
+    const resumed = await searchTask.resume(task => restoreTask(task, undefined, true));
     if (!resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -99,12 +108,22 @@ const resumeSavedTask = async () => {
   }
 };
 
+const bloggerTaskApiPath = (task, path) => buildFeishuApiPath(path,
+  task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX);
+
 const searchTask = useIncrementalTask({
   storageKey,
   operationTimeoutMs: 180000,
   isTerminal: status => [1, 2, 3].includes(Number(status.status)),
-  getStatus: async task => (await request({ url: `/social/api/v1/feishu/blogger/search/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', headers: auth() })).data,
-  getResults: async task => (await request({ url: '/social/api/v1/feishu/blogger/search/list', method: 'post', headers: auth(), data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 } })).data,
+  getStatus: async task => (await feishuRequest({
+    url: bloggerTaskApiPath(task, `/v1/feishu/blogger/search/task?task_id=${encodeURIComponent(task.taskId)}`),
+    method: 'get', baseURL: task.apiBaseUrl ?? API_BASE_URL, headers: auth(),
+  })).data,
+  getResults: async task => (await feishuRequest({
+    url: bloggerTaskApiPath(task, '/v1/feishu/blogger/search/list'),
+    method: 'post', baseURL: task.apiBaseUrl ?? API_BASE_URL, headers: auth(),
+    data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 },
+  })).data,
   writeBatch: async (items, task, controls) => {
     const reconcile = task.pendingWrite ?? !!task.targetTableId;
     task.pendingWrite = reconcile;
@@ -193,7 +212,7 @@ const loadTableOutputConfigs = async () => {
   try {
     const baseId = await getBaseId();
     if (componentUnmounted || token !== tableConfigsLoadToken) return false;
-    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: auth(), params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
+    const response = await feishuRequest({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: auth(), params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
     if (componentUnmounted || token !== tableConfigsLoadToken) return false;
     if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '读取输出表配置失败');
     const data = response.data?.data || response.data;
@@ -208,13 +227,13 @@ const loadTableOutputConfigs = async () => {
     return false;
   }
 };
-const loadTableFields = async tableId => {
+const loadTableFields = async (tableId, restoredTask = null) => {
   const token = ++tableFieldsLoadToken;
   const pendingConfig = tableConfigSaves.get(tableId)?.config;
   tableFieldsError = null;
   tableConfigApplying.value = true;
   tableFieldOptions.value = [];
-  mappingDraft.value = [];
+  mappingDraft.value = (restoredTask?.fieldMappings || []).map(item => ({ ...item }));
   if (!tableId) { mappingLoading.value = false; tableConfigApplying.value = false; return true; }
   mappingLoading.value = true;
   try {
@@ -223,8 +242,8 @@ const loadTableFields = async tableId => {
     const fields = await table.getFieldMetaList();
     if (componentUnmounted || token !== tableFieldsLoadToken) return;
     tableFieldOptions.value = fields.map(field => ({ id: field.id, name: field.name, type: field.type }));
-    if (!tableConfigsLoaded.value) return false;
-    const config = tableConfigSaves.get(tableId)?.config || pendingConfig || tableOutputConfigs.value[tableId];
+    if (!restoredTask && !tableConfigsLoaded.value) return false;
+    const config = restoredTask ? { write_mode: restoredTask.writeMode, field_mappings: restoredTask.fieldMappings } : tableConfigSaves.get(tableId)?.config || pendingConfig || tableOutputConfigs.value[tableId];
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
     if (config?.write_mode === 'append' || config?.write_mode === 'upsert') form.value.writeMode = config.write_mode;
     return true;
@@ -234,6 +253,8 @@ const loadTableFields = async tableId => {
     if (!submitting.value) showErrorMsg(error.message || '读取目标表字段失败，请稍后重试', 5000);
     return false;
   } finally {
+    // 恢复任务可能已先结束，等回填 watcher 结束后再解锁，避免误保存。
+    if (restoredTask) await nextTick();
     if (componentUnmounted || token !== tableFieldsLoadToken) return;
     mappingLoading.value = false;
     tableConfigApplying.value = false;
@@ -242,7 +263,7 @@ const loadTableFields = async tableId => {
 const saveTableOutputConfig = async (outputConfig = null) => {
   outputConfig = outputConfig?.targetTableId ? outputConfig : null;
   if (componentUnmounted || !tableConfigsLoaded.value) return;
-  if (!outputConfig && (form.value.radio !== 2 || !form.value.table_id || tableConfigApplying.value)) return;
+  if (!outputConfig && (loading.value || submitting.value || form.value.radio !== 2 || !form.value.table_id || tableConfigApplying.value)) return;
   if (!props.api_key || (!outputConfig && !tableFieldOptions.value.length)) return;
   let snapshot = outputConfig;
   if (!snapshot) {
@@ -264,7 +285,7 @@ const saveTableOutputConfig = async (outputConfig = null) => {
     const table = await bitable.base.getTableById(targetTableId);
     const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: writeMode, field_mappings: fieldMappings };
     if (componentUnmounted) return;
-    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: auth(), data: payload });
+    const response = await feishuRequest({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: auth(), data: payload });
     if (componentUnmounted) return;
     if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '保存作者搜索表格配置失败');
     tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: response.data?.data || response.data };
@@ -313,7 +334,10 @@ const cancel = async () => {
   if (!task?.taskId || cancelling.value || clearing.value) return;
   cancelling.value = true; showToast(getStoppingText(task));
   try {
-    const response = await request({ url: '/social/api/v1/feishu/blogger/search/task/cancel', method: 'post', headers: auth(), data: { task_id: task.taskId } });
+    const response = await feishuRequest({
+      url: bloggerTaskApiPath(task, '/v1/feishu/blogger/search/task/cancel'),
+      method: 'post', baseURL: task.apiBaseUrl ?? API_BASE_URL, headers: auth(), data: { task_id: task.taskId },
+    });
     if (response.data?.sta !== 0) throw new Error(response.data?.msg || '停止任务失败');
   } catch (error) {
     if (searchTask.getActiveTask() !== task || clearing.value) return;
@@ -358,6 +382,7 @@ const submit = async () => {
     }
     if (form.value.radio === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
     const outputSnapshot = {
+      formData: JSON.parse(JSON.stringify(form.value)),
       targetTableId: form.value.radio === 2 ? form.value.table_id : '',
       selectedFieldKeys: [...selectedFieldKeys.value], writeMode: form.value.writeMode,
       fieldMappings: form.value.radio === 2 ? mappingDraft.value.map(item => ({ ...item })) : [],
@@ -370,13 +395,15 @@ const submit = async () => {
       writeMode: outputSnapshot.writeMode, uniqueKey: 'user_id', fieldMappings: outputSnapshot.fieldMappings,
       throwOnError: true, onProgress: showToast,
     }))) throw new Error('目标字段校验未通过，任务未开始');
-    const filter_config = isDouyin.value ? { follower_count_range: form.value.follower_count_range, user_type: form.value.user_type } : {};
+    const taskForm = outputSnapshot.formData;
+    const filter_config = taskForm.social_type === 'douyin' ? { follower_count_range: taskForm.follower_count_range, user_type: taskForm.user_type } : {};
     if (componentUnmounted) return;
     await searchTask.submit(async () => {
-    const response = await request({ url: '/social/api/v1/feishu/blogger/search/task', method: 'post', headers: auth(), data: { social_type: form.value.social_type, keyword: keywords, pages: form.value.rangeType === 'all' ? 0 : Number(form.value.pages), filter_config } });
+      const response = await feishuRequest({ url: buildFeishuApiPath('/v1/feishu/blogger/search/task'), method: 'post', headers: auth(), data: { social_type: taskForm.social_type, keyword: keywords, pages: taskForm.rangeType === 'all' ? 0 : Number(taskForm.pages), filter_config } });
       if (response.data?.sta !== 0 || !response.data.data?.task_id) throw new Error(response.data?.msg || '创建任务未返回任务ID');
       const task = response.data.data;
       return { taskId: task.task_id, pendingWrite: false,
+        apiBaseUrl: FEISHU_API_BASE_URL, apiPathPrefix: FEISHU_API_PATH_PREFIX,
         ...outputSnapshot };
     }, task => restoreTask(task, '任务已创建，正在准备获取作者…'));
   } catch (error) {

@@ -101,6 +101,7 @@ for (const change of ['switch-table', 'edit-in-place']) {
 
 function configSaver(bindings) {
   bindings = { showErrorMsg() {}, tableConfigReady: { value: true }, tableConfigLoading: { value: false }, ...bindings };
+  bindings.feishuRequest = config => bindings.request(config);
   const source = parse(fs.readFileSync(new URL('../src/components/HotListFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
   const nodes = parseJS(source, { sourceType: 'module' }).program.body
     .filter(node => node.type === 'VariableDeclaration' && node.declarations.some(item => ['tableConfigSaves', 'persistTableOutputConfig', 'saveTableOutputConfig'].includes(item.id.name)));
@@ -166,6 +167,7 @@ function configEditor() {
     },
     FIELD_MAPPING: [{ key: 'title', name: '标题' }], TASK_PLUGIN_TYPE: 'test', TABLE_CONFIG_API_PATH: '/one', TABLE_CONFIGS_API_PATH: '/list', console: { error() {} },
   };
+  bindings.feishuRequest = config => bindings.request(config);
   const editor = new Function(...Object.keys(bindings), nodes.map(node => source.slice(node.start, node.end)).join('\n') + '\nreturn {applyTableOutputConfig,saveTableOutputConfig,tableConfigReady,tableConfigLoading,tableConfigError};')(...Object.values(bindings));
   const stop = watch(mappingDraft, editor.saveTableOutputConfig, { deep: true, flush: 'sync' });
   return { ...editor, formData, mappingDraft, writes, stop, response: value => { response = value; }, fieldRead: value => { fieldRead = value; } };

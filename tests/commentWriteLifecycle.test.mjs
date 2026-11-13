@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
+import { loadRequestModule } from './helpers/requestService.mjs';
 
 function handler(name, bindings) {
   const source = parse(fs.readFileSync(new URL('../src/components/CommentFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
@@ -59,7 +60,10 @@ test('评论只在停止确认后请求总数，旧接口没有总数也能返�
     .find(n => n.id.name === 'commentStreamTask').init.arguments[0].properties.find(n => n.key.name === 'getResults').value;
   const response = { data: { sta: 0, data: { data: [{ cid: 'one' }], next_cursor: '1' } } };
   let config;
-  const read = new Function('request', 'props', `return (${source.slice(node.start, node.end)});`)(async options => { config=options; return response; }, { api_key: 'test' });
+  const bindings = { ...loadRequestModule(), props: { api_key: 'test' },
+    feishuRequest: async options => { config = options; return response; } };
+  bindings.commentTaskApiPath = handler('commentTaskApiPath', bindings);
+  const read = new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
   const task = { taskId: 'task', writtenCount: 100 };
   assert.deepEqual(await read(task), response.data);
   assert.equal(config.data.include_count, false);

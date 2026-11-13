@@ -4,13 +4,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
+import { loadRequestModule } from './helpers/requestService.mjs';
 
 const { descriptor } = parse(fs.readFileSync(new URL('../src/components/CommentFetch.vue', import.meta.url), 'utf8'));
 const source = descriptor.scriptSetup.content;
 const declarations = parseJS(source, { sourceType: 'module' }).program.body
   .filter(node => node.type === 'VariableDeclaration').flatMap(node => node.declarations);
 function evaluate(node, scope) {
-  scope = { nextTick, ...scope };
+  scope = { ...loadRequestModule(), nextTick, ...scope };
+  if (scope.request) scope.feishuRequest = config => scope.request(config);
   scope.feedback ??= { begin() {}, progress() {}, finish: (text, options) => scope.showCompletionToast?.(text, options), fail: error => scope.showErrorMsg?.(error?.message || error), hide() {} };
   return new Function(...Object.keys(scope), `return (${source.slice(node.start, node.end)});`)(...Object.values(scope));
 }
@@ -192,12 +194,13 @@ test('提交接口在页面卸载后返回，保存任务但不在旧页面启�
     && node.expression.type === 'CallExpression' && node.expression.callee.name === 'onUnmounted').expression.arguments[0];
   const submit = declarations.find(node => node.id.name === 'postNoteTask').init;
   let release, releaseSave, starts = 0, saved;
-  const scope = { request: () => new Promise(resolve => { release = resolve; }), showToast() {},
+  const scope = { ...loadRequestModule(), request: () => new Promise(resolve => { release = resolve; }), showToast() {},
     props: { api_key: 'test' }, formData: { value: { pages: 1, reply_pages: -1 } },
     selectedFieldKeys: { value: ['cid'] }, mappingDraft: { value: [] }, activeCommentTaskId: { value: '' },
     commentSubmission: { pending: null },
     commentStreamTask: { stop() {}, saveForResume: async task => { await new Promise(resolve => { releaseSave = resolve; }); saved = task; }, resume: async () => { starts++; }, start: () => { starts++; } }, closeNoteInterval() {}, toastTimer: null,
   };
+  scope.feishuRequest = config => scope.request(config);
   const page = new Function(...Object.keys(scope), `let componentUnmounted = false; return {
     submit: (${source.slice(submit.start, submit.end)}), unmount: (${source.slice(unmounted.start, unmounted.end)})
   };`)(...Object.values(scope));

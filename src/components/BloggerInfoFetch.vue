@@ -11,7 +11,7 @@ import { cloneInputFilter, prepareInputFilter, filterRecordIds } from '@/utils/i
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { ElMessage } from "element-plus";
-import request from '@/utils/request';
+import request, { buildFeishuApiPath, feishuRequest } from '@/utils/request';
 
 const emit = defineEmits(['back']);
 
@@ -20,9 +20,9 @@ const props = defineProps({
 });
 
 const TASK_PLUGIN_TYPE = 'blogger_info';
-const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TASK_API_PATH = buildFeishuApiPath('/v1/feishu/schedule/tasks');
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 const MANUAL_TABLE_BASE_NAME = '博主信息';
 const FIELD_SELECTION_STORAGE_KEY = 'blogger_info_selected_fields_v2';
 const writeModeOptions = [
@@ -483,7 +483,7 @@ const loadTableOutputConfig = async (tableId, { throwOnError = false } = {}) => 
     const selection = await bitable.base.getSelection();
     let list, readError;
     try {
-      const response = await request({
+      const response = await feishuRequest({
         url: TABLE_CONFIGS_API_PATH,
         method: 'get',
         headers: { authorization: `Bearer ${props.api_key}` },
@@ -561,7 +561,7 @@ const applyTaskTableOutputConfig = async (tableId) => {
     const selection = await bitable.base.getSelection();
     let list, readError;
     try {
-      const response = await request({
+      const response = await feishuRequest({
         url: TABLE_CONFIGS_API_PATH,
         method: 'get',
         headers: { authorization: `Bearer ${props.api_key}` },
@@ -602,7 +602,7 @@ const persistTableOutputConfig = createTableConfigSaver(async (config) => {
       write_mode: config.writeMode,
       field_mappings: config.fieldMappings,
     };
-    const response = await request({
+    const response = await feishuRequest({
       url: TABLE_CONFIG_API_PATH, method: 'put',
       headers: { authorization: `Bearer ${props.api_key}` }, data: payload,
     });
@@ -1029,8 +1029,8 @@ const fetchBloggerInfoByRows = async (rowList, { onSuccess = null } = {}) => {
     try {
       showToast(`正在处理第 ${i + 1}/${rowList.length} 条...`, true);
 
-      const response = await request({
-        url: '/social/api/v1/feishu/blogger_info',
+      const response = await feishuRequest({
+        url: buildFeishuApiPath('/v1/feishu/blogger_info'),
         method: 'post',
         headers: { 'authorization': `Bearer ${props.api_key}` },
         data: { url }
@@ -1411,7 +1411,7 @@ const loadTaskList = async () => {
 
   try {
     const selection = await bitable.base.getSelection();
-    const response = await request({
+    const response = await feishuRequest({
       url: TASK_API_PATH,
       method: 'get',
       headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -1635,7 +1635,7 @@ const saveTask = async () => {
       });
     }
 
-    const response = await request({
+    const response = await feishuRequest({
       url: taskId ? `${TASK_API_PATH}/${taskId}` : TASK_API_PATH,
       method: taskId ? 'put' : 'post',
       headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -1672,7 +1672,7 @@ const deleteTask = async (task) => {
   }
 
   try {
-    const response = await request({
+    const response = await feishuRequest({
       url: `${TASK_API_PATH}/${task.id}`,
       method: 'delete',
       headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -1695,7 +1695,7 @@ const deleteTask = async (task) => {
 const toggleTaskStatus = async (task) => {
   try {
     const nextEnabled = !(task.enabled ?? task.schedule?.enabled);
-    const response = await request({
+    const response = await feishuRequest({
       url: `${TASK_API_PATH}/${task.id}/toggle`,
       method: 'post',
       headers: { 'authorization': `Bearer ${props.api_key}` },

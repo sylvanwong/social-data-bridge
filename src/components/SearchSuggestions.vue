@@ -2,11 +2,10 @@
 import { parseTableConfigList } from '../utils/tableOutputConfig.mjs';
 import TaskFeedback from './TaskFeedback.vue';
 import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
-import axios from 'axios';
 import { bitable, DateFormatter, FieldType } from '@lark-base-open/js-sdk';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import request, { buildApiUrl } from '@/utils/request';
+import { feishuRequest, buildFeishuApiPath } from '@/utils/request';
 import { getDefaultSelectedFieldKeys, useSocialData } from '@/composables/useSocialData';
 
 const props = defineProps({ api_key: String });
@@ -15,8 +14,8 @@ const assertActive = () => { if (disposed) throw new Error('页面已卸载'); }
 onUnmounted(() => { disposed = true; });
 
 const TASK_PLUGIN_TYPE = 'search_suggestions';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 const FIELD_SELECTION_STORAGE_KEY = 'search_suggestions_selected_fields_v1';
 
 const PLATFORM_OPTIONS = [
@@ -135,7 +134,7 @@ const loadTableOutputConfigs = async () => {
   try {
     const baseId = await getBaseId();
     if (disposed || token !== tableConfigsLoadToken) return false;
-    const response = await request({
+    const response = await feishuRequest({
       url: TABLE_CONFIGS_API_PATH,
       method: 'get',
       headers: { authorization: `Bearer ${props.api_key}` },
@@ -222,7 +221,7 @@ const saveTableOutputConfig = async (outputConfig = null) => {
     const table = await bitable.base.getTableById(targetTableId);
     const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: writeMode, field_mappings: fieldMappings };
     if (disposed) return;
-    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    const response = await feishuRequest({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
     if (disposed) return;
     if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '保存推荐词表格配置失败');
     tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: response.data?.data || response.data };
@@ -246,11 +245,12 @@ const getMappingTargetFields = index => {
 };
 
 const fetchSuggestions = async keyword => {
-  const response = await axios.post(
-    buildApiUrl('/social/api/v1/feishu/search/suggestions'),
-    { social_type: form.value.social_type, keyword },
-    { timeout: 60000, headers: { authorization: `Bearer ${props.api_key}` } },
-  );
+  const response = await feishuRequest({
+    url: buildFeishuApiPath('/v1/feishu/search/suggestions'),
+    method: 'post',
+    data: { social_type: form.value.social_type, keyword },
+    timeout: 60000, headers: { authorization: `Bearer ${props.api_key}` },
+  });
   const result = response.data;
   if (result?.sta !== 0) {
     const error = new Error(result?.msg || '获取推荐词失败');

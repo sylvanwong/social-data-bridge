@@ -15,7 +15,7 @@ import { getTaskStoppingText } from '@/utils/taskStopText';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage } from "element-plus";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
-import request from '@/utils/request'
+import request, { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, buildFeishuApiPath, feishuRequest } from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
 
 const props = defineProps({
@@ -23,8 +23,8 @@ const props = defineProps({
 })
 
 const TASK_PLUGIN_TYPE = 'comment_fetch';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 
 let note_timer = null;
 const formData = ref({
@@ -442,7 +442,7 @@ const loadTableOutputConfigs = async () => {
   try {
     const baseId = await getBaseId();
     if (componentUnmounted || token !== tableConfigsLoadToken) return false;
-    const response = await request({
+    const response = await feishuRequest({
       url: TABLE_CONFIGS_API_PATH,
       method: 'get',
       headers: { authorization: `Bearer ${props.api_key}` },
@@ -495,7 +495,7 @@ const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, 
       field_mappings: fieldMappings,
     };
     if (componentUnmounted) return;
-    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    const response = await feishuRequest({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
     if (componentUnmounted) return;
     if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存评论表格配置失败');
     const saved = response.data?.data || response.data;
@@ -840,12 +840,24 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
   }
 };
 
+const commentTaskApiPath = (task, path) => buildFeishuApiPath(path,
+  task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX);
+
 const commentStreamTask = useIncrementalTask({
   storageKey: STREAM_TASK_STORAGE_KEY,
   operationTimeoutMs: 180000,
   isTerminal: (status) => [1, 2, 3].includes(Number(status.status)),
-  getStatus: async (task) => (await request({ url: `/social/api/v1/feishu/comment/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', params: { supports_partial_results: 1 }, headers: { authorization: `Bearer ${props.api_key}` } })).data,
-  getResults: async (task) => (await request({ url: '/social/api/v1/feishu/comment/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 20, include_count: Number(task.latestStatus?.status) === 3 } })).data,
+  getStatus: async (task) => (await feishuRequest({
+    url: commentTaskApiPath(task, `/v1/feishu/comment/task?task_id=${encodeURIComponent(task.taskId)}`),
+    method: 'get', baseURL: task.apiBaseUrl ?? API_BASE_URL,
+    params: { supports_partial_results: 1 }, headers: { authorization: `Bearer ${props.api_key}` },
+  })).data,
+  getResults: async (task) => (await feishuRequest({
+    url: commentTaskApiPath(task, '/v1/feishu/comment/list'),
+    method: 'post', baseURL: task.apiBaseUrl ?? API_BASE_URL,
+    headers: { authorization: `Bearer ${props.api_key}` },
+    data: { task_id: task.taskId, after_id: task.cursor || '', limit: 20, include_count: Number(task.latestStatus?.status) === 3 },
+  })).data,
   writeBatch: async (items, task, controls) => {
     if (items.some(item => !normalizeCommentId(item?.cid))) {
       throw new Error('评论ID缺失，已暂停写入，剩余结果仍保留');
@@ -992,9 +1004,10 @@ const cancelCommentTask = async () => {
   isCancelling.value = true;
   showToast(stoppedCommentProgress(task), true);
   try {
-    const response = await request({
-      url: '/social/api/v1/feishu/comment/task/cancel',
+    const response = await feishuRequest({
+      url: commentTaskApiPath(task, '/v1/feishu/comment/task/cancel'),
       method: 'post',
+      baseURL: task.apiBaseUrl ?? API_BASE_URL,
       headers: { authorization: `Bearer ${props.api_key}` },
       data: { task_id: task.taskId },
     });
@@ -1017,8 +1030,8 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
   const fields = [...selectedFieldKeys.value];
   showToast('正在提交评论数据获取任务...请勿关闭插件，关闭将中断任务', true);
   const pending = (async () => {
-    const response = await request({
-      url: "/social/api/v1/feishu/comment/task",
+    const response = await feishuRequest({
+      url: buildFeishuApiPath('/v1/feishu/comment/task'),
       method: "post",
       headers: { 'authorization': `Bearer ${props.api_key}` },
       data: {
@@ -1036,6 +1049,8 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
       targetTableId,
       pendingCommentWrite: false,
       selectedFieldKeys: fields,
+      apiBaseUrl: FEISHU_API_BASE_URL,
+      apiPathPrefix: FEISHU_API_PATH_PREFIX,
       writeMode: formData.value.writeMode,
       fieldMappings: mappingDraft.value.map(item => ({ ...item })),
     };

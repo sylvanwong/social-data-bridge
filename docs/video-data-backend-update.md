@@ -4,6 +4,8 @@
 
 页面：`VideoDataFetch.vue`，插件类型固定为 `video_data`。
 
+2026-11-13：输出配置与定时任务管理统一使用新服务，历史记录共用原表直接读取；见 `config-schedule-backend-update.md`。
+
 作品详情获取支持两种输入模式：
 
 1. `mode=table`：从当前表格读取视频链接，结果默认回写当前表格原记录。
@@ -65,7 +67,7 @@ plugin_type + base_id + target_table_id
 ### 3.1 查询全部配置
 
 ```http
-GET /social/api/v1/feishu/profile-fetch/table-output-configs
+GET /socialdatax/api/v1/feishu/profile-fetch/table-output-configs
   ?plugin_type=video_data&base_id={base_id}
 ```
 
@@ -100,7 +102,7 @@ GET /social/api/v1/feishu/profile-fetch/table-output-configs
 ### 3.2 保存配置
 
 ```http
-PUT /social/api/v1/feishu/profile-fetch/table-output-config
+PUT /socialdatax/api/v1/feishu/profile-fetch/table-output-config
 ```
 
 请求体：
@@ -139,11 +141,11 @@ PUT /social/api/v1/feishu/profile-fetch/table-output-config
 任务接口路径不变：
 
 ```http
-GET    /social/api/v1/feishu/schedule/tasks?plugin_type=video_data&base_id={base_id}
-POST   /social/api/v1/feishu/schedule/tasks
-PUT    /social/api/v1/feishu/schedule/tasks/{id}
-DELETE /social/api/v1/feishu/schedule/tasks/{id}
-POST   /social/api/v1/feishu/schedule/tasks/{id}/toggle
+GET    /socialdatax/api/v1/feishu/schedule/tasks?plugin_type=video_data&base_id={base_id}
+POST   /socialdatax/api/v1/feishu/schedule/tasks
+PUT    /socialdatax/api/v1/feishu/schedule/tasks/{id}
+DELETE /socialdatax/api/v1/feishu/schedule/tasks/{id}
+POST   /socialdatax/api/v1/feishu/schedule/tasks/{id}/toggle
 ```
 
 创建/更新请求的 `snapshot` 至少包含：

@@ -8,6 +8,7 @@ import { renderToString } from '@vue/server-renderer';
 import { parse as parseJS } from '@babel/parser';
 import { createRenderer, defineComponent, nextTick, ref } from 'vue';
 import { useTaskFeedback } from '../src/composables/useTaskFeedback.mjs';
+import { loadRequestModule } from './helpers/requestService.mjs';
 
 const pages = [
   ['ProfileFetch', 'profileStreamTask', 'resumeSavedStreamTask', 'handleImmediateSubmit', '作品'],
@@ -30,6 +31,7 @@ function fixture(t, page, taskName, overrides = {}) {
     .filter(n => n.type === 'VariableDeclaration').flatMap(n => n.declarations);
   const notifications = [];
   const bindings = {
+    ...loadRequestModule(),
     readRecordIds, readUniqueSourceLinks, feedback, ...feedback, toastLoading: ref(false), ref, nextTick, toastTimer: null,
     setTimeout, clearTimeout, console: { error() {}, log() {} },
     clearing: ref(false), loading: ref(false), isSubmitting: ref(false), isCancelling: ref(false), hasRecoverableTask: ref(false), recoveryRequiresReopen: ref(false),
@@ -47,12 +49,13 @@ function fixture(t, page, taskName, overrides = {}) {
     showErrorMsg: message => notifications.push({ message, type: 'error' }),
     ...overrides,
   };
+  bindings.feishuRequest = config => bindings.request(config);
   function handler(name) {
     const node = declarations.find(n => n.id.name === name)?.init;
     if (!node) return undefined;
     return new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
   }
-  for (const name of ['unwrapApiData', 'hideToast', 'showToast', 'showCompletionToast', 'finishToast', 'getStoppingText', 'stoppedCommentProgress', 'getStreamProgressText', 'restoreProfileTask', 'restoreSeriesTask']) {
+  for (const name of ['profileTaskApiPath', 'seriesTaskApiPath', 'commentTaskApiPath', 'unwrapApiData', 'hideToast', 'showToast', 'showCompletionToast', 'finishToast', 'getStoppingText', 'stoppedCommentProgress', 'getStreamProgressText', 'restoreProfileTask', 'restoreSeriesTask']) {
     const fn = handler(name); if (fn) bindings[name] = fn;
   }
   const callbacks = Object.fromEntries(declarations.find(n => n.id.name === taskName).init.arguments[0].properties

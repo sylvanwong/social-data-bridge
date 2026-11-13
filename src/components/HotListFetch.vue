@@ -7,7 +7,7 @@ import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutpu
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { computed, ref, onMounted, watch } from "vue";
 import { ElMessage } from "element-plus";
-import request from '@/utils/request'
+import request, { feishuRequest, buildFeishuApiPath } from '@/utils/request'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
 const FIELD_MAPPING = [
@@ -89,8 +89,8 @@ const mappingStatus = computed(() => {
   const count = mappingDraft.value.filter(item => item?.source_key && item?.target_field_id).length;
   return count ? `已设置 ${count} 项映射` : '尚未设置自定义映射';
 });
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 const TASK_PLUGIN_TYPE = 'hot_list';
 const allFieldKeys = FIELD_MAPPING.map(field => field.key);
 const isAllFieldsSelected = computed(() => allFieldKeys.every(key => selectedFieldKeys.value.includes(key)));
@@ -200,7 +200,7 @@ const loadTableOutputConfigs = async () => {
   tableConfigsRequest = (async () => {
     try {
       if (!props.api_key) throw new Error('请先设置 API Key');
-      const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
+      const response = await feishuRequest({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
       if (response.data?.sta !== 0) throw new Error(response.data?.msg || '读取表格配置失败');
       const data = response.data?.data;
       const list = parseTableConfigList(data);
@@ -242,7 +242,7 @@ const applyTableOutputConfig = async (tableId) => {
 const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, fieldMappings }) => {
   const table = await bitable.base.getTableById(targetTableId);
   const payload = { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId(), target_table_id: targetTableId, target_table_name: await table.getName(), write_mode: 'append', field_mappings: fieldMappings };
-  const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+  const response = await feishuRequest({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
   if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存表格配置失败');
   tableOutputConfigs.value = { ...tableOutputConfigs.value, [targetTableId]: response.data?.data || payload };
 });
@@ -486,8 +486,8 @@ const submit = async (targetTableId = "") => {
   showToast("正在获取热榜数据...", true);
 
   try {
-    const response = await request({
-      url: "/social/api/v1/feishu/hot/list",
+    const response = await feishuRequest({
+      url: buildFeishuApiPath('/v1/feishu/hot/list'),
       method: "get",
       headers: { authorization: `Bearer ${props.api_key}` },
       params: {

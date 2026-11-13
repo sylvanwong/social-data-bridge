@@ -5,7 +5,7 @@ import TaskFeedback from './TaskFeedback.vue';
 import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { bitable } from "@lark-base-open/js-sdk";
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
-import request from '@/utils/request'
+import request, { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, buildFeishuApiPath, feishuRequest } from '@/utils/request'
 import { useSocialData, showErrorMsg, KEYWORD_SEARCH_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
 
@@ -39,8 +39,8 @@ const formData1 = ref({
 });
 
 const TASK_PLUGIN_TYPE = 'keyword_search';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 const table_options = ref([]);
 const tableFieldOptions = ref([]);
 const mappingDraft = ref([]);
@@ -263,6 +263,7 @@ const isBilibili = computed(() => formData1.value.social_type === 'bilibili');
 const isWechat = computed(() => formData1.value.social_type === 'wechat');
 const isZhihu = computed(() => formData1.value.social_type === 'zhihu');
 const isYoutube = computed(() => formData1.value.social_type === 'youtube');
+const supportsDayRange = computed(() => !['haokan', 'youtube'].includes(formData1.value.social_type));
 const isX = computed(() => formData1.value.social_type === 'x');
 const isTiktok = computed(() => formData1.value.social_type === 'tiktok');
 const showSortType = computed(() => isDouyin.value || isXhs.value || isBilibili.value || isWechat.value || isZhihu.value || isYoutube.value || isX.value);
@@ -347,13 +348,25 @@ const hasRecoverableTask = ref(false);
 const clearing = ref(false);
 const requiresReopen = ref(false);
 let componentUnmounted = false;
-const restoreTask = (task, progressText = '正在恢复未完成的数据获取任务…') => {
+const restoreTask = async (task, progressText = '正在恢复未完成的数据获取任务…', restoring = false) => {
+  const restoreForm = restoring && activeKeywordTaskId.value !== task.taskId && task.formData;
   hasRecoverableTask.value = true;
   loading.value = true;
   activeKeywordTaskId.value = task.taskId;
   const status = task.latestStatus;
   isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
   showToast(isCancelling.value ? getStoppingText(task) : progressText);
+  if (restoreForm) {
+    Object.assign(formData1.value, JSON.parse(JSON.stringify(task.formData)));
+    currentTableName.value = getFirstKeyword(task.formData.keyword) || '社媒数据助手';
+    if (Array.isArray(task.selectedFieldKeys)) selectedFieldKeys.value = [...task.selectedFieldKeys];
+    await nextTick();
+    if (componentUnmounted || keywordStreamTask.getActiveTask() !== task) return;
+    // 平台切换的既有 watcher 会重置筛选项，等它完成后再恢复原任务筛选。
+    Object.assign(formData1.value, JSON.parse(JSON.stringify(task.formData)));
+    // 字段仅用于回显，不能阻塞原任务轮询和停止确认。
+    loadMappingFields(formData1.value.radio === 2 ? formData1.value.table_id : '', task);
+  }
 };
 const resumeSavedTask = async () => {
   if (requiresReopen.value || componentUnmounted || loading.value) return;
@@ -361,7 +374,7 @@ const resumeSavedTask = async () => {
   feedback.begin('正在检查未完成任务…');
   try {
     await nextTick();
-    const resumed = await keywordStreamTask.resume(restoreTask);
+    const resumed = await keywordStreamTask.resume(task => restoreTask(task, undefined, true));
     if (!resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -375,12 +388,24 @@ const resumeSavedTask = async () => {
   }
 };
 
+const keywordTaskApiPath = (task, path) => buildFeishuApiPath(path,
+  task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX);
+
 const keywordStreamTask = useIncrementalTask({
   storageKey: STREAM_TASK_STORAGE_KEY,
   operationTimeoutMs: 180000,
   isTerminal: (status) => [1, 2, 3].includes(Number(status.status)),
-  getStatus: async (task) => (await request({ url: `/social/api/v1/feishu/keyword/task?task_id=${encodeURIComponent(task.taskId)}`, method: 'get', headers: { authorization: `Bearer ${props.api_key}` } })).data,
-  getResults: async (task) => (await request({ url: '/social/api/v1/feishu/post/list', method: 'post', headers: { authorization: `Bearer ${props.api_key}` }, data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 } })).data,
+  getStatus: async (task) => (await feishuRequest({
+    url: keywordTaskApiPath(task, `/v1/feishu/keyword/task?task_id=${encodeURIComponent(task.taskId)}`),
+    method: 'get', baseURL: task.apiBaseUrl ?? API_BASE_URL,
+    headers: { authorization: `Bearer ${props.api_key}` },
+  })).data,
+  getResults: async (task) => (await feishuRequest({
+    url: keywordTaskApiPath(task, '/v1/feishu/post/list'),
+    method: 'post', baseURL: task.apiBaseUrl ?? API_BASE_URL,
+    headers: { authorization: `Bearer ${props.api_key}` },
+    data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 },
+  })).data,
   writeBatch: async (items, task, controls) => {
     const reconcile = task.pendingWrite ?? !!task.targetTableId;
     task.pendingWrite = reconcile;
@@ -468,9 +493,10 @@ const cancelKeywordTask = async () => {
   isCancelling.value = true;
   showToast(getStoppingText(task), true);
   try {
-    const response = await request({
-      url: '/social/api/v1/feishu/keyword/task/cancel',
+    const response = await feishuRequest({
+      url: keywordTaskApiPath(task, '/v1/feishu/keyword/task/cancel'),
       method: 'post',
+      baseURL: task.apiBaseUrl ?? API_BASE_URL,
       headers: { authorization: `Bearer ${props.api_key}` },
       data: { task_id: task.taskId },
     });
@@ -488,6 +514,7 @@ const cancelKeywordTask = async () => {
 
 const postSearchTask = async (targetTableId = "") => {
   const outputSnapshot = {
+    formData: JSON.parse(JSON.stringify(formData1.value)),
     targetTableId, selectedFieldKeys: [...selectedFieldKeys.value],
     writeMode: formData1.value.writeMode,
     fieldMappings: formData1.value.radio === 2 ? mappingDraft.value.map(item => ({ ...item })) : [],
@@ -542,8 +569,8 @@ const postSearchTask = async (targetTableId = "") => {
   }
   showToast(`正在提交关键词搜索任务...${TASK_TOAST_SUFFIX}`, true);
   await keywordStreamTask.submit(async () => {
-    const response = await request({
-    url: "/social/api/v1/feishu/keyword/task",
+    const response = await feishuRequest({
+    url: buildFeishuApiPath('/v1/feishu/keyword/task'),
     method: "post",
     headers: { 'authorization': `Bearer ${props.api_key}` },
     data: {
@@ -560,6 +587,7 @@ const postSearchTask = async (targetTableId = "") => {
     if (res?.sta !== 0 || !res.data?.task_id) throw new Error(res?.msg || '创建任务未返回任务ID');
     return {
       taskId: res.data.task_id, pendingWrite: false,
+      apiBaseUrl: FEISHU_API_BASE_URL, apiPathPrefix: FEISHU_API_PATH_PREFIX,
       ...outputSnapshot,
     };
   }, task => restoreTask(task, '任务已创建，正在准备获取作品…'));
@@ -587,22 +615,24 @@ const loadTableOptions = async () => {
   }
 };
 
-const loadMappingFields = async (tableId) => {
+const loadMappingFields = async (tableId, restoredTask = null) => {
   const readId = ++tableConfigReadId;
   const pendingConfig = tableConfigSaves.get(tableId)?.config;
   tableConfigApplying.value = true;
   tableConfigLoadError.value = '';
   try {
-    tableFieldOptions.value = [];
-    mappingDraft.value = [];
+    // 切换新建时使旧读取失效，保留已有表草稿；新任务仍不携带旧映射。
     if (!tableId) return;
+    tableFieldOptions.value = [];
+    mappingDraft.value = (restoredTask?.fieldMappings || []).map(item => ({ ...item }));
     const table = await bitable.base.getTableById(tableId);
+    if (componentUnmounted || readId !== tableConfigReadId) return;
     const fields = await table.getFieldMetaList();
     if (componentUnmounted || readId !== tableConfigReadId) return;
     tableFieldOptions.value = fields;
-    if (!tableConfigsLoaded.value) return;
+    if (!restoredTask && !tableConfigsLoaded.value) return;
     const pending = tableConfigSaves.get(tableId);
-    const config = pending?.config || pendingConfig || tableOutputConfigs.value[tableId];
+    const config = restoredTask ? { write_mode: restoredTask.writeMode, field_mappings: restoredTask.fieldMappings } : pending?.config || pendingConfig || tableOutputConfigs.value[tableId];
     formData1.value.writeMode = config?.write_mode || 'upsert';
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
     if (pending) tableConfigSaveStatus.value = '保存中';
@@ -619,12 +649,6 @@ const loadMappingFields = async (tableId) => {
   }
 };
 
-watch(
-  () => formData1.value.radio,
-  (radio) => {
-    if (radio === 2) loadTableOptions();
-  }
-);
 const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
 const loadTableOutputConfigs = async () => {
   const token = ++tableConfigsLoadToken;
@@ -634,7 +658,7 @@ const loadTableOutputConfigs = async () => {
   try {
     const baseId = await getBaseId();
     if (componentUnmounted || token !== tableConfigsLoadToken) return false;
-    const response = await request({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
+    const response = await feishuRequest({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
     if (componentUnmounted || token !== tableConfigsLoadToken) return false;
     if (response.data?.sta !== undefined && Number(response.data.sta) !== 0) throw new Error(response.data.msg || '读取输出表配置失败');
     const data = response.data?.data || response.data;
@@ -664,7 +688,7 @@ const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, 
       field_mappings: fieldMappings,
     };
     if (componentUnmounted) return;
-    const response = await request({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
+    const response = await feishuRequest({ url: TABLE_CONFIG_API_PATH, method: 'put', headers: { authorization: `Bearer ${props.api_key}` }, data: payload });
     if (componentUnmounted) return;
     if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存关键词搜索表格配置失败');
     const saved = response.data?.data || response.data;
@@ -680,7 +704,7 @@ const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, 
 const saveTableOutputConfig = async () => {
   if (!tableConfigsLoaded.value) return;
   const targetTableId = formData1.value.table_id;
-  if (componentUnmounted || formData1.value.radio !== 2 || !targetTableId || tableConfigApplying.value || tableConfigLoadError.value) return;
+  if (componentUnmounted || loading.value || isSubmitting.value || formData1.value.radio !== 2 || !targetTableId || tableConfigApplying.value || tableConfigLoadError.value) return;
   const writeMode = formData1.value.writeMode;
   const fields = tableFieldOptions.value;
   const fieldMappings = mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({
@@ -699,12 +723,24 @@ const saveTableOutputConfig = async () => {
     if (tableConfigSaves.get(targetTableId)?.saving === saving) tableConfigSaves.delete(targetTableId);
   }
 };
-watch(() => formData1.value.table_id, loadMappingFields);
+watch([() => formData1.value.radio, () => formData1.value.table_id], ([radio, tableId], [previousRadio, previousTableId]) => {
+  if (radio === 2) {
+    if (radio !== previousRadio) loadTableOptions();
+    // 同表已加载时保留草稿；未读完、读取失败或换表后才重新加载。
+    if (radio === previousRadio || tableId !== previousTableId || !tableFieldOptions.value.length) loadMappingFields(tableId);
+  } else {
+    if (tableId !== previousTableId) tableFieldOptions.value = [];
+    loadMappingFields('');
+  }
+});
 watch([() => formData1.value.writeMode, mappingDraft], saveTableOutputConfig, { deep: true });
 
 watch(
   () => formData1.value.social_type,
   (socialType) => {
+    if (!supportsDayRange.value && formData1.value.workFetchRange.type === 'days') {
+      formData1.value.workFetchRange.type = 'pages';
+    }
     formData1.value.sort_type = getDefaultSortType(socialType);
     formData1.value.filter_note_type = 'all';
     formData1.value.filter_note_time = 'all';
@@ -1114,13 +1150,13 @@ watch(selectedFieldKeys, (keys) => {
           <div slot="label" class="c-label">
             作品获取范围
             <el-tooltip effect="dark" placement="top">
-              <template #content>每页 10 积分，实际扣费会按照<br />提取的页数进行计算</template>
+              <template #content>按搜索接口实际请求的页数计费，<br />不同平台每页积分可能不同</template>
               <img src="https://cdn.zhinizhushou.com/material/20250826/45c287c837d7c34626a8f441264db162.png"
                 class="help-icon" />
             </el-tooltip>
           </div>
           <el-radio-group v-model="formData1.workFetchRange.type" class="custom-radio-group">
-            <el-radio v-for="item in workRangeTypes" :key="item.value" :value="item.value" class="custom-radio-item">
+            <el-radio v-for="item in workRangeTypes" :key="item.value" :value="item.value" :disabled="item.value === 'days' && !supportsDayRange ? true : undefined" class="custom-radio-item">
               <span class="radio-label-text">{{ item.label }}</span>
               <div v-if="item.value === 'pages'" class="custom-stepper-input range-stepper" :class="{ 'is-disabled': formData1.workFetchRange.type !== 'pages' }">
                 <input v-model.number="formData1.workFetchRange.pages" type="number" min="1" max="50" :disabled="formData1.workFetchRange.type !== 'pages'" @click.stop />
@@ -1140,6 +1176,7 @@ watch(selectedFieldKeys, (keys) => {
               <span v-if="item.value === 'days'" class="range-unit">个自然日发布的作品</span>
             </el-radio>
           </el-radio-group>
+          <div v-if="!supportsDayRange" class="range-cost">{{ isYoutube ? 'YouTube' : '好看视频' }}搜索暂不支持按天获取，请按页获取或获取全部作品</div>
           <div class="range-cost">积分消耗取决于请求页数，各平台可能不同</div>
         </el-form-item>
 

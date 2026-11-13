@@ -5,6 +5,7 @@ import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { createRenderer, defineComponent, ref, nextTick } from 'vue';
 import { useTaskFeedback } from '../src/composables/useTaskFeedback.mjs';
+import { loadRequestModule } from './helpers/requestService.mjs';
 
 const pages = [['BloggerSearch', 'searchTask', 'submit', '作者'], ['KeywordSearch', 'keywordStreamTask', 'commit', '作品']];
 const defer = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
@@ -20,6 +21,7 @@ function fixture(t, page, taskName, overrides = {}) {
   const notifications = [];
   const form = ref({ social_type: 'xhs', keyword: '露营', radio: 2, table_id: 'table-1', writeMode: 'upsert', rangeType: 'pages', pages: 1, workFetchRange: { type: 'pages', pages: 1 } });
   const bindings = {
+    ...loadRequestModule(),
     feedback, ...feedback, toastLoading: ref(false), nextTick, setTimeout, clearTimeout, toastTimer: null,
     clearing: ref(false), loading: ref(false), submitting: ref(false), isSubmitting: ref(false), cancelling: ref(false), isCancelling: ref(false),
     hasRecoverableTask: ref(false), requiresReopen: ref(false), componentUnmounted: false,
@@ -37,12 +39,13 @@ function fixture(t, page, taskName, overrides = {}) {
     [taskName]: { submit: async create => { await create(); }, resume: async () => false },
     ...overrides,
   };
+  bindings.feishuRequest = config => bindings.request(config);
   function handler(name) {
     const node = declarations.find(n => n.id.name === name)?.init;
     if (!node) return undefined;
     return new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
   }
-  for (const name of ['hideToast', 'showToast', 'showCompletionToast', 'getStoppingText', 'showFieldProgress', 'restoreTask', 'resumeSavedTask', 'postSearchTask', 'getSearchData']) {
+  for (const name of ['keywordTaskApiPath', 'bloggerTaskApiPath', 'hideToast', 'showToast', 'showCompletionToast', 'getStoppingText', 'showFieldProgress', 'restoreTask', 'resumeSavedTask', 'postSearchTask', 'getSearchData']) {
     const fn = handler(name); if (fn) bindings[name] = fn;
   }
   const callbacks = Object.fromEntries(declarations.find(n => n.id.name === taskName).init.arguments[0].properties

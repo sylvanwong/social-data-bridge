@@ -6,7 +6,9 @@ import { createRenderer, defineComponent, h, nextTick, ref } from 'vue';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { useTaskFeedback } from '../src/composables/useTaskFeedback.mjs';
-import { loadRequestService, rejectHttp } from './helpers/requestService.mjs';
+import { loadRequestModule, loadRequestService, rejectHttp } from './helpers/requestService.mjs';
+
+const { buildFeishuApiPath } = loadRequestModule();
 
 const pages = ['BloggerInfoFetch', 'VideoDataFetch', 'VideoCopySummary', 'XhsDownload', 'UrlToAttachment'];
 const quiet = { log() {}, error() {} };
@@ -46,6 +48,8 @@ function feedback(t) {
 function extract(page, name, bindings) {
   // 行反馈单测使用已挂载前提；卸载边界由完整 SFC 生命周期回归验证。
   bindings = { assertMounted: value => value, isUnmounted: false, componentUnmounted: false, tableConfigSaveSequence: 0, tableConfigSaveRevisions: new Map(), tableConfigSaves: new Map(), ensureOutputConfigReady: async () => true, ...bindings };
+  bindings.buildFeishuApiPath ??= buildFeishuApiPath;
+  bindings.feishuRequest ??= config => bindings.request(config);
   const source = parse(fs.readFileSync(new URL(`../src/components/${page}.vue`, import.meta.url), 'utf8')).descriptor.scriptSetup.content;
   const declarations = parseJS(source, { sourceType: 'module' }).program.body.filter(n => n.type === 'VariableDeclaration').flatMap(n => n.declarations);
   const node = declarations.find(n => n.id.name === name)?.init;

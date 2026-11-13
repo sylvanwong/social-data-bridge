@@ -10,7 +10,7 @@ import { cloneInputFilter, prepareInputFilter, filterRecordIds } from '@/utils/i
 import { bitable, FieldType } from "@lark-base-open/js-sdk";
 import { ElMessage } from "element-plus";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
-import request from '@/utils/request'
+import request, { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, buildFeishuApiPath, feishuRequest } from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
 import { useSocialData, showErrorMsg, PROFILE_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 
@@ -19,9 +19,9 @@ const props = defineProps({
 })
 
 const TASK_PLUGIN_TYPE = 'profile_fetch';
-const TASK_API_PATH = '/social/api/v1/feishu/schedule/tasks';
-const TABLE_CONFIG_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-config';
-const TABLE_CONFIGS_API_PATH = '/social/api/v1/feishu/profile-fetch/table-output-configs';
+const TASK_API_PATH = buildFeishuApiPath('/v1/feishu/schedule/tasks');
+const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
+const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 const MANUAL_TABLE_BASE_NAME = '社媒数据助手';
 const STREAM_TASK_STORAGE_KEY = 'profile_fetch_stream_task_v1';
 const STREAM_RESULT_LIMIT = 40;
@@ -247,7 +247,7 @@ const loadTableOutputConfigs = async ({ throwOnError = false } = {}) => {
   tableConfigLoading.value = true;
   try {
     const baseId = await getBaseId();
-    const response = await request({
+    const response = await feishuRequest({
       url: TABLE_CONFIGS_API_PATH,
       method: 'get',
       headers: { authorization: `Bearer ${props.api_key}` },
@@ -300,7 +300,7 @@ const persistTableOutputConfig = createTableConfigSaver(async (config) => {
       write_mode: config.writeMode,
       field_mappings: config.fieldMappings,
     };
-    const response = await request({
+    const response = await feishuRequest({
       url: TABLE_CONFIG_API_PATH, method: 'put',
       headers: { authorization: `Bearer ${props.api_key}` }, data: payload,
     });
@@ -618,19 +618,24 @@ const getStreamProgressText = (taskStatus, streamTask) => {
 
 const getStoppingText = task => getTaskStoppingText(task, '作品');
 
-const getProfileTaskStatus = async (taskId) => {
-  const response = await request({
-    url: `/social/api/v1/feishu/social/task?task_id=${encodeURIComponent(taskId)}`,
+const profileTaskApiPath = (task, path) => buildFeishuApiPath(path,
+  task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX);
+
+const getProfileTaskStatus = async (task) => {
+  const response = await feishuRequest({
+    url: profileTaskApiPath(task, `/v1/feishu/social/task?task_id=${encodeURIComponent(task.taskId)}`),
     method: 'get',
+    baseURL: task.apiBaseUrl ?? API_BASE_URL,
     headers: { authorization: `Bearer ${props.api_key}` },
   });
   return unwrapApiData(response.data);
 };
 
 const readAvailablePosts = async (streamTask) => {
-  const response = await request({
-    url: '/social/api/v1/feishu/post/list',
+  const response = await feishuRequest({
+    url: profileTaskApiPath(streamTask, '/v1/feishu/post/list'),
     method: 'post',
+    baseURL: streamTask.apiBaseUrl ?? API_BASE_URL,
     headers: { authorization: `Bearer ${props.api_key}` },
     data: {
       task_id: streamTask.taskId,
@@ -655,7 +660,7 @@ const profileStreamTask = useIncrementalTask({
   storageKey: STREAM_TASK_STORAGE_KEY,
   operationTimeoutMs: 180000,
   isTerminal: status => [1, 2, 3].includes(Number(status.status)),
-  getStatus: task => getProfileTaskStatus(task.taskId),
+  getStatus: getProfileTaskStatus,
   getResults: readAvailablePosts,
   writeBatch: async (items, task, controls) => {
     const reconcile = task.pendingWrite ?? !!task.targetTableId;
@@ -744,12 +749,13 @@ const postProfileTask = async (targetTableId = '', urlText = '', taskConfig = {}
   const fieldMappings = cloneFieldMappings(taskConfig.fieldMappings || mappingDraft.value);
   const writeMode = taskConfig.writeMode || formData.value.writeMode || 'upsert';
   await profileStreamTask.submit(async () => {
-    const response = await request({ url: '/social/api/v1/feishu/social/task', method: 'post',
+    const response = await feishuRequest({ url: buildFeishuApiPath('/v1/feishu/social/task'), method: 'post',
       headers: { authorization: `Bearer ${props.api_key}` },
       data: { url: urlText, work_fetch_range: normalizeWorkFetchRange(formData.value.workFetchRange) } });
     const data = unwrapApiData(response.data);
     return { taskId: data.task_id, targetTableId,
-      selectedFieldKeys: selectedFields, fieldMappings, writeMode, pendingWrite: false };
+      selectedFieldKeys: selectedFields, fieldMappings, writeMode, pendingWrite: false,
+      apiBaseUrl: FEISHU_API_BASE_URL, apiPathPrefix: FEISHU_API_PATH_PREFIX };
   }, task => restoreProfileTask(task, '任务已创建，正在准备获取作者作品…'));
 };
 
@@ -762,9 +768,10 @@ const cancelProfileTask = async () => {
   isCancelling.value = true;
   showToast(getStoppingText(task), true);
   try {
-    const response = await request({
-      url: '/social/api/v1/feishu/social/task/cancel',
+    const response = await feishuRequest({
+      url: profileTaskApiPath(task, '/v1/feishu/social/task/cancel'),
       method: 'post',
+      baseURL: task.apiBaseUrl ?? API_BASE_URL,
       headers: { authorization: `Bearer ${props.api_key}` },
       data: { task_id: task.taskId },
     });
@@ -1291,7 +1298,7 @@ const loadTaskList = async () => {
 
   try {
     const selection = await bitable.base.getSelection();
-    const response = await request({
+    const response = await feishuRequest({
       url: TASK_API_PATH,
       method: 'get',
       headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -1487,7 +1494,7 @@ const saveTask = async () => {
       });
     }
 
-    const response = await request({
+    const response = await feishuRequest({
       url: taskId ? `${TASK_API_PATH}/${taskId}` : TASK_API_PATH,
       method: taskId ? 'put' : 'post',
       headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -1522,7 +1529,7 @@ const deleteTask = async (task) => {
   }
 
   try {
-    const response = await request({
+    const response = await feishuRequest({
       url: `${TASK_API_PATH}/${task.id}`,
       method: 'delete',
       headers: { 'authorization': `Bearer ${props.api_key}` },
@@ -1545,7 +1552,7 @@ const deleteTask = async (task) => {
 const toggleTaskStatus = async (task) => {
   try {
     const nextEnabled = !(task.enabled ?? task.schedule?.enabled);
-    const response = await request({
+    const response = await feishuRequest({
       url: `${TASK_API_PATH}/${task.id}/toggle`,
       method: 'post',
       headers: { 'authorization': `Bearer ${props.api_key}` },

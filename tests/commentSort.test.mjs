@@ -3,12 +3,20 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
+import { loadRequestModule } from './helpers/requestService.mjs';
 
 const { descriptor } = parse(fs.readFileSync(new URL('../src/components/CommentFetch.vue', import.meta.url), 'utf8'));
 const source = descriptor.scriptSetup.content;
 const declarations = parseJS(source, { sourceType: 'module' }).program.body
   .filter(node => node.type === 'VariableDeclaration').flatMap(node => node.declarations);
-const evaluate = (node, scope) => new Function(...Object.keys(scope), `return (${source.slice(node.start, node.end)});`)(...Object.values(scope));
+const evaluate = (node, scope) => {
+  scope = { ...loadRequestModule(), ...scope };
+  if (scope.request) scope.feishuRequest = config => scope.request(config);
+  const pathHelper = declarations.find(node => node.id.name === 'commentTaskApiPath').init;
+  scope.commentTaskApiPath = new Function('buildFeishuApiPath', 'LEGACY_FEISHU_API_PATH_PREFIX',
+    `return (${source.slice(pathHelper.start, pathHelper.end)});`)(scope.buildFeishuApiPath, scope.LEGACY_FEISHU_API_PATH_PREFIX);
+  return new Function(...Object.keys(scope), `return (${source.slice(node.start, node.end)});`)(...Object.values(scope));
+};
 const load = (name, scope = {}) => {
   const declaration = declarations.find(node => node.id.name === name);
   assert.ok(declaration, `Missing ${name}`);

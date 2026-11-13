@@ -2,7 +2,23 @@
 
 ## 结论
 
-本次评论列表页面改版没有引入必须的后端接口变更。现有评论采集任务接口仍可直接兼容，原因如下：
+2026-11-13：聚合插件 `CommentFetch.vue` 新建评论任务已在前端源码接入 social-service，
+复用既有 `feishuRequest`、`buildFeishuApiPath` 与 `VITE_FEISHU_API_BASE_URL`。
+本轮未构建、未更新 `dist/`、未部署或进行真实飞书联调；独立评论助手、评论工作流仍使用旧接口。
+
+新任务使用以下路径，主机地址从现有请求配置读取：
+
+- `POST /socialdatax/api/v1/feishu/comment/task`：创建。
+- `GET /socialdatax/api/v1/feishu/comment/task?task_id=<task_id>`：查询，携带 `supports_partial_results=1`。
+- `POST /socialdatax/api/v1/feishu/comment/task/cancel`：请求停止。
+- `POST /socialdatax/api/v1/feishu/comment/list`：按 `after_id` 游标读取，每批 20 条；只有确认 `status=3` 后才请求总数。
+
+创建后将 `apiBaseUrl`、`apiPathPrefix` 与任务 ID、目标表、原输出字段、写入方式、映射一起持久化。
+查询、取消和恢复写入均使用已存任务来源；没有来源字段的历史任务继续使用 `API_BASE_URL` 与 `/social/api`。
+显式空主机表示同源、显式空前缀表示无前缀，不能用真值回退覆盖。提交成功后的本地保存失败仍补存同一任务，
+不会重新创建。停止请求返回后继续等待终态并写完已有结果，失败或写入中断仍保留恢复进度。
+
+采集参数和飞书写入契约保持兼容：
 
 - 页面布局、单选框和输入框均为前端交互调整。
 - 主评论范围仍通过 `pages` 传递。
@@ -13,7 +29,7 @@
 
 ## 现有请求契约
 
-接口：`POST /social/api/v1/feishu/comment/task`
+接口：`POST /socialdatax/api/v1/feishu/comment/task`；无来源历史任务沿用旧服务 `/social/api` 前缀。
 
 请求头：
 
@@ -40,7 +56,7 @@ Content-Type: application/json
 | `url` | string | 一个或多个链接，以换行分隔 | 待采集作品链接 |
 | `pages` | integer | `0` 或 `1-50` | `0` 表示全部主评论；正整数表示前 N 页 |
 | `reply_pages` | integer | `-1`、`0` 或 `1-50` | `-1` 不获取子评论；`0` 获取全部子评论；正整数表示前 N 页 |
-| `sort_type` | string | `default`、`time_descending`、`like_count_descending` | 小红书评论排序；其他平台按现有逻辑处理 |
+| `sort_type` | string | `default`、`time_descending`、`like_count_descending`、`oldest` | 沿用各平台排序支持范围；`oldest` 用于百度贴吧，不支持的排序由后端降级并返回 `sort_fallback_count` |
 
 ## 建议后端校验
 
@@ -49,7 +65,7 @@ Content-Type: application/json
 ```text
 pages: 0 或 1 <= pages <= 50
 reply_pages: -1、0 或 1 <= reply_pages <= 50
-sort_type: default、time_descending、like_count_descending
+sort_type: default、time_descending、like_count_descending、oldest
 ```
 
 非法值建议返回 HTTP 400，并提供可读错误信息；不要将 `reply_pages = -1` 误处理为前 1 页。
@@ -77,8 +93,10 @@ sort_type: default、time_descending、like_count_descending
 
 评论页复用“获取作者作品”的表格输出配置接口：
 
-- `GET /social/api/v1/feishu/profile-fetch/table-output-configs?plugin_type=comment_fetch&base_id=<base_id>`：读取配置。
-- `PUT /social/api/v1/feishu/profile-fetch/table-output-config`：保存配置。
+- `GET /socialdatax/api/v1/feishu/profile-fetch/table-output-configs?plugin_type=comment_fetch&base_id=<base_id>`：读取配置。
+- `PUT /socialdatax/api/v1/feishu/profile-fetch/table-output-config`：保存配置。
+
+2026-11-13 起配置读写统一使用新服务，历史配置共用原三元键直接读取；这不改变旧评论任务按原来源恢复的规则。
 
 请求体字段结构如下：
 

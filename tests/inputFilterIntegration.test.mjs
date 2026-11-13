@@ -8,10 +8,15 @@ import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { createTableConfigSaver, parseTableConfigList } from '../src/utils/tableOutputConfig.mjs';
 import { bitable, FieldType, DateFormatter, NumberFormatter } from '@lark-base-open/js-sdk';
+import { loadRequestModule } from './helpers/requestService.mjs';
+
+const { buildFeishuApiPath } = loadRequestModule();
 
 // Exercise the real page handlers, substituting only their SDK and external dependencies.
 function pageHandler(page, name, bindings) {
   bindings = { parseTableConfigList, readRecordIds, readUniqueSourceLinks, readSourceRows, tableConfigSaveSequence: 0, tableConfigSaveRevisions: new Map(), tableConfigSaves: new Map(), tableConfigsReadId: { value: 0 }, ensureMainTableOutputConfig: async () => {}, resolveWritableField, taskFeedback: { toastLoading: { value: false }, recordFailure() {}, fail() {} }, feedback: { begin() {}, progress() {}, finish() {}, fail() {}, hide() {} }, nextTick, recoveryRequiresReopen: { value: false }, hasRecoverableTask: { value: false }, componentUnmounted: false, formData: { value: {} }, fieldListLoading: { value: false }, linkFieldContext: { tableId: '', viewId: '', fieldName: '', pendingSelection: null }, writeMode: { value: 'upsert' }, editingTaskId: { value: null }, taskMappingDraft: { value: [] }, mappingDraft: { value: [] }, taskOutputLoading: { value: false }, taskOutputError: { value: '' }, taskOutputTableId: { value: '' }, taskOutputConfigReady: { value: true }, taskDialogVisible: { value: false }, tableConfigApplying: { value: false }, mainOutputTableId: { value: '' }, mainConfigReadId: { value: 0 }, taskConfigReadId: { value: 0 }, fieldReadRequests: new WeakMap(), taskTableFieldOptions: { value: [] }, tableFieldOptions: { value: [] }, ...bindings };
+  bindings.buildFeishuApiPath ??= buildFeishuApiPath;
+  bindings.feishuRequest ??= config => bindings.request(config);
   bindings.ElMessage ??= bindings.ElNotification;
   if (!bindings.taskFeedbackBound) {
     bindings.taskFeedback = { ...bindings.taskFeedback, recordFailure: (error) => bindings.ElNotification?.({message: error.message || error}), fail: (error) => bindings.ElNotification?.({message: error.message || error}) };
