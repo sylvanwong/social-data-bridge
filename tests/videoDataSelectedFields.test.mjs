@@ -34,14 +34,14 @@ for (const keys of [[], ['title'], ['title', 'view_count'], ['comment_count', 's
   });
 }
 
-for (const [elapsed, success] of [[106000, true], [125000, false]]) {
+for (const [elapsed, success] of [[51000, true], [60000, false], [61000, false]]) {
   test(`detail request respects its budget at ${elapsed}ms without another request`, async () => {
     const request = loadRequestService();
     let requests = 0;
     const saved = [];
     request.defaults.adapter = async config => {
       requests++;
-      // Model a response around the 105s backend budget without real HTTP or waiting.
+      // Exercise the shared 60s request budget without real HTTP or waiting.
       if (config.timeout <= elapsed) {
         throw new axios.AxiosError('timeout', 'ECONNABORTED', config);
       }
