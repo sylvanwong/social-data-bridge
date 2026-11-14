@@ -87,6 +87,7 @@ const FIELD_CONFIG = [
   { key: "duration", name: "视频时长", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.duration) || 0 },
   { key: "view_count", name: "播放量", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => item?.view_count == null ? null : Number(item.view_count) || 0 },
   { key: "digg_count", name: "点赞数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.digg_count) || 0 },
+  { key: "coin_count", name: "投币数", hint: "仅B站", type: FieldType.Number, defaultSelected: false, formatter: NumberFormatter.INTEGER, getValue: (item) => item?.coin_count == null ? null : Number(item.coin_count) || 0 },
   { key: "comment_count", name: "评论数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.comment_count) || 0 },
   { key: "collect_count", name: "收藏数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.collect_count) || 0 },
   { key: "share_count", name: "分享数", type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER, getValue: (item) => Number(item?.share_count) || 0 },
@@ -2616,7 +2617,7 @@ watch(
                 @change="(checked) => selectedFieldKeys = checked ? FIELD_CONFIG.map(field => field.key) : []"
               >全选</el-checkbox>
               <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
-                <el-checkbox v-for="field in FIELD_CONFIG" :key="field.key" :label="field.key" class="field-checkbox-item">{{ field.name }}</el-checkbox>
+                <el-checkbox v-for="field in FIELD_CONFIG" :key="field.key" :label="field.key" class="field-checkbox-item">{{ field.name }}<span v-if="field.hint" class="field-platform-hint">{{ field.hint }}</span></el-checkbox>
               </el-checkbox-group>
             </div>
           </div>
@@ -2968,7 +2969,7 @@ watch(
                   :label="field.key"
                   class="field-checkbox-item"
                 >
-                  {{ field.name }}
+                  {{ field.name }}<span v-if="field.hint" class="field-platform-hint">{{ field.hint }}</span>
                 </el-checkbox>
               </el-checkbox-group>
             </el-form-item>
@@ -3523,6 +3524,13 @@ watch(
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px 12px;
   width: 100%;
+}
+
+.field-platform-hint {
+  margin-left: 6px;
+  color: #86909c;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .field-checkbox-item {

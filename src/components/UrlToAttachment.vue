@@ -80,14 +80,15 @@ const selectedUrlFieldName = computed(() => (
 
 const loadTableOptions = async () => {
   try {
-    const tableList = await bitable.base.getTableList();
-    tableOptions.value = await Promise.all(
+    const tableList = assertMounted(await bitable.base.getTableList());
+    tableOptions.value = assertMounted(await Promise.all(
       tableList.map(async (table) => ({
         id: table.id,
         name: await table.getName(),
       }))
-    );
+    ));
   } catch (error) {
+    if (componentUnmounted) return;
     console.error('获取表格列表失败:', error);
     tableOptions.value = [];
     ElMessage({ plain: true, message: '获取表格列表失败，请稍后重试', type: 'error', duration: 5000 });
@@ -240,6 +241,7 @@ const createManualTargetTable = async () => {
   if (!tableId) {
     throw new Error('创建新表格失败');
   }
+  assertMounted(await loadTableOptions());
   return tableId;
 };
 
@@ -299,7 +301,12 @@ const convertUrlsToAttachments = async (urls) => {
   }
 
   return assertMounted(await Promise.all(attachmentSources.map(async ({ name, content }) => {
-    const response = assertMounted(await fetch(content));
+    // 小红书 CDN 会拒绝站外 Referer；仍直接下载，避免强制转存触发文件大小限制。
+    const hostname = isAttachmentUrl(content) ? new URL(content).hostname : '';
+    const downloadOptions = hostname === 'xhscdn.com' || hostname.endsWith('.xhscdn.com')
+      ? { referrerPolicy: 'no-referrer' }
+      : undefined;
+    const response = assertMounted(await fetch(content, downloadOptions));
     if (!response.ok) {
       throw new Error(`读取附件失败: HTTP ${response.status}`);
     }
@@ -356,16 +363,42 @@ const appendRecordsToTable = async (tableId, rows) => {
   }
 
   let writtenCount = 0;
-  for (const { urls } of rows) {
+  let processedCount = 0;
+  const failures = [];
+  let interruption = null;
+  for (let index = 0; index < rows.length; index += 1) {
     if (stopRequested.value) break;
 
-    const record = [assertMounted(await createAttachmentCell(table, attachmentFieldId, urls))];
-    assertMounted(await table.addRecords([record]));
+    const { urls } = rows[index];
+    processedCount = index + 1;
+    showToast(`正在处理第 ${processedCount}/${rows.length} 条...`, true);
+    let record;
+    try {
+      record = [assertMounted(await createAttachmentCell(table, attachmentFieldId, urls))];
+    } catch (error) {
+      assertMounted();
+      const failure = { index: index + 1, url: urls.join('、'), reason: error?.response?.data?.msg || error?.message || String(error) };
+      failures.push(failure);
+      if (error?.code === 'INVALID_API_KEY') {
+        interruption = { ...failure, writeUncertain: false };
+        break;
+      }
+      taskFeedback.recordFailure(error, { index: index + 1 });
+      continue;
+    }
+
+    try {
+      assertMounted(await table.addRecords([record]));
+    } catch (error) {
+      assertMounted();
+      // 写入请求可能已经生效；不计为确定失败，也不自动重试或继续追加。
+      interruption = { index: index + 1, url: urls.join('、'), reason: error?.message || String(error), writeUncertain: true };
+      break;
+    }
     writtenCount += 1;
-    showToast(`正在处理第 ${writtenCount}/${rows.length} 条...`, true);
   }
 
-  return { writtenCount, stopped: stopRequested.value };
+  return { writtenCount, failCount: failures.length, failures, interruption, unprocessedCount: rows.length - processedCount, stopped: stopRequested.value };
 };
 
 const extractUrlsFromText = (text) => {
@@ -568,13 +601,29 @@ const handleManualModeSubmit = async () => {
 
     const rows = urls.map((url) => ({ urls: [url] }));
     showToast(`准备处理 ${rows.length} 条数据...`, true);
-    const { writtenCount, stopped } = assertMounted(await appendRecordsToTable(targetTableId, rows));
-    finishToast(
-      stopped
-        ? `任务已停止：成功 ${writtenCount} 条，失败 0 条`
-        : `处理完成：成功 ${writtenCount} 条，失败 0 条`,
-      { stopped, successCount: writtenCount, failCount: 0, empty: writtenCount === 0 }
-    );
+    const { writtenCount, failCount = 0, failures = [], interruption, unprocessedCount = 0, stopped } = assertMounted(await appendRecordsToTable(targetTableId, rows));
+    let summary = interruption?.writeUncertain
+      ? `已停止写入：已确认成功 ${writtenCount} 条，失败 ${failCount} 条，第 ${interruption.index} 条写入结果待核对`
+      : `${interruption ? '任务已中断' : stopped ? '任务已停止' : '处理完成'}：成功 ${writtenCount} 条，失败 ${failCount} 条`;
+    if (unprocessedCount) summary += `，未处理 ${unprocessedCount} 条`;
+    finishToast(summary, {
+      stopped: stopped && !interruption?.writeUncertain, successCount: writtenCount, failCount,
+      type: interruption?.writeUncertain ? 'warning' : undefined,
+      empty: writtenCount === 0 && failCount === 0 && !interruption,
+    });
+    if (failures.length || interruption || unprocessedCount > 0) {
+      const details = failures.map(item => `第 ${item.index} 条处理失败：${item.reason}\n链接：${item.url}`);
+      if (interruption?.writeUncertain) {
+        details.push(`第 ${interruption.index} 条写入结果无法确认：${interruption.reason}\n链接：${interruption.url}`);
+      }
+      if (unprocessedCount) details.push(`未处理链接：\n${urls.slice(urls.length - unprocessedCount).join('\n')}`);
+      details.push(interruption?.writeUncertain
+        ? '请先核对目标表，确认待核对链接是否已写入，再处理尚未写入的链接；已确认成功的链接无需重复执行。'
+        : failures.length
+          ? `请仅重试失败链接${unprocessedCount ? '及未处理链接' : ''}，已成功写入的链接无需重复执行。`
+          : '请仅处理未处理链接，已成功写入的链接无需重复执行。');
+      taskNotice.value = details.join('\n');
+    }
   } catch (error) {
     if (componentUnmounted) return;
     taskFeedback.fail(error, { persist: /核对|重新(?:打开|进入)|暂停写入/.test(error.message || '') });
@@ -811,8 +860,8 @@ watch(() => formData.value.targetType, changeTargetType);
           :disabled="stopRequested || noticeRequiresReopen || (!loading && formData.mode === 'table' && sourceFieldLoading)"
           @click="handleTaskAction"
         >{{ stopRequested ? '正在停止…' : loading ? '停止任务' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
-      <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
       </div>
+      <p v-if="taskNotice" class="sub-hint task-failure-details">{{ taskNotice }}</p>
     </div>
 
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
@@ -820,6 +869,10 @@ watch(() => formData.value.targetType, changeTargetType);
 </template>
 
 <style scoped>
+.task-failure-details {
+  white-space: pre-wrap;
+}
+
 .sub-hint {
   margin: 8px 0 0;
   font-size: var(--app-font-size-small);
