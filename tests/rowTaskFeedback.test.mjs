@@ -472,3 +472,45 @@ for (const [page, method] of [
     else { assert.equal(result.successCount, 1); assert.equal(result.failCount, 1); }
   });
 }
+
+const xhsVideoUrl = 'https://sns-video-al.xhscdn.com/stream/1/110/258/01e8980dabb24d2c010370019891faf66c_258.mp4?v=2';
+for (const [label, content, noReferrer] of [
+  ['小红书视频', xhsVideoUrl, true],
+  ['小红书图片', 'https://sns-img-qc.xhscdn.com/cover.png', true],
+  ['大小写域名', 'https://SNS-VIDEO-AL.XHSCDN.COM/video.mp4', true],
+  ['转存地址', 'https://files.example.test/cover.png', false],
+  ['相似域名', 'https://xhscdn.com.example.test/video.mp4', false],
+  ['用户名相似', 'https://sns-video-al.xhscdn.com@files.example.test/video.mp4', false],
+  ['查询含小红书域名', 'https://files.example.test/video.mp4?source=sns-video-al.xhscdn.com', false],
+]) {
+  test(`链接转附件：${label}按返回地址决定 Referer，不改接口请求和附件名称`, async t => {
+    const requests = [], downloads = [];
+    const { handler } = setup(t, 'UrlToAttachment', {
+      ATTACHMENT_BATCH_SIZE: 5,
+      request: async config => { requests.push(config); return { data: { sta: 0, data: [{ name: 'result.mp4', content }] } }; },
+      fetch: async (url, options) => {
+        downloads.push({ url, options });
+        assert.deepEqual(options, noReferrer ? { referrerPolicy: 'no-referrer' } : undefined);
+        return new Response(new Blob(['media'], { type: 'video/mp4' }));
+      },
+    });
+    const files = await handler('convertUrlsToAttachments')([xhsVideoUrl]);
+    assert.deepEqual(requests.map(r => r.data), [{ links: [xhsVideoUrl] }]);
+    assert.equal(requests[0].headers.authorization, 'Bearer test');
+    assert.equal(downloads.length, 1);
+    assert.equal(downloads[0].url, content);
+    assert.equal(files.length, 1);
+    assert.equal(files[0].name, 'result.mp4');
+    assert.equal(files[0].type, 'video/mp4');
+    assert.equal(await files[0].text(), 'media');
+  });
+}
+
+test('链接转附件：小红书仍返回403时保留下载原错，不伪报附件成功', async t => {
+  const { handler } = setup(t, 'UrlToAttachment', {
+    ATTACHMENT_BATCH_SIZE: 5,
+    request: async () => ({ data: { sta: 0, data: [{ name: 'video.mp4', content: xhsVideoUrl }] } }),
+    fetch: async () => new Response('Forbidden', { status: 403 }),
+  });
+  await assert.rejects(handler('convertUrlsToAttachments')([xhsVideoUrl]), /读取附件失败: HTTP 403/);
+});
