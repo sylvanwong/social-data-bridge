@@ -473,6 +473,21 @@ const chunkRecords = (records, size = 200) => {
   return chunks;
 };
 
+const readTableRecords = async (table, assertActive) => {
+  const records = [];
+  let pageToken;
+  do {
+    const page = await table.getRecordsByPage({ pageSize: 200, pageToken });
+    assertActive?.();
+    records.push(...page.records);
+    if (page.hasMore && (!page.pageToken || page.pageToken === pageToken)) {
+      throw new Error('读取目标表时未返回有效分页游标，无法核对写入结果');
+    }
+    pageToken = page.hasMore ? page.pageToken : undefined;
+  } while (pageToken !== undefined);
+  return records;
+};
+
 export const showErrorMsg = (message) => {
   ElMessage({ message, type: "error", plain: true, duration: 3000 });
 };
@@ -838,7 +853,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       const incompatibleField = fieldList.find(item => item.field && !isFieldTypeCompatible(item.fieldType, item.config));
       if (incompatibleField) {
         if (options.stopAfterCurrentBatch) {
-          throw new Error(`字段“${incompatibleField.config.name}”类型不匹配，请修正后恢复任务`);
+          throw new Error(`字段“${incompatibleField.config.name}”类型不匹配，请修正后${options.appendState ? '继续写入' : '恢复任务'}`);
         }
         ElMessage({ plain: true, message: `输出字段"${incompatibleField.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(incompatibleField.config)}类型，请修正目标字段类型后重试`, type: 'error', duration: 8000 });
         resetParams();
@@ -847,7 +862,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
 
       const missingField = fieldList.find(item => !item.field);
       if (options.stopAfterCurrentBatch && missingField) {
-        throw new Error(`字段“${missingField.config.name}”不可用，请检查目标表字段后恢复任务`);
+        throw new Error(`字段“${missingField.config.name}”不可用，请检查目标表字段后${options.appendState ? '继续写入' : '恢复任务'}`);
       }
       const availableFieldList = fieldList.filter(item => !!item.field);
       if (availableFieldList.length === 0) {
@@ -1019,6 +1034,66 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
           recordIds = recordIds.concat(created);
           created.forEach((recordId, index) => existingByKey.set(creates[index].key, recordId));
         }
+      } else if (options.appendState) {
+        const state = options.appendState;
+        const fieldIds = availableFieldList.map(({ field }) => field.id);
+        if (state && !state.knownRecordIds) {
+          // 保留正常追加语义：历史同内容记录不能抵扣本次失败批次。
+          state.knownRecordIds = new Set((await readTableRecords(activeTable, options.assertActive)).map(record => record.recordId));
+          state.fieldIds = fieldIds;
+        }
+        options.assertActive?.();
+        if (state && JSON.stringify(state.fieldIds) !== JSON.stringify(fieldIds)) {
+          throw new Error('目标字段已变化，无法核对上次写入，请恢复原字段后继续');
+        }
+        const recordKey = fields => JSON.stringify(availableFieldList.map(({ field, fieldType }) => {
+          const value = fields[field.id];
+          if (fieldType === FieldType.Text) {
+            return Array.isArray(value) ? value.map(part => part.text).join('') : String(value ?? '');
+          }
+          if (fieldType === FieldType.SingleSelect) return value?.text ?? value ?? '';
+          return value ?? null;
+        }));
+        let offset = 0;
+        for (const batch of chunkRecords(records)) {
+          let pending = batch;
+          const recoveredIds = [];
+          if (state?.pendingCount) {
+            if (state.pendingCount !== batch.length) throw new Error('待核对批次与原结果不一致');
+            const keys = normalizedRecords.slice(offset, offset + batch.length).map(recordKey);
+            const expected = new Map();
+            keys.forEach(key => expected.set(key, (expected.get(key) || 0) + 1));
+            const matches = new Map();
+            for (const record of await readTableRecords(activeTable, options.assertActive)) {
+              if (state.knownRecordIds.has(record.recordId)) continue;
+              const key = recordKey(record.fields);
+              if (!expected.has(key)) continue;
+              const ids = matches.get(key) || [];
+              ids.push(record.recordId);
+              if (ids.length > expected.get(key)) throw new Error('核对到多于预期的相同记录，请检查目标表后再继续');
+              matches.set(key, ids);
+            }
+            pending = batch.filter((_, index) => {
+              const ids = matches.get(keys[index]);
+              if (!ids?.length) return true;
+              recoveredIds.push(ids.shift());
+              return false;
+            });
+          }
+          options.assertActive?.();
+          if (state) state.pendingCount = batch.length;
+          const created = pending.length ? await writeBatch(() => activeTable.addRecords(pending)) : [];
+          if (created.length !== pending.length) throw new Error('写入未完成，请检查目标表格后重试');
+          options.assertActive?.();
+          const completedIds = recoveredIds.concat(created);
+          if (state) {
+            completedIds.forEach(id => state.knownRecordIds.add(id));
+            state.pendingCount = 0;
+          }
+          recordIds = recordIds.concat(completedIds);
+          await options.onBatchWritten?.(batch.length);
+          offset += batch.length;
+        }
       } else {
         for (const batch of chunkRecords(records)) {
           const created = await writeBatch(() => activeTable.addRecords(batch));
@@ -1040,6 +1115,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         resetParams();
       }
     } catch (error) {
+      if (options.appendState) throw error;
       if (options.stopAfterCurrentBatch) {
         const writeError = new Error(`${error?.message || '写入失败'}；已暂停写入，请核对表格结果后再恢复任务`, { cause: error });
         writeError.stopPolling = true;
