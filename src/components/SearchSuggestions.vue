@@ -3,7 +3,7 @@ import { parseTableConfigList } from '../utils/tableOutputConfig.mjs';
 import TaskFeedback from './TaskFeedback.vue';
 import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { bitable, DateFormatter, FieldType } from '@lark-base-open/js-sdk';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { feishuRequest, buildFeishuApiPath } from '@/utils/request';
 import { getDefaultSelectedFieldKeys, useSocialData } from '@/composables/useSocialData';
@@ -54,7 +54,9 @@ const mappingLoading = ref(false);
 let tableFieldsLoadToken = 0;
 let tableFieldsError = null;
 const loading = ref(false);
-const busy = computed(() => !fieldSelectionReady.value || loading.value);
+const submitting = ref(false);
+const pendingWrite = ref(null);
+const busy = computed(() => !fieldSelectionReady.value || loading.value || submitting.value || !!pendingWrite.value);
 const collecting = ref(false);
 const stopRequested = ref(false);
 const taskFeedback = useTaskFeedback();
@@ -80,7 +82,7 @@ const { createAndWriteData, validateTableFields } = useSocialData(() => '搜索�
 
 const showToast = (text, isLoading = true, options = {}) => {
   if (disposed) return;
-  if (isLoading) return options.begin ? taskFeedback.begin(text, options) : taskFeedback.progress(text, { stopping: stopRequested.value, ...options });
+  if (isLoading) return options.begin ? taskFeedback.begin(text, options) : taskFeedback.progress(text, { stopping: stopRequested.value || !!pendingWrite.value?.stopped, ...options });
   taskFeedback.finish(text, options);
 };
 const hideToast = () => taskFeedback.hide();
@@ -181,7 +183,7 @@ const loadTableFields = async tableId => {
   } catch (error) {
     if (disposed || token !== tableFieldsLoadToken) return;
     tableFieldsError = error;
-    if (!loading.value) showError(error.message || '读取目标表字段失败，请稍后重试', 5000);
+    if (!loading.value && !submitting.value) showError(error.message || '读取目标表字段失败，请稍后重试', 5000);
     return false;
   } finally {
     if (disposed || token !== tableFieldsLoadToken) return;
@@ -263,94 +265,112 @@ const fetchSuggestions = async keyword => {
 const execute = async keywords => {
   if (disposed) return;
   loading.value = true;
-  collecting.value = true;
   stopRequested.value = false;
-  const rows = [];
-  const emptyKeywords = [];
-  const failedKeywords = [];
-  const errors = [];
-  let authFailureReason = '';
-  taskFeedback.begin('正在准备获取推荐词…');
   try {
-    for (let index = 0; index < keywords.length; index += 1) {
-      if (stopRequested.value) break;
-      const keyword = keywords[index];
-      showToast(`正在获取「${keyword}」（${index + 1}/${keywords.length}）…`);
-      try {
-        const items = await fetchSuggestions(keyword);
-        if (disposed) return;
-        if (!items.length) {
-          emptyKeywords.push(keyword);
-          continue;
+    if (!pendingWrite.value) {
+      const rows = [];
+      const emptyKeywords = [];
+      const failedKeywords = [];
+      const errors = [];
+      let authFailureReason = '';
+      collecting.value = true;
+      for (let index = 0; index < keywords.length; index += 1) {
+        if (stopRequested.value) break;
+        const keyword = keywords[index];
+        showToast(`正在获取「${keyword}」（${index + 1}/${keywords.length}）…`);
+        try {
+          const items = await fetchSuggestions(keyword);
+          if (disposed) return;
+          if (!items.length) {
+            emptyKeywords.push(keyword);
+            continue;
+          }
+          rows.push(...items.map(item => ({
+            keyword: item.keyword || keyword,
+            recommendation: item.recommendation || '',
+            suggestion_type: item.suggestion_type || '',
+            suggestion_label: item.suggestion_label || '',
+            description: item.description || '',
+            social_type: item.social_type || form.value.social_type,
+            ctime: item.ctime || '',
+          })));
+        } catch (error) {
+          if (disposed) return;
+          failedKeywords.push(keyword);
+          errors.push(error);
+          if (error.code === 'INVALID_API_KEY' || [401, 403].includes(error.response?.status)) {
+            authFailureReason = error?.response?.data?.msg || error.message || 'API Key 已失效';
+            break;
+          }
+          if (!stopRequested.value) taskFeedback.recordFailure(error, { index: index + 1 });
+          console.error(`获取关键词「${keyword}」的推荐词失败:`, error);
         }
-        rows.push(...items.map(item => ({
-          keyword: item.keyword || keyword,
-          recommendation: item.recommendation || '',
-          suggestion_type: item.suggestion_type || '',
-          suggestion_label: item.suggestion_label || '',
-          description: item.description || '',
-          social_type: item.social_type || form.value.social_type,
-          ctime: item.ctime || '',
-        })));
-      } catch (error) {
-        if (disposed) return;
-        failedKeywords.push(keyword);
-        errors.push(error);
-        if (error.code === 'INVALID_API_KEY' || [401, 403].includes(error.response?.status)) {
-          authFailureReason = error?.response?.data?.msg || error.message || 'API Key 已失效';
-          break;
-        }
-        if (!stopRequested.value) taskFeedback.recordFailure(error, { index: index + 1 });
-        console.error(`获取关键词「${keyword}」的推荐词失败:`, error);
       }
-    }
 
-    collecting.value = false;
-    if (!rows.length) {
-      if (authFailureReason) throw new Error(authFailureReason);
-      if (stopRequested.value) {
-        showToast(`任务已停止，已写入 0 条推荐词${failedKeywords.length ? `（${failedKeywords.length} 个关键词获取失败）` : ''}`, false, { stopped: true, failCount: failedKeywords.length });
+      collecting.value = false;
+      if (!rows.length) {
+        if (authFailureReason) throw new Error(authFailureReason);
+        if (stopRequested.value) {
+          taskFeedback.finish(`任务已停止，已写入 0 条推荐词${failedKeywords.length ? `（${failedKeywords.length} 个关键词获取失败）` : ''}`, { stopped: true, failCount: failedKeywords.length });
+          return;
+        }
+        if (failedKeywords.length === keywords.length) throw new Error(`所有关键词均获取失败：${errors[0]?.response?.data?.msg || errors[0]?.message || '获取推荐词失败'}`);
+        taskFeedback.finish(`未获取到推荐词${failedKeywords.length ? `（${emptyKeywords.length} 个关键词无结果，${failedKeywords.length} 个关键词获取失败），请稍后重试` : '，请更换关键词后重试'}`, { type: failedKeywords.length ? 'warning' : 'info' });
         return;
       }
-      if (failedKeywords.length === keywords.length) throw new Error(`所有关键词均获取失败：${errors[0]?.response?.data?.msg || errors[0]?.message || '获取推荐词失败'}`);
-      showToast(`未获取到推荐词${failedKeywords.length ? `（${emptyKeywords.length} 个关键词无结果，${failedKeywords.length} 个关键词获取失败），请稍后重试` : '，请更换关键词后重试'}`, false, { type: failedKeywords.length ? 'warning' : 'info' });
-      return;
-    }
 
-    const targetTableId = form.value.outputType === 2 ? form.value.table_id : '';
-    if (targetTableId) {
-      showToast('正在检查目标表字段…');
-      const valid = await validateTableFields(targetTableId, selectedFieldKeys.value, { fieldMappings: mappingDraft.value, throwOnError: true, onProgress: showToast, assertActive });
-      if (disposed) return;
-      if (!valid) throw new Error('目标表字段校验失败，请检查表格字段类型');
+      pendingWrite.value = {
+        rows, emptyKeywords, failedKeywords, authFailureReason, stopped: stopRequested.value, writtenCount: 0, appendState: {},
+        targetTableId: form.value.outputType === 2 ? form.value.table_id : '',
+        newTable: form.value.outputType !== 2,
+        selectedFieldKeys: [...selectedFieldKeys.value],
+        fieldMappings: form.value.outputType === 2 ? mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({ ...item })) : [],
+      };
     }
-    showToast('正在写入多维表格…');
-    const result = await createAndWriteData(rows, targetTableId ? 'stream' : '', '', targetTableId, selectedFieldKeys.value, {
-      assertActive,
-      stopAfterCurrentBatch: true,
-      writeMode: 'append',
-      parallelCellCreation: true,
-      cellCreationBatchSize: 20,
-      skipFieldDisplayConfig: true,
-      fieldMappings: targetTableId ? mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({ ...item })) : [],
-    });
+    const task = pendingWrite.value;
+    const remaining = task.rows.slice(task.writtenCount);
+    if (remaining.length) {
+      if (task.targetTableId) {
+        const valid = await validateTableFields(task.targetTableId, task.selectedFieldKeys, { fieldMappings: task.fieldMappings, throwOnError: true, onProgress: showToast, assertActive });
+        if (disposed) return;
+        if (!valid) throw new Error('目标表字段校验失败，请检查表格字段类型');
+      }
+      showToast(`正在写入多维表格，已写入 ${task.writtenCount}/${task.rows.length} 条…`);
+      const result = await createAndWriteData(remaining, task.targetTableId ? 'stream' : '', '', task.targetTableId, task.selectedFieldKeys, {
+        assertActive,
+        stopAfterCurrentBatch: true,
+        writeMode: 'append',
+        parallelCellCreation: true,
+        cellCreationBatchSize: 20,
+        skipFieldDisplayConfig: true,
+        fieldMappings: task.fieldMappings,
+        appendState: task.appendState,
+        onTargetTableReady: tableId => { task.targetTableId = tableId; },
+        onBatchWritten: count => { task.writtenCount += count; },
+      });
+      if (disposed) return;
+      if (!result?.tableId || !Array.isArray(result.recordIds) || result.recordIds.length !== remaining.length) {
+        throw new Error('写入未完成，请检查目标表格后重试');
+      }
+    }
     if (disposed) return;
-    if (!targetTableId && result?.tableId) await bitable.ui.switchToTable(result.tableId);
+    if (task.newTable) await bitable.ui.switchToTable(task.targetTableId);
     if (disposed) return;
 
     const notes = [];
-    if (emptyKeywords.length) notes.push(`${emptyKeywords.length} 个关键词无结果`);
-    if (failedKeywords.length) notes.push(`${failedKeywords.length} 个关键词获取失败`);
-    if (authFailureReason) notes.push(`获取已中止：${authFailureReason}`);
-    const stopped = stopRequested.value;
-    showToast(`${stopped ? '任务已停止，' : authFailureReason ? '' : '处理完成，'}已写入 ${rows.length} 条${stopped ? '推荐词' : ''}${notes.length ? `（${notes.join('，')}）` : ''}`, false, { stopped, failCount: failedKeywords.length, type: failedKeywords.length ? 'warning' : 'success' });
+    if (task.emptyKeywords.length) notes.push(`${task.emptyKeywords.length} 个关键词无结果`);
+    if (task.failedKeywords.length) notes.push(`${task.failedKeywords.length} 个关键词获取失败`);
+    if (task.authFailureReason) notes.push(`获取已中止：${task.authFailureReason}`);
+    taskFeedback.finish(`${task.stopped ? '任务已停止，' : task.authFailureReason ? '' : '处理完成，'}已写入 ${task.writtenCount} 条${task.stopped ? '推荐词' : ''}${notes.length ? `（${notes.join('，')}）` : ''}`, { stopped: task.stopped, failCount: task.failedKeywords.length, type: task.failedKeywords.length ? 'warning' : 'success' });
+    pendingWrite.value = null;
   } catch (error) {
     if (disposed) return;
-    if (error.stopPolling) {
-      taskFeedback.fail(`${error.cause?.message || '写入失败'}；请核对表格结果，勿重复启动任务`, { persist: true });
-    } else {
-      taskFeedback.fail(error);
-    }
+    const message = (error.stopPolling ? error.cause?.message : error?.response?.data?.msg) || error.message || '执行失败，请稍后重试';
+    const task = pendingWrite.value;
+    const progress = !task ? '' : error.requiresReopen
+      ? `；已写入 ${task.writtenCount}/${task.rows.length} 条。关闭或刷新插件页面会清除本次未写入的结果，重新进入后需重新执行。`
+      : `；已写入 ${task.writtenCount}/${task.rows.length} 条，可继续写入本次剩余结果。请保留当前页面，关闭或刷新会清除这份进度。`;
+    taskFeedback.fail(`${message}${progress}`, { persist: !!task, requiresReopen: !!error.requiresReopen });
   } finally {
     loading.value = false;
     collecting.value = false;
@@ -359,16 +379,30 @@ const execute = async keywords => {
 };
 
 const submit = async () => {
-  if (disposed || !fieldSelectionReady.value || loading.value || noticeRequiresReopen.value) return;
+  if (disposed || !fieldSelectionReady.value || loading.value || submitting.value || noticeRequiresReopen.value) return;
   if (!props.api_key) return showError('请先在首页配置 API Key');
+  if (pendingWrite.value) {
+    submitting.value = true;
+    try {
+      taskFeedback.begin(`正在写入多维表格，已写入 ${pendingWrite.value.writtenCount}/${pendingWrite.value.rows.length} 条…`, { stopping: pendingWrite.value.stopped });
+      await nextTick();
+      if (!disposed) await execute();
+    } finally { submitting.value = false; }
+    return;
+  }
   if (!form.value.social_type) return showError('请选择平台');
   const keywords = parseKeywords(form.value.keyword);
   if (!keywords.length) return showError('请输入至少一个关键词');
   if (form.value.outputType === 2 && !form.value.table_id) return showError('请选择现有表格');
   if (form.value.outputType === 2 && mappingLoading.value) return showError('正在读取目标表字段，请稍后重试');
   if (form.value.outputType === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) return showError('请完成字段映射，或删除未完成的映射');
-  loading.value = true;
+  submitting.value = true;
+  taskFeedback.begin(form.value.outputType === 2 && !tableConfigsLoaded.value ? '正在读取输出表配置…'
+    : form.value.outputType === 2 && tableFieldsError ? '正在读取目标表字段…'
+    : `正在获取「${keywords[0]}」（1/${keywords.length}）…`);
   try {
+    await nextTick();
+    if (disposed) return;
     if (form.value.outputType === 2 && !tableConfigsLoaded.value) {
       taskFeedback.begin('正在读取输出表配置…');
       const loaded = await loadTableOutputConfigs();
@@ -387,16 +421,22 @@ const submit = async () => {
   } catch (error) {
     if (!disposed) taskFeedback.fail(error);
   } finally {
-    if (!disposed) loading.value = false;
+    submitting.value = false;
   }
 };
 
+const endWrite = () => {
+  if (disposed || loading.value || submitting.value) return;
+  pendingWrite.value = null;
+  taskFeedback.hide();
+  taskFeedback.clearNotice();
+};
 const requestStop = () => {
   if (disposed || !collecting.value || stopRequested.value) return;
   stopRequested.value = true;
   showToast('正在停止获取推荐词，等待当前请求完成…');
 };
-const taskActionState = computed(() => stopRequested.value && loading.value ? 'stopping' : collecting.value ? 'running' : loading.value ? 'submitting' : 'idle');
+const taskActionState = computed(() => (stopRequested.value || pendingWrite.value?.stopped) && (loading.value || submitting.value) ? 'stopping' : collecting.value ? 'running' : loading.value || submitting.value ? 'submitting' : 'idle');
 const handleTaskAction = () => {
   if (taskActionState.value === 'running') return requestStop();
   if (taskActionState.value === 'idle') return submit();
@@ -506,7 +546,8 @@ onMounted(async () => {
         </section>
       </el-form>
       <p v-if="taskNotice" class="sub-hint" role="status">{{ taskNotice }}</p>
-      <el-button class="commit-btn" :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }" :loading="!fieldSelectionReady || taskActionState === 'submitting' || taskActionState === 'stopping'" :disabled="!fieldSelectionReady || taskActionState === 'submitting' || taskActionState === 'stopping' || noticeRequiresReopen" @click="handleTaskAction">{{ !fieldSelectionReady ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : loading ? '执行中…' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
+      <el-button class="commit-btn" :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }" :loading="!fieldSelectionReady || taskActionState === 'submitting' || taskActionState === 'stopping'" :disabled="!fieldSelectionReady || taskActionState === 'submitting' || taskActionState === 'stopping' || noticeRequiresReopen" @click="handleTaskAction">{{ !fieldSelectionReady ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : loading ? '执行中…' : submitting ? '准备中…' : noticeRequiresReopen ? '请重新进入插件' : pendingWrite ? '继续写入' : '立即执行' }}</el-button>
+      <el-button v-if="pendingWrite && !loading && !submitting" class="end-write-btn" @click="endWrite">结束本次写入</el-button>
     </div>
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
@@ -566,5 +607,31 @@ onMounted(async () => {
 }
 
 .commit-btn { margin-top:0; }
+
+.el-button.end-write-btn {
+  --el-button-text-color:#4e5969;
+  --el-button-bg-color:#fff;
+  --el-button-border-color:#c9cdd4;
+  --el-button-hover-text-color:#4e5969;
+  --el-button-hover-bg-color:#f7f8fa;
+  --el-button-hover-border-color:#86909c;
+  --el-button-active-text-color:#4e5969;
+  --el-button-active-bg-color:#f2f3f5;
+  --el-button-active-border-color:#86909c;
+  --el-button-disabled-text-color:#86909c;
+  --el-button-disabled-bg-color:#fafafa;
+  --el-button-disabled-border-color:#e5e6eb;
+  display:block;
+  box-sizing:border-box;
+  width:100%;
+  height:36px;
+  margin:8px 0 0;
+  border-radius:6px;
+}
+.end-write-btn:focus-visible:enabled {
+  border:2px solid #86909c;
+  outline:none;
+  box-shadow:none;
+}
 
 </style>
