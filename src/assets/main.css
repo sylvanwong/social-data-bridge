@@ -1,6 +1,11 @@
 @import 'reset-css';
 @import './typography.css';
 
+/* 默认显示纵向滚动条，分类切换时保持内容宽度不变。 */
+html {
+  overflow-y: scroll;
+}
+
 /* Element Plus 主题色配置 */
 :root {
   --app-space-control: 8px;

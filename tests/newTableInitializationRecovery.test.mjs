@@ -12,7 +12,7 @@ function visit(node) {
   if (!node || typeof node !== 'object') return;
   if (node.type === 'VariableDeclarator' && node.id.name === 'createAndWriteData') writerNode = node.init;
   if (node.type === 'VariableDeclarator' && node.id.name === 'setupTableFields') setupNode = node.init;
-  if (node.type === 'VariableDeclarator' && ['normalizeUniqueKeyPart', 'buildWorkUniqueKey'].includes(node.id.name)) {
+  if (node.type === 'VariableDeclarator' && ['normalizeUniqueKeyPart', 'buildWorkUniqueKey', 'readTableRecords'].includes(node.id.name)) {
     keyDeclarations.push(`const ${writerSource.slice(node.start, node.end)};`);
   }
   for (const value of Object.values(node)) {
@@ -21,7 +21,7 @@ function visit(node) {
   }
 }
 visit(parse(writerSource, { sourceType: 'module' }));
-const buildWorkUniqueKey = new Function(`${keyDeclarations.join('\n')} return buildWorkUniqueKey;`)();
+const { buildWorkUniqueKey, readTableRecords } = new Function(`${keyDeclarations.join('\n')} return { buildWorkUniqueKey, readTableRecords };`)();
 const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
   .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
 
@@ -65,7 +65,7 @@ function fixture(component, engineName, key, failure) {
     getTableName: () => 'test', createSequentialTable: async () => { created++; fields.set('default', { id: 'default', name: '文本', type: 'text' }); return { tableId: 'created' }; },
     resolveFieldMetaByConfig: (map, cfg) => ({ fieldMeta: map.get(cfg.name) }),
     isFieldTypeCompatible: () => true, applyFieldDisplayConfig: async () => {},
-    buildWorkUniqueKey, normalizeCellValue: async (_, field, value) => value,
+    buildWorkUniqueKey, readTableRecords, normalizeCellValue: async (_, field, value) => value,
     FieldType: { Attachment: 'attachment' }, prepareAttachmentPipeline: async () => {}, uploadAttachmentFilesInBatch: async () => {},
     upsertIndexCache: new Map(), chunkRecords: items => [items], api_key: '',
     console: { error() {} }, showErrorMsg() {}, ElNotification() {}, ElMessage() {}, resetParams() {},

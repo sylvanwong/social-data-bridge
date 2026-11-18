@@ -6,6 +6,7 @@ import { parse as parseJS } from '@babel/parser';
 import { computed, createRenderer, nextTick, ref } from 'vue';
 import { useTaskFeedback } from '../src/composables/useTaskFeedback.mjs';
 import { loadRequestModule } from './helpers/requestService.mjs';
+import { getPendingWriteLimit } from '../src/utils/taskWriteState.mjs';
 
 const pages = [
   ['BloggerSearch', 'searchTask', 'cancel', 'resumeSavedTask'],
@@ -59,7 +60,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
     bitable, (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; }, id => timers.delete(id));
   const dependencies = {
     ...loadRequestModule(),
-    computed, ref, nextTick, useTaskFeedback, useIncrementalTask, getTaskStoppingText,
+    computed, ref, nextTick, useTaskFeedback, useIncrementalTask, getTaskStoppingText, getPendingWriteLimit,
     loading: ref(false), props: { api_key: 'test-key' }, commentSubmission: { pending: null },
     ElMessage: notice => notices.push(notice), showErrorMsg: message => notices.push({ message }),
     console: { error() {}, log() {} },

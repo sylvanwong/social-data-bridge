@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { loadRequestModule } from './helpers/requestService.mjs';
+import { getPendingWriteLimit } from '../src/utils/taskWriteState.mjs';
 
 const production = { VITE_API_BASE_URL: 'https://legacy.example', VITE_FEISHU_API_BASE_URL: 'https://api.socialdatax.com' };
 
@@ -20,7 +21,7 @@ function fixture(task = { taskId: 'old-task' }, env = production) {
     return { config, status: 200, data: await reply(call) };
   };
   const bindings = {
-    ...api, request: api.service, props: { api_key: 'test-only' },
+    ...api, getPendingWriteLimit, request: api.service, props: { api_key: 'test-only' },
     selectedFieldKeys: { value: ['aweme_id'] }, mappingDraft: { value: [] },
     formData1: { value: { social_type: 'douyin', keyword: '露营\n徒步', sort_type: 2, publish_time: 2,
       filter_duration: '0', douyin_content_type: 1, radio: 1, writeMode: 'upsert', workFetchRange: { type: 'pages', pages: 2 } } },

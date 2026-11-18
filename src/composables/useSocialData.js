@@ -71,7 +71,7 @@ export const PROFILE_FIELD_MAPPING = [
   { key: 'share_count', name: '分享数', type: FieldType.Number, defaultSelected: true, formatter: NumberFormatter.INTEGER },
   { key: 'share_url', name: '作品链接', legacyNames: ['视频链接'], type: FieldType.Url, defaultSelected: true },
   { key: 'cover_url', name: '封面链接', legacyNames: ['封面'], type: FieldType.Text, defaultSelected: true },
-  { key: 'cover_attachment', name: '封面附件', type: FieldType.Attachment, defaultSelected: true, getUrls: (item) => item?.cover_url ? [item.cover_url] : [], getFileName: () => 'cover' },
+  { key: 'cover_attachment', name: '封面附件', type: FieldType.Attachment, defaultSelected: false, getUrls: (item) => item?.cover_url ? [item.cover_url] : [], getFileName: () => 'cover' },
   { key: 'play_url', name: '下载链接', type: FieldType.Text, defaultSelected: true },
   { key: 'create_time', name: '发布时间', type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
   { key: 'last_update_time', name: '更新时间', legacyNames: ['最后更新时间'], type: FieldType.DateTime, defaultSelected: true, isTimestamp: true, dateFormat: DateFormatter.DATE_TIME },
@@ -108,6 +108,7 @@ export const FIELD_TYPE_NAME = {
 };
 
 const getAllowedFieldTypes = (config) => {
+  if (Array.isArray(config.allowedTypes)) return config.allowedTypes;
   if (config.type === FieldType.Number) {
     return [FieldType.Number, FieldType.Text];
   }
@@ -409,7 +410,7 @@ const normalizeCellValue = async (table, field, value, config, fieldType, extra 
     nextValue = nextValue * 1000;
   }
 
-  if ((config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') && fieldType === FieldType.SingleSelect) {
+  if ((config.allowedTypes?.includes(FieldType.SingleSelect) || config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') && fieldType === FieldType.SingleSelect) {
     return normalizeSelectCompatibleValue(nextValue);
   }
 
@@ -429,7 +430,9 @@ const normalizeCellValue = async (table, field, value, config, fieldType, extra 
 };
 
 const applyFieldDisplayConfig = async (field, config, assertActive) => {
+  assertActive?.();
   const fieldType = await field.getType();
+  assertActive?.();
   if (config.formatter && fieldType === FieldType.Number) {
     assertActive?.();
     await field.setFormatter(config.formatter);
@@ -551,6 +554,7 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
     options.assertActive?.();
     options.onProgress?.('正在检查目标表字段...');
     const activeTable = await bitable.base.getTableById(tableId);
+    options.assertActive?.();
     const fieldMetaList = await activeTable.getFieldMetaList();
     options.assertActive?.();
     const fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
@@ -591,6 +595,7 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
     for (const item of fieldList) {
       if (item.field) {
         const fieldType = await item.field.getType();
+        options.assertActive?.();
         item.fieldType = fieldType;
         if (!isFieldTypeCompatible(fieldType, item.config)) {
           const message = `输出字段"${item.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(item.config)}类型，请修正目标字段类型后重试`;
@@ -625,7 +630,9 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
       else if (!options.throwOnError) ElMessage({ message, type: 'success', plain: true, duration: 3000 });
     }
 
+    options.assertActive?.();
     const refreshedFieldMetaList = await activeTable.getFieldMetaList();
+    options.assertActive?.();
     const refreshedFieldMetaByName = new Map(refreshedFieldMetaList.map(meta => [meta.name, meta]));
     const refreshedFieldMetaById = new Map(refreshedFieldMetaList.map(meta => [meta.id, meta]));
     for (const config of activeFieldMapping) {
@@ -635,11 +642,13 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
         : resolveFieldMetaByConfig(refreshedFieldMetaByName, config);
       const fieldId = matchedField?.fieldMeta?.id;
       if (!fieldId) continue;
+      options.assertActive?.();
       const field = await activeTable.getFieldById(fieldId);
       options.assertActive?.();
       try {
         await applyFieldDisplayConfig(field, config, options.assertActive);
       } catch (error) {
+        if (error?.stopPolling || error?.cancelled) throw error;
         console.error(`设置字段 ${config.name} 格式失败:`, error);
       }
     }
@@ -795,7 +804,9 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       const activeTable = resolvedTargetTableId
         ? await bitable.base.getTableById(resolvedTargetTableId)
         : await bitable.base.getActiveTable();
+      options.assertActive?.();
       let fieldMetaList = await activeTable.getFieldMetaList();
+      options.assertActive?.();
       let fieldMetaByName = new Map(fieldMetaList.map(meta => [meta.name, meta]));
       let fieldMetaById = new Map(fieldMetaList.map(meta => [meta.id, meta]));
       const explicitMappings = new Map(
@@ -841,7 +852,11 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         const fieldId = matchedField?.fieldMeta?.id;
         if (!fieldId) return { field: null, config };
         try {
-          const { field, fieldType } = await resolveWritableField(activeTable, await activeTable.getFieldById(fieldId));
+          options.assertActive?.();
+          const sourceField = await activeTable.getFieldById(fieldId);
+          options.assertActive?.();
+          const { field, fieldType } = await resolveWritableField(activeTable, sourceField);
+          options.assertActive?.();
           return { field, config, fieldType };
         } catch (error) {
           if (options.stopAfterCurrentBatch) throw error;
@@ -853,7 +868,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       const incompatibleField = fieldList.find(item => item.field && !isFieldTypeCompatible(item.fieldType, item.config));
       if (incompatibleField) {
         if (options.stopAfterCurrentBatch) {
-          throw new Error(`字段“${incompatibleField.config.name}”类型不匹配，请修正后${options.appendState ? '继续写入' : '恢复任务'}`);
+          throw new Error(`字段“${incompatibleField.config.name}”类型不匹配，请修正后${options.appendState && !task_id ? '继续写入' : '恢复任务'}`);
         }
         ElMessage({ plain: true, message: `输出字段"${incompatibleField.config.name}" 类型不匹配，仅支持${getExpectedFieldTypeName(incompatibleField.config)}类型，请修正目标字段类型后重试`, type: 'error', duration: 8000 });
         resetParams();
@@ -862,7 +877,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
 
       const missingField = fieldList.find(item => !item.field);
       if (options.stopAfterCurrentBatch && missingField) {
-        throw new Error(`字段“${missingField.config.name}”不可用，请检查目标表字段后${options.appendState ? '继续写入' : '恢复任务'}`);
+        throw new Error(`字段“${missingField.config.name}”不可用，请检查目标表字段后${options.appendState && !task_id ? '继续写入' : '恢复任务'}`);
       }
       const availableFieldList = fieldList.filter(item => !!item.field);
       if (availableFieldList.length === 0) {
@@ -876,6 +891,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         await options.onTableInitialized?.();
       }
 
+      options.assertActive?.();
       await Promise.all(availableFieldList.map(async item => {
         item.extra = {};
         if (item.config.key === 'tags') {
@@ -953,7 +969,9 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
             options.assertActive?.();
             const cell = await field.createCell(value);
             record.push(cell);
+            options.assertActive?.();
             normalizedRecord[field.id] = await cell.getValue();
+            options.assertActive?.();
           }
           records.push(record);
           normalizedRecords.push(normalizedRecord);
@@ -973,7 +991,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         if (metrics) metrics.writeMs += performance.now() - start;
         return result;
       };
-      if (options.writeMode === 'upsert' || options.reconcile) {
+      if (options.writeMode === 'upsert' || (options.reconcile && !options.appendState)) {
         const keyFields = keyConfigs.map(config => availableFieldList.find(item => item.config.key === config.key)?.field);
         if (!keyFields.every(Boolean)) {
           throw new Error(`未找到“${keyConfigs[0]?.name || uniqueKey}”字段，无法执行更新或新增`);
@@ -1003,12 +1021,17 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         if (!existingByKey) {
           existingByKey = new Map();
           let pageToken;
+          const seenTokens = new Set();
           do {
+            options.assertActive?.();
             const response = await activeTable.getRecordsByPage({ pageSize: 200, pageToken });
+            options.assertActive?.();
             (response.records || []).forEach(existing => {
               const key = getUniqueKey(existing.fields?.[keyFields[0].id], existing.fields?.[fallbackFieldId]);
               if (key) existingByKey.set(key, existing.recordId);
             });
+            if (response.hasMore && (!response.pageToken || seenTokens.has(response.pageToken))) throw new Error('读取目标表时未返回有效分页游标，无法核对写入结果');
+            if (response.hasMore) seenTokens.add(response.pageToken);
             pageToken = response.hasMore ? response.pageToken : undefined;
           } while (pageToken !== undefined);
           indexCache.set(cacheKey, existingByKey);
@@ -1039,19 +1062,25 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         const fieldIds = availableFieldList.map(({ field }) => field.id);
         if (state && !state.knownRecordIds) {
           // 保留正常追加语义：历史同内容记录不能抵扣本次失败批次。
-          state.knownRecordIds = new Set((await readTableRecords(activeTable, options.assertActive)).map(record => record.recordId));
+          state.knownRecordIds = (await readTableRecords(activeTable, options.assertActive)).map(record => record.recordId);
           state.fieldIds = fieldIds;
         }
+        const knownRecordIds = new Set(state.knownRecordIds);
         options.assertActive?.();
-        if (state && JSON.stringify(state.fieldIds) !== JSON.stringify(fieldIds)) {
+        if (state?.pendingCount && JSON.stringify(state.fieldIds) !== JSON.stringify(fieldIds)) {
           throw new Error('目标字段已变化，无法核对上次写入，请恢复原字段后继续');
         }
-        const recordKey = fields => JSON.stringify(availableFieldList.map(({ field, fieldType }) => {
+        state.fieldIds = fieldIds;
+        // 有稳定标识时只用标识核对新增行，重传附件的 token 不稳定。
+        const matchFields = keyConfigs.length
+          ? availableFieldList.filter(({ config }) => keyConfigs.some(key => key.key === config.key)) : availableFieldList;
+        const recordKey = fields => JSON.stringify(matchFields.map(({ field, fieldType }) => {
           const value = fields[field.id];
           if (fieldType === FieldType.Text) {
             return Array.isArray(value) ? value.map(part => part.text).join('') : String(value ?? '');
           }
           if (fieldType === FieldType.SingleSelect) return value?.text ?? value ?? '';
+          if (fieldType === FieldType.Url && Array.isArray(value)) return value.map(part => ({ type: part.type, text: part.text ?? '', link: part.link ?? '' }));
           return value ?? null;
         }));
         let offset = 0;
@@ -1065,7 +1094,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
             keys.forEach(key => expected.set(key, (expected.get(key) || 0) + 1));
             const matches = new Map();
             for (const record of await readTableRecords(activeTable, options.assertActive)) {
-              if (state.knownRecordIds.has(record.recordId)) continue;
+              if (knownRecordIds.has(record.recordId)) continue;
               const key = recordKey(record.fields);
               if (!expected.has(key)) continue;
               const ids = matches.get(key) || [];
@@ -1087,7 +1116,8 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
           options.assertActive?.();
           const completedIds = recoveredIds.concat(created);
           if (state) {
-            completedIds.forEach(id => state.knownRecordIds.add(id));
+            completedIds.forEach(id => knownRecordIds.add(id));
+            state.knownRecordIds = [...knownRecordIds];
             state.pendingCount = 0;
           }
           recordIds = recordIds.concat(completedIds);

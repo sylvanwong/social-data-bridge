@@ -1,4 +1,5 @@
 <script setup>
+import { getPendingWriteLimit } from '../utils/taskWriteState.mjs';
 import { parseManualUrls } from '../utils/sourceLinks.mjs';
 import { readRecordIds, readUniqueSourceLinks } from '../utils/sourceTableRows.mjs';
 import { resolveWritableField } from '../utils/tableFields.js';
@@ -379,7 +380,7 @@ const getSeriesResults = async (task) => {
     data: {
       task_id: task.taskId,
       after_id: task.cursor || '',
-      limit: listPageSize,
+      limit: getPendingWriteLimit(task, listPageSize) ?? listPageSize,
     },
   });
   const res = response.data || {};
@@ -412,6 +413,7 @@ const seriesStreamTask = useIncrementalTask({
   writeBatch: async (items, task, controls) => {
     const reconcile = task.pendingWrite ?? !!task.targetTableId;
     task.pendingWrite = reconcile;
+    const appendState = task.writeMode === 'append' ? (task.appendState ||= {}) : undefined;
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId,
       task.targetTableId || '', task.selectedFieldKeys, {
         stopAfterCurrentBatch: true,
@@ -423,9 +425,14 @@ const seriesStreamTask = useIncrementalTask({
         },
         uniqueKey: 'series_id', writeMode: task.writeMode || 'upsert',
         fieldMappings: task.fieldMappings || [], upsertCacheKey: task.taskId,
-        reconcile, assertActive: controls.assertActive,
+        reconcile, appendState, assertActive: controls.assertActive,
         onProgress: message => { controls.assertActive(); showFieldProgress(message); },
-        onBeforeWrite: async () => { controls.assertActive(); task.pendingWrite = true; await controls.saveProgress(); },
+        onBeforeWrite: async () => {
+          controls.assertActive();
+          task.pendingWrite = true;
+          task.pendingWriteCount = items.length;
+          await controls.saveProgress();
+        },
         onTargetTableReady: async tableId => {
           controls.assertActive();
           task.targetTableId = tableId;
@@ -435,6 +442,7 @@ const seriesStreamTask = useIncrementalTask({
       });
     task.targetTableId = result?.tableId || task.targetTableId;
     task.pendingWrite = false;
+    delete task.pendingWriteCount;
   },
   onProgress: (status, task, phase) => {
     clearing.value = phase === 'clearing';

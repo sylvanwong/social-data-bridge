@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { loadRequestModule } from './helpers/requestService.mjs';
+import { getPendingWriteLimit } from '../src/utils/taskWriteState.mjs';
 
 for (const [component, engineName, key] of [['ProfileFetch', 'profileStreamTask', 'aweme_id'], ['SeriesFetch', 'seriesStreamTask', 'series_id']]) {
   test(`${component}：新表部分写入失败后恢复同一表，核对原批并排空后续结果`, async () => {
@@ -85,7 +86,7 @@ for (const [page, engine, helpers, limit] of [
         return { data: { sta: 0, data: page === 'SeriesFetch' && count === undefined ? { data: payload } : payload } };
       };
       const routing = loadRequestModule();
-      const bindings = { ...routing, request, feishuRequest: request, props: { api_key: 'test-only' }, STREAM_RESULT_LIMIT: 40, listPageSize: 20 };
+      const bindings = { ...routing, getPendingWriteLimit, request, feishuRequest: request, props: { api_key: 'test-only' }, STREAM_RESULT_LIMIT: 40, listPageSize: 20 };
       const getResults = new Function(...Object.keys(bindings),
         `${helperSource}; return (${source.slice(reader.start, reader.end)});`)(...Object.values(bindings));
       const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
