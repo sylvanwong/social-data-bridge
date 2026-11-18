@@ -11,7 +11,7 @@ function fixture({ mapped = false, loseResponse = true, fallback = false, fallba
   function visit(node) {
     if (!node || typeof node !== 'object') return;
     if (node.type === 'VariableDeclarator' && node.id.name === 'createAndWriteData') callback = node.init;
-    if (node.type === 'VariableDeclarator' && ['normalizeUniqueKeyPart', 'buildWorkUniqueKey'].includes(node.id.name)) {
+    if (node.type === 'VariableDeclarator' && ['normalizeUniqueKeyPart', 'buildWorkUniqueKey', 'readTableRecords'].includes(node.id.name)) {
       keyDeclarations.push(`const ${source.slice(node.start, node.end)};`);
     }
     for (const value of Object.values(node)) {
@@ -20,7 +20,7 @@ function fixture({ mapped = false, loseResponse = true, fallback = false, fallba
     }
   }
   visit(parse(source, { sourceType: 'module' }));
-  const buildWorkUniqueKey = new Function(`${keyDeclarations.join('\n')} return buildWorkUniqueKey;`)();
+  const { buildWorkUniqueKey, readTableRecords } = new Function(`${keyDeclarations.join('\n')} return { buildWorkUniqueKey, readTableRecords };`)();
   const config = { key: 'user_id', name: '作者ID', type: 'text' };
   const fallbackConfig = { key: 'identity_key', name: '作者标识', type: 'text' };
   const rows = [], events = [];
@@ -60,7 +60,7 @@ function fixture({ mapped = false, loseResponse = true, fallback = false, fallba
     normalizeCellValue: async (_, field, value) => value,
     applyFieldDisplayConfig: async () => {}, uploadAttachmentFilesInBatch: async () => {},
     prepareAttachmentPipeline: async () => {}, api_key: '',
-    buildWorkUniqueKey, chunkRecords: list => list.map(item => [item]),
+    buildWorkUniqueKey, readTableRecords, chunkRecords: list => list.map(item => [item]),
     upsertIndexCache: new Map(), console: { error() {} },
   };
   const write = new Function(...Object.keys(bindings), `return (${source.slice(callback.start, callback.end)});`)(...Object.values(bindings));
@@ -89,6 +89,22 @@ test('recovery with missing ID column does not create an empty replacement', asy
   const f = fixture(); f.table.getFieldMetaList = async () => [];
   await assert.rejects(f.write([{ user_id: 'a' }], { reconcile: true }), /无法核对/);
   assert.deepEqual(f.events, []);
+});
+test('append recovery keeps the original field snapshot until the uncertain batch is confirmed', async () => {
+  const f = fixture();
+  const appendState = {};
+  await assert.rejects(f.write([{ user_id: 'a' }], { appendState }), /response lost/);
+  const saved = structuredClone(appendState), rows = structuredClone(f.rows);
+  const readFields = f.table.getFieldMetaList;
+  f.table.getFieldMetaList = async () => [{ id: 'replacement-id', name: '作者ID' }];
+  await assert.rejects(f.write([{ user_id: 'a' }], { appendState, reconcile: true }), /目标字段已变化/);
+  assert.deepEqual(appendState, saved);
+  assert.deepEqual(f.rows, rows);
+  f.table.getFieldMetaList = readFields;
+  await f.write([{ user_id: 'a' }], { appendState, reconcile: true });
+  assert.deepEqual(f.rows, rows, '恢复原字段后只确认已落表结果，不重复新增');
+  assert.equal(appendState.pendingCount, 0);
+  assert.equal(f.events.filter(event => event === 'add').length, 1);
 });
 test('missing author ID pauses whole batch before any mutation', async () => {
   const f = fixture();

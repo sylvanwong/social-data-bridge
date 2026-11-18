@@ -1,4 +1,5 @@
 <script setup>
+import { getPendingWriteLimit } from '../utils/taskWriteState.mjs';
 import { parseManualUrls } from '../utils/sourceLinks.mjs';
 import { readRecordIds, readUniqueSourceLinks } from '../utils/sourceTableRows.mjs';
 import TaskFeedback from './TaskFeedback.vue';
@@ -24,7 +25,7 @@ const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table
 const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
 const MANUAL_TABLE_BASE_NAME = '社媒数据助手';
 const STREAM_TASK_STORAGE_KEY = 'profile_fetch_stream_task_v1';
-const STREAM_RESULT_LIMIT = 40;
+const STREAM_RESULT_LIMIT = 100;
 const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
 
 const formData = ref({
@@ -459,6 +460,10 @@ const {
 } = useSocialData(getTableName, props.api_key, PROFILE_FIELD_MAPPING);
 
 let activeStreamTask = null;
+const showAttachmentHint = computed(() => {
+  const keys = activeProfileTaskId.value ? activeStreamTask?.selectedFieldKeys : selectedFieldKeys.value;
+  return !!keys?.includes('cover_attachment');
+});
 
 const ensureOption = (optionsRef, option) => {
   if (!option?.id) {
@@ -632,6 +637,8 @@ const getProfileTaskStatus = async (task) => {
 };
 
 const readAvailablePosts = async (streamTask) => {
+  const limit = getPendingWriteLimit(streamTask, STREAM_RESULT_LIMIT)
+    ?? (streamTask.selectedFieldKeys?.includes('cover_attachment') ? 40 : STREAM_RESULT_LIMIT);
   const response = await feishuRequest({
     url: profileTaskApiPath(streamTask, '/v1/feishu/post/list'),
     method: 'post',
@@ -640,7 +647,7 @@ const readAvailablePosts = async (streamTask) => {
     data: {
       task_id: streamTask.taskId,
       after_id: streamTask.cursor || '',
-      limit: STREAM_RESULT_LIMIT,
+      limit,
     },
   });
   return response.data;
@@ -665,6 +672,7 @@ const profileStreamTask = useIncrementalTask({
   writeBatch: async (items, task, controls) => {
     const reconcile = task.pendingWrite ?? !!task.targetTableId;
     task.pendingWrite = reconcile;
+    const appendState = task.writeMode === 'append' ? (task.appendState ||= {}) : undefined;
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId,
       task.targetTableId || '', task.selectedFieldKeys, {
         stopAfterCurrentBatch: true,
@@ -676,9 +684,14 @@ const profileStreamTask = useIncrementalTask({
         },
         attachmentPipeline: true, uploadBatchSize: 5,
         writeMode: task.writeMode || 'upsert', fieldMappings: task.fieldMappings || [],
-        upsertCacheKey: task.taskId, reconcile, assertActive: controls.assertActive,
+        upsertCacheKey: task.taskId, reconcile, appendState, assertActive: controls.assertActive,
         onProgress: message => { controls.assertActive(); showProfileFieldProgress(message); },
-        onBeforeWrite: async () => { controls.assertActive(); task.pendingWrite = true; await controls.saveProgress(); },
+        onBeforeWrite: async () => {
+          controls.assertActive();
+          task.pendingWrite = true;
+          task.pendingWriteCount = items.length;
+          await controls.saveProgress();
+        },
         onTargetTableReady: async tableId => {
           controls.assertActive();
           task.targetTableId = tableId;
@@ -688,6 +701,7 @@ const profileStreamTask = useIncrementalTask({
       });
     task.targetTableId = result?.tableId || task.targetTableId;
     task.pendingWrite = false;
+    delete task.pendingWriteCount;
   },
   onProgress: (status, task, phase) => {
     clearing.value = phase === 'clearing';
@@ -1899,6 +1913,7 @@ watch(
                   {{ field.name }}
                 </el-checkbox>
               </el-checkbox-group>
+              <p v-if="showAttachmentHint" class="sub-hint">附件需下载并上传，批量更新较慢。</p>
             </div>
           </el-form-item>
 
@@ -2311,6 +2326,7 @@ watch(
                   {{ field.name }}
                 </el-checkbox>
               </el-checkbox-group>
+              <p v-if="taskDialogForm.selectedFieldKeys.includes('cover_attachment')" class="sub-hint">附件需下载并上传，批量更新较慢。</p>
               </div>
             </el-form-item>
 

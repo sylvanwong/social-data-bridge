@@ -276,7 +276,7 @@ for (const page of ['VideoDataFetch', 'BloggerInfoFetch', 'ProfileFetch']) {
     const view = { getSelectedRecordIdList: async () => ids, getVisibleRecordIdListByPage: async () => ids };
     const table = { getActiveView: async () => view, getFieldById: async id => {
       assert.equal(id, 'A-link');
-      return { getCell: async recordId => { assert.equal(recordId, 'A-row'); return { getValue: async () => 'https://example.test/A' }; } };
+      return { getValue: async recordId => { assert.equal(recordId, 'A-row'); return 'https://example.test/A'; } };
     } };
     const bindings = { bitable: { base: { getActiveTable: () => assert.fail('不应读取新当前表') } },
       console: { log() {} },
@@ -1787,9 +1787,9 @@ for (const page of ['VideoDataFetch', 'BloggerInfoFetch', 'ProfileFetch']) {
 test('作品详情共用源表读取后保留无链接的原始值及对应行号', async () => {
   const rawValue = { text: '待解析的作品标识' };
   const table = { getFieldById: async () => ({
-    getCell: async id => {
+    getValue: async id => {
       if (id === 'unreadable') throw new Error('读取该单元格失败');
-      return { getValue: async () => id === 'work' ? rawValue : [] };
+      return id === 'work' ? rawValue : [];
     },
   }) };
   const read = pageHandler('VideoDataFetch', 'getCellValuesByFieldId', { extractUrlHint: () => null });

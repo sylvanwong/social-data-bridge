@@ -5,6 +5,7 @@ import { nextTick } from 'vue';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { loadRequestModule } from './helpers/requestService.mjs';
+import { getPendingWriteLimit } from '../src/utils/taskWriteState.mjs';
 
 const production = { VITE_API_BASE_URL: 'https://api.52choujiang.cn', VITE_FEISHU_API_BASE_URL: 'https://api.socialdatax.com' };
 
@@ -20,7 +21,7 @@ function fixture(task = { taskId: 'old-task' }, env = production) {
     return { config, status: 200, data: await reply(call) };
   };
   const bindings = {
-    ...api, request: api.service, props: { api_key: 'test-only' }, nextTick,
+    ...api, getPendingWriteLimit, request: api.service, props: { api_key: 'test-only' }, nextTick,
     selectedFieldKeys: { value: ['user_id', 'nickname'] }, mappingDraft: { value: [{ source_key: 'nickname', target_field_id: 'name' }] },
     form: { value: { social_type: 'douyin', keyword: '露营\n徒步，露营', rangeType: 'pages', pages: 2,
       radio: 2, table_id: 'target-table', writeMode: 'upsert', follower_count_range: '10000_100000', user_type: 'personal' } },

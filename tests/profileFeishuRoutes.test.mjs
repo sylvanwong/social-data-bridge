@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { loadRequestModule } from './helpers/requestService.mjs';
+import { getPendingWriteLimit } from '../src/utils/taskWriteState.mjs';
 
 function fixture(task = { taskId: 'old-task' }) {
   const source = parse(fs.readFileSync(new URL('../src/components/ProfileFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
@@ -17,8 +18,8 @@ function fixture(task = { taskId: 'old-task' }) {
   };
   let submitted;
   const bindings = {
-    ...api, request: api.service, props: { api_key: 'test-only' }, componentUnmounted: false,
-    STREAM_RESULT_LIMIT: 40, isCancelling: { value: false }, clearing: { value: false },
+    ...api, getPendingWriteLimit, request: api.service, props: { api_key: 'test-only' }, componentUnmounted: false,
+    isCancelling: { value: false }, clearing: { value: false },
     selectedFieldKeys: { value: ['aweme_id'] }, mappingDraft: { value: [] },
     formData: { value: { writeMode: 'upsert', workFetchRange: { type: 'pages', pages: 1 } } },
     cloneFieldMappings: fields => structuredClone(fields), normalizeWorkFetchRange: () => ({ type: 'pages', value: 1 }),
@@ -26,7 +27,7 @@ function fixture(task = { taskId: 'old-task' }) {
     restoreProfileTask() {},
     profileStreamTask: { getActiveTask: () => task, submit: async create => { submitted = await create(); } },
   };
-  const names = ['profileTaskApiPath', 'unwrapApiData', 'getProfileTaskStatus', 'readAvailablePosts', 'postProfileTask', 'cancelProfileTask'];
+  const names = ['STREAM_RESULT_LIMIT', 'profileTaskApiPath', 'unwrapApiData', 'getProfileTaskStatus', 'readAvailablePosts', 'postProfileTask', 'cancelProfileTask'];
   const helpers = names.map(name => {
     const node = declarations.find(item => item.id.name === name);
     assert.ok(node, `${name} 应使用任务保存的请求来源`);
@@ -64,6 +65,56 @@ for (const [label, task, base, prefix] of [
     ]);
     assert.ok(f.calls.every(call => call.headers.authorization === 'Bearer test-only'));
     assert.equal(f.calls[1].data.after_id, '');
-    assert.equal(f.calls[1].data.limit, 40);
+    assert.equal(f.calls[1].data.limit, 100);
+  });
+}
+
+for (const [selectedFieldKeys, limit] of [[['aweme_id'], 100], [['aweme_id', 'cover_attachment'], 40]]) {
+  test(`作品结果按原任务附件快照每批读取${limit}条并保留恢复游标`, async () => {
+    const task = { taskId: 'saved-task', selectedFieldKeys, cursor: 'saved-cursor' };
+    const f = fixture(task);
+    await f.readAvailablePosts(task);
+    assert.equal(f.calls[0].data.limit, limit);
+    assert.equal(f.calls[0].data.after_id, 'saved-cursor');
+  });
+}
+
+for (const pendingWriteCount of [undefined, 0, -1, 20.5, 101, '20']) {
+  test(`追加恢复不使用不可靠范围${String(pendingWriteCount)}请求结果，也不要求重开插件`, async () => {
+    const task = { taskId: 'old-append', targetTableId: 'B', writeMode: 'append', pendingWrite: true, pendingWriteCount };
+    const f = fixture(task);
+    await assert.rejects(f.readAvailablePosts(task), error => {
+      assert.equal(error.stopPolling, true);
+      assert.notEqual(error.requiresReopen, true);
+      assert.match(error.message, /无法确认.*批次范围/);
+      return true;
+    });
+    assert.equal(f.calls.length, 0);
+  });
+}
+
+test('追加恢复使用已保存的20条范围，旧更新任务缺少范围仍按作品ID正常恢复', async () => {
+  const f = fixture();
+  await f.readAvailablePosts({ taskId: 'append', targetTableId: 'B', pendingWrite: true,
+    writeMode: 'append', pendingWriteCount: 20, cursor: 'previous-cursor',
+    appendState: { knownRecordIds: [], fieldIds: ['identity'], pendingCount: 20 } });
+  await f.readAvailablePosts({ taskId: 'old-upsert', targetTableId: 'B', writeMode: 'upsert' });
+  assert.deepEqual(f.calls.map(call => call.data.limit), [20, 100]);
+  assert.equal(f.calls[0].data.after_id, 'previous-cursor');
+});
+
+for (const appendState of [undefined, {}, { knownRecordIds: {}, fieldIds: ['identity'], pendingCount: 20 },
+  { knownRecordIds: [], fieldIds: [], pendingCount: 20 }, { knownRecordIds: [], fieldIds: ['identity'], pendingCount: 10 }]) {
+  test(`追加恢复缺少可靠历史行核对信息时不读结果：${JSON.stringify(appendState)}`, async () => {
+    const task = { taskId: 'uncertain', targetTableId: 'B', writeMode: 'append', pendingWrite: true, pendingWriteCount: 20, appendState };
+    const before = structuredClone(task), f = fixture(task);
+    await assert.rejects(f.readAvailablePosts(task), error => {
+      assert.equal(error.stopPolling, true);
+      assert.notEqual(error.requiresReopen, true);
+      assert.match(error.message, /无法区分历史行.*本批新增/);
+      return true;
+    });
+    assert.equal(f.calls.length, 0);
+    assert.deepEqual(task, before);
   });
 }

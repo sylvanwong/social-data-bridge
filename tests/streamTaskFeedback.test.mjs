@@ -341,7 +341,7 @@ for (const [page, taskName] of pages.slice(1)) {
         active = { getFieldById: () => { throw new Error('读取了切换后的表'); } };
         return links.map((_, index) => index);
       } }),
-      getFieldById: async () => ({ getCell: async id => ({ getValue: async () => links[id] }) }),
+      getFieldById: async () => ({ getValue: async id => links[id] }),
     };
     let active = source, submitted;
     const { bindings, handler } = fixture(t, page, taskName, {

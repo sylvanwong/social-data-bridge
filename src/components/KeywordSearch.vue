@@ -1,4 +1,5 @@
 <script setup>
+import { getPendingWriteLimit } from '../utils/taskWriteState.mjs';
 import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import { getTaskStoppingText } from '@/utils/taskStopText';
 import TaskFeedback from './TaskFeedback.vue';
@@ -404,11 +405,12 @@ const keywordStreamTask = useIncrementalTask({
     url: keywordTaskApiPath(task, '/v1/feishu/post/list'),
     method: 'post', baseURL: task.apiBaseUrl ?? API_BASE_URL,
     headers: { authorization: `Bearer ${props.api_key}` },
-    data: { task_id: task.taskId, after_id: task.cursor || '', limit: 40 },
+    data: { task_id: task.taskId, after_id: task.cursor || '', limit: getPendingWriteLimit(task, 40) ?? 40 },
   })).data,
   writeBatch: async (items, task, controls) => {
     const reconcile = task.pendingWrite ?? !!task.targetTableId;
     task.pendingWrite = reconcile;
+    const appendState = task.writeMode === 'append' ? (task.appendState ||= {}) : undefined;
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', task.selectedFieldKeys, {
       stopAfterCurrentBatch: true,
       initializingTableId: task.initializingTableId,
@@ -421,11 +423,12 @@ const keywordStreamTask = useIncrementalTask({
       uploadBatchSize: 5,
       writeMode: task.writeMode || 'upsert',
       uniqueKey: 'aweme_id',
-      reconcile,
+      reconcile, appendState,
       assertActive: controls.assertActive,
       onBeforeWrite: async () => {
         controls.assertActive();
         task.pendingWrite = true;
+        task.pendingWriteCount = items.length;
         await controls.saveProgress();
       },
       upsertCacheKey: task.taskId,
@@ -440,6 +443,7 @@ const keywordStreamTask = useIncrementalTask({
     controls.assertActive();
     task.targetTableId = result?.tableId || task.targetTableId;
     task.pendingWrite = false;
+    delete task.pendingWriteCount;
   },
   onProgress: (status, task, phase) => {
     clearing.value = phase === 'clearing';

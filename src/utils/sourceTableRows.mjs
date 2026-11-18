@@ -29,8 +29,7 @@ export async function readSourceRows(table, recordIds, fieldId, toRow, assertMou
   const field = assertMounted(await table.getFieldById(fieldId));
   const rows = assertMounted(await Promise.all(recordIds.map(async recordId => {
     try {
-      const cell = assertMounted(await field.getCell(recordId));
-      return toRow(recordId, assertMounted(await cell.getValue()));
+      return toRow(recordId, assertMounted(await field.getValue(recordId)));
     } catch {
       assertMounted();
       return null;

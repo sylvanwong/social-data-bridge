@@ -6,6 +6,7 @@ import ProfileFetch from './ProfileFetch.vue'
 import KeywordSearch from './KeywordSearch.vue'
 import BloggerSearch from './BloggerSearch.vue'
 import CommentFetch from './CommentFetch.vue'
+import ProductReviewFetch from './ProductReviewFetch.vue'
 import VideoDataFetch from './VideoDataFetch.vue'
 import VideoCopySummary from './VideoCopySummary.vue'
 import BloggerInfoFetch from './BloggerInfoFetch.vue'
@@ -19,6 +20,7 @@ import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 const api_key = ref("");
 const api_key_disabled = ref(true);
 const currentPage = ref("home");
+const currentCategory = ref("works");
 
 const PLATFORM_CONFIG_NAMES = {
   search: 'feishu_social_type',
@@ -140,8 +142,23 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
     <!-- 功能分组卡片区 -->
     <div class="cards-section">
-      <div class="group-title">音视频</div>
-      <div class="cards-grid">
+      <div class="category-tabs" role="group" aria-label="数据分类">
+        <button
+          type="button"
+          class="category-tab"
+          :class="{ active: currentCategory === 'works' }"
+          :aria-pressed="currentCategory === 'works'"
+          @click="currentCategory = 'works'"
+        >作品数据</button>
+        <button
+          type="button"
+          class="category-tab"
+          :class="{ active: currentCategory === 'products' }"
+          :aria-pressed="currentCategory === 'products'"
+          @click="currentCategory = 'products'"
+        >商品数据</button>
+      </div>
+      <div v-if="currentCategory === 'works'" class="cards-grid">
         <div class="arco-card" @click="currentPage = 'video'">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
@@ -260,6 +277,17 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           <span class="func-name">搜索推荐词</span>
         </div>
       </div>
+      <div v-else class="cards-grid">
+        <button type="button" class="arco-card" @click="currentPage = 'productReview'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              <path d="m9 10 2 2 4-4"></path>
+            </svg>
+          </div>
+          <span class="func-name">商品评价</span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -288,6 +316,9 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
   <!-- 二级页面：评论列表获取 -->
   <CommentFetch v-if="currentPage === 'comment'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <!-- 二级页面：商品评价 -->
+  <ProductReviewFetch v-if="currentPage === 'productReview'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：作品详情获取 -->
   <VideoDataFetch v-if="currentPage === 'video'" :api_key="api_key" @back="currentPage = 'home'" />
@@ -554,13 +585,39 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   padding: 32px 20px 32px;
   box-sizing: border-box;
 }
-.group-title {
+.category-tabs {
+  display: flex;
+  width: 100%;
+  gap: 0;
+  margin-bottom: var(--app-space-group);
+}
+.category-tab {
+  flex: 1 1 50%;
+  padding: 0 0 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  font-family: var(--app-font-family);
   font-size: var(--app-font-size-body);
   font-weight: var(--app-font-weight-regular);
   color: #86909C;
-  margin-bottom: 8px;
   letter-spacing: 0.3px;
   line-height: 22px;
+  text-align: center;
+  cursor: pointer;
+}
+.category-tab:hover {
+  color: #A8071A;
+}
+.category-tab.active {
+  color: #A8071A;
+  border-bottom-color: currentColor;
+  font-weight: var(--app-font-weight-medium);
+}
+.category-tab:focus-visible {
+  outline: 2px solid #8A0515;
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 .cards-grid {
   display: grid;
@@ -570,6 +627,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
 /* 卡片 */
 .arco-card {
+  font-family: var(--app-font-family);
   display: flex;
   flex-direction: column;
   align-items: center;
