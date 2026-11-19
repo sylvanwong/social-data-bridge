@@ -164,6 +164,50 @@ test('写表成功但保存游标失败，重新打开仍核对该批而不重�
   assert.deepEqual(f.ids(), ['a', 'b', 'c', 'd']);
 });
 
+for (const mode of ['append', 'upsert']) {
+  for (const repeated of [false, true]) {
+    test(`${mode}真实写表后进度${repeated ? '连续失败，恢复核对' : '已保存但响应失败，延迟补存'}不重复新增`, async () => {
+      const f = fixture({ mode }); f.succeedWrites();
+      let attempts = 0;
+      f.failSave(task => {
+        if (task.cursor === '2' && ++attempts <= (repeated ? 2 : 1)) {
+          if (!repeated) f.seedSaved(task);
+          throw new Error('set data error, msg: set block entity error');
+        }
+        return false;
+      });
+      const engine = f.open();
+      const running = engine.task.start(f.initial);
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      const retry = [...engine.timers].find(([, timer]) => timer.delay === 1000);
+      assert.ok(retry);
+      assert.deepEqual(f.ids(), ['a', 'b']);
+      const originalRows = f.rows.map(row => row.recordId);
+      assert.deepEqual(f.writes, [2]);
+      assert.equal(attempts, 1);
+      engine.timers.delete(retry[0]); retry[1].fn();
+      await running;
+      if (repeated) {
+        assert.equal(attempts, 2);
+        assert.equal(f.errors.length, 1);
+        assert.equal(engine.timers.size, 0);
+        assert.equal(f.saved().cursor, '');
+        assert.equal(f.saved().writtenCount, 0);
+        f.failSave(false);
+        await engine.task.resume();
+      } else assert.equal(f.errors.length, 0);
+      assert.deepEqual(f.ids(), ['a', 'b', 'c', 'd']);
+      assert.deepEqual(f.rows.slice(0, 2).map(row => row.recordId), originalRows);
+      assert.deepEqual(f.writes, [2, 2]);
+      assert.equal(f.saved().writtenCount, 4);
+      await engine.tick();
+      assert.deepEqual(f.saved(), {});
+      assert.deepEqual(f.finished, [4]);
+      engine.task.stop();
+    });
+  }
+}
+
 test('核对查询失败保持暂停，不写、不推进游标；再次恢复仍会重新核对', async () => {
   const f = fixture(); await f.open().task.start(f.initial);
   f.failScan(true);

@@ -68,7 +68,37 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
   };
   const save = async (task) => {
     assertNoPendingClear();
-    return bounded(() => trackMutation(() => bitable.bridge.setData(storageKey, task)), '保存写入进度');
+    const version = lifecycleVersion;
+    const owner = activeTask;
+    const snapshot = JSON.parse(JSON.stringify(task));
+    let saving = true;
+    try {
+      return await bounded(() => trackMutation(async () => {
+        try {
+          return await bitable.bridge.setData(storageKey, snapshot);
+        } catch (error) {
+          // 只补存已识别的宿主存储错误；超时或未知错误仍按原保护暂停。
+          const invalidAuth = error.code === 'INVALID_API_KEY' || [400, 401, 403].includes(error.response?.status);
+          if (error.message !== 'set data error, msg: set block entity error' || invalidAuth || error.stopPolling || error.requiresReopen
+            || !saving || version !== lifecycleVersion || activeTask !== owner) throw error;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          if (!saving || version !== lifecycleVersion || activeTask !== owner) throw error;
+          assertNoPendingClear();
+          return await bitable.bridge.setData(storageKey, snapshot);
+        }
+      }), '保存写入进度');
+    } catch (error) {
+      // 保存自身已经决定是否重试，外层不能再次补存或自动重发批次。
+      if (!error.stopPolling && !error.requiresReopen) {
+        const saveError = new Error(`保存任务进度失败：${error.message || '未知错误'}。已暂停，已写入的数据会保留，请点击「恢复任务」继续。`, { cause: error });
+        saveError.stopPolling = true;
+        throw saveError;
+      }
+      error.stopPolling = true;
+      throw error;
+    } finally {
+      saving = false;
+    }
   };
   const clear = async () => {
     assertNoPendingClear();
