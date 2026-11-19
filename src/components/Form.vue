@@ -278,6 +278,15 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
         </div>
       </div>
       <div v-else class="cards-grid">
+        <button type="button" class="arco-card" @click="currentPage = 'productDetail'">
+          <div class="func-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+              <path d="m12 3 9 5v8l-9 5-9-5V8l9-5z"></path>
+              <path d="m3 8 9 5 9-5M12 13v8M7.5 5.5l9 5"></path>
+            </svg>
+          </div>
+          <span class="func-name">商品详情</span>
+        </button>
         <button type="button" class="arco-card" @click="currentPage = 'productReview'">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
@@ -319,6 +328,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
   <!-- 二级页面：商品评价 -->
   <ProductReviewFetch v-if="currentPage === 'productReview'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <VideoDataFetch v-if="currentPage === 'productDetail'" product-detail :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：作品详情获取 -->
   <VideoDataFetch v-if="currentPage === 'video'" :api_key="api_key" @back="currentPage = 'home'" />

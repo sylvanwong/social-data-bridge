@@ -46,6 +46,8 @@ export const feishuRequest = (config) => service({
 });
 
 service.interceptors.request.use((config) => {
+  // 严格限定业务参数的接口可跳过插件版本注入。
+  if (config.skipPluginVersion === true) return config;
   const method = (config.method || 'get').toLowerCase();
 
   if (method === 'get') {

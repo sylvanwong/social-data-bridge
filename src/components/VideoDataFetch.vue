@@ -1,5 +1,6 @@
 <script setup>
 import { extractHttpUrls, parseManualUrls as parseDelimitedUrls } from '../utils/sourceLinks.mjs';
+import { createProductDetailFields, buildProductDetailRequest } from '../utils/productDetail.mjs';
 import { nextTableName } from '../utils/tableNames.mjs';
 import { readRecordIds, readSourceRows } from '../utils/sourceTableRows.mjs';
 import { resolveWritableField } from "../utils/tableFields.js";
@@ -17,9 +18,11 @@ const emit = defineEmits(['back']);
 
 const props = defineProps({
   api_key: String,
+  productDetail: Boolean,
 })
 
-const TASK_PLUGIN_TYPE = 'video_data';
+const TASK_PLUGIN_TYPE = props.productDetail ? 'product_detail' : 'video_data';
+const detailSubject = props.productDetail ? '商品' : '作品';
 const TASK_API_PATH = buildFeishuApiPath('/v1/feishu/schedule/tasks');
 const TABLE_CONFIG_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
 const TABLE_CONFIGS_API_PATH = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-configs');
@@ -35,7 +38,7 @@ const formData = ref({
   writeMode: 'upsert',
   executionMode: 'immediate'
 });
-const MANUAL_TABLE_BASE_NAME = '作品详情获取';
+const MANUAL_TABLE_BASE_NAME = `${detailSubject}详情获取`;
 const ATTACHMENT_DOWNLOAD_TIMEOUT = 30000;
 const REPEAT_TYPE_OPTIONS = [
   { value: 'none', label: '不重复' },
@@ -71,7 +74,8 @@ const httpToHttps = (url) => {
   return url;
 };
 
-const FIELD_CONFIG = [
+const FIELD_CONFIG = typeof props !== 'undefined' && props.productDetail
+  ? createProductDetailFields({ FieldType, DateFormatter, NumberFormatter }) : [
   { key: "nickname", name: "作者名称", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.nickname ?? "" },
   { key: "uid", name: "作者账号", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.uid ?? "" },
   { key: "user_id", name: "作者ID", type: FieldType.Text, defaultSelected: true, getValue: (item) => item?.user_id ?? "" },
@@ -99,7 +103,7 @@ const FIELD_CONFIG = [
   { key: "update_time", name: "更新时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.update_time == null || item.update_time === '' ? null : new Date(item.update_time).getTime()) },
   { key: "ctime", name: "提取时间", type: FieldType.DateTime, defaultSelected: true, dateFormat: DateFormatter.DATE_TIME, getValue: (item) => (item?.ctime == null || item.ctime === '' ? null : new Date(item.ctime).getTime()) },
 ];
-const FIELD_SELECTION_STORAGE_KEY = 'video_data_selected_fields_v2';
+const FIELD_SELECTION_STORAGE_KEY = props.productDetail ? 'product_detail_selected_fields_v1' : 'video_data_selected_fields_v2';
 const FIELD_TYPE_NAME = {
   [FieldType.Text]: '文本',
   [FieldType.Number]: '数字',
@@ -750,7 +754,7 @@ const getActiveFieldConfigs = (keys = selectedFieldKeys.value) => FIELD_CONFIG.f
 const getWriteFieldConfigs = (keys = selectedFieldKeys.value, writeMode = formData.value.writeMode) => {
   const fields = getActiveFieldConfigs(keys);
   if (writeMode === 'upsert') {
-    for (const key of ['social_type', 'social_id']) {
+    for (const key of (typeof props !== 'undefined' && props.productDetail ? ['product_id'] : ['social_type', 'social_id'])) {
       const config = FIELD_CONFIG.find(field => field.key === key);
       if (config && !fields.some(field => field.key === key)) {
         fields.push(config);
@@ -1319,6 +1323,30 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
 
   const getFieldId = (key) => options.fieldMappings?.find(item => item.source_key === key && item.target_field_id)?.target_field_id
     || fieldMetaMap.get(FIELD_CONFIG.find(field => field.key === key)?.name);
+  if (typeof props !== 'undefined' && props.productDetail) {
+    const idFieldId = getFieldId('product_id');
+    if (!idFieldId) throw new Error('更新或新增需要“商品ID”字段');
+    const keyOf = value => Array.isArray(value) ? value.map(keyOf).join('') : String(value?.text ?? value ?? '').trim();
+    const existing = new Map();
+    let token;
+    do {
+      const page = await table.getRecordsByPage({ pageSize: 200, pageToken: token });
+      for (const row of page.records || []) {
+        const key = keyOf(row.fields?.[idFieldId]);
+        if (key) existing.set(key, row.recordId);
+      }
+      token = page.hasMore ? page.pageToken : undefined;
+    } while (token !== undefined);
+    const updates = [], creates = [];
+    list.forEach((item, index) => {
+      const recordId = existing.get(keyOf(item.product_id));
+      if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
+      else creates.push(records[index]);
+    });
+    if (updates.length) await table.setRecords(updates);
+    if (creates.length) await table.addRecords(creates);
+    return;
+  }
   const platformFieldId = getFieldId('social_type');
   const videoIdFieldId = getFieldId('social_id');
   if (!platformFieldId || !videoIdFieldId) throw new Error('更新或新增需要“平台”和“作品ID”字段');
@@ -1374,10 +1402,11 @@ const fetchVideoDataByRows = async (rowList, {
       console.log(`正在处理第 ${index + 1}/${rowList.length} 条:`, { url, rawValue });
 
       const response = await feishuRequest({
-        url: buildFeishuApiPath('/v1/feishu/social_info'),
+        url: buildFeishuApiPath(props.productDetail ? '/v1/feishu/product/detail' : '/v1/feishu/social_info'),
         method: 'post',
+        skipPluginVersion: props.productDetail,
         headers: { 'authorization': `Bearer ${props.api_key}` },
-        data: {
+        data: props.productDetail ? buildProductDetailRequest(url) : {
           url,
           raw_value: rawValue,
           source: 'feishu_bitable_video_fetch',
@@ -1389,6 +1418,9 @@ const fetchVideoDataByRows = async (rowList, {
       console.log(`接口返回数据:`, res);
 
       if (res.sta === 0 && res.data) {
+        if (props.productDetail && (!String(res.data.product_id || '').trim() || !String(res.data.title || '').trim())) {
+          throw new Error('商品详情缺少商品ID或商品标题');
+        }
         dataFetched = true;
         const item = { ...res.data, __recordId: recordId };
         if (onSuccess) {
@@ -1399,7 +1431,7 @@ const fetchVideoDataByRows = async (rowList, {
         continue;
       }
 
-      const errorMessage = res?.msg || res?.message || '获取音视频数据失败';
+      const errorMessage = res?.msg || res?.message || (props.productDetail ? '获取商品详情失败' : '获取音视频数据失败');
       console.error(`接口返回错误:`, errorMessage);
       if (writeFailureToCurrent && recordId && fieldNameToId) {
         await writeErrorMessageToFirstField(sourceTable, recordId, errorMessage, fieldNameToId, activeFieldConfigs);
@@ -1469,7 +1501,7 @@ const validateBaseForm = (config) => {
 
   if (config.mode === 'table') {
     if (!config.videoLinkFieldId) {
-      ElMessage({ plain: true, message: '请选择作品链接所在字段', type: 'warning', duration: 3000 });
+      ElMessage({ plain: true, message: `请选择${props.productDetail ? '商品' : '作品'}链接所在字段`, type: 'warning', duration: 3000 });
       return false;
     }
 
@@ -1479,13 +1511,13 @@ const validateBaseForm = (config) => {
     }
   } else {
     if (!config.manualUrls || !config.manualUrls.trim()) {
-      ElMessage({ plain: true, message: '请输入作品链接', type: 'warning', duration: 3000 });
+      ElMessage({ plain: true, message: `请输入${props.productDetail ? '商品' : '作品'}链接`, type: 'warning', duration: 3000 });
       return false;
     }
 
     const urls = parseManualUrls(config.manualUrls);
     if (urls.length === 0) {
-      ElMessage({ plain: true, message: '请至少输入一个有效的作品链接', type: 'warning', duration: 3000 });
+      ElMessage({ plain: true, message: `请至少输入一个有效的${props.productDetail ? '商品' : '作品'}链接`, type: 'warning', duration: 3000 });
       return false;
     }
   }
@@ -2194,7 +2226,7 @@ const handleTableModeSubmit = async () => {
 
   } catch (error) {
     console.error('获取数据失败:', error);
-    const errorMessage = error?.response?.data?.msg || error?.message || '获取音视频数据失败';
+    const errorMessage = error?.response?.data?.msg || error?.message || (props.productDetail ? '获取商品详情失败' : '获取音视频数据失败');
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -2251,7 +2283,7 @@ const handleManualModeSubmit = async () => {
     );
   } catch (error) {
     console.error('获取数据失败:', error);
-    const errorMessage = error?.response?.data?.msg || error?.message || '获取音视频数据失败';
+    const errorMessage = error?.response?.data?.msg || error?.message || (props.productDetail ? '获取商品详情失败' : '获取音视频数据失败');
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -2298,6 +2330,7 @@ const stepTaskNumber = (delta) => {
 };
 
 const showToast = (text, isLoading = true, options = {}) => {
+  if (props.productDetail) text = text.replace(/作品|音视频/g, '商品');
   if (isLoading) {
     const progressOptions = { stopping: stopRequested.value, ...options };
     if (options.begin) taskFeedback.begin(text, progressOptions);
@@ -2328,7 +2361,7 @@ onMounted(() => {
 
   Promise.all([
     loadSelectedFieldKeys(),
-    loadTaskList(),
+    props.productDetail ? Promise.resolve() : loadTaskList(),
     loadTableOutputConfigs(),
   ]).then(([, , configsLoaded]) => {
     if (configsLoaded && initialMainConfigReadId === mainConfigReadId.value
@@ -2494,13 +2527,13 @@ watch(
           <polyline points="15 18 9 12 15 6"></polyline>
         </svg>
       </span>
-      <span class="sub-page-title">作品详情获取</span>
+      <span class="sub-page-title">{{ detailSubject }}详情获取</span>
     </div>
     <div class="form-card">
       <div class="execution-config" :inert="loading ? '' : null" :aria-busy="loading">
       <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
       <div class="choice-group">
-        <div class="choice-label">作品链接来源</div>
+        <div class="choice-label">{{ detailSubject }}链接来源</div>
         <el-radio-group v-model="formData.mode" class="choice-radio-group">
           <el-radio value="table">从表格选取</el-radio>
           <el-radio value="manual">手动输入</el-radio>
@@ -2510,7 +2543,7 @@ watch(
         <template v-if="formData.mode === 'table'">
         <el-form-item label="">
           <div slot="label" class="c-label">
-            作品链接所在字段
+            {{ detailSubject }}链接所在字段
           </div>
           <el-select
             v-model="formData.videoLinkFieldId"
@@ -2569,14 +2602,14 @@ watch(
         <template v-else>
           <el-form-item>
             <div slot="label" class="c-label">
-              作品链接
+              {{ detailSubject }}链接
             </div>
             <el-input
               v-model="formData.manualUrls"
               type="textarea"
               :rows="4"
               class="c-input"
-              placeholder="请输入作品链接，支持批量输入（多个链接请换行或用逗号分隔）"
+              :placeholder="`请输入${detailSubject}链接，支持批量输入（多个链接请换行或用逗号分隔）`"
             />
           </el-form-item>
         </template>
@@ -2642,7 +2675,7 @@ watch(
             </div>
           </div>
 
-          <el-form-item label="" class="choice-form-item">
+          <el-form-item v-if="!productDetail" label="" class="choice-form-item">
             <div class="choice-label">执行方式</div>
             <el-radio-group v-model="formData.executionMode" class="choice-radio-group">
               <el-radio value="immediate">立即执行</el-radio>
@@ -2775,7 +2808,7 @@ watch(
       </div>
     </div>
 
-    <div class="task-manager">
+    <div v-if="!productDetail" class="task-manager">
       <div
         class="task-manager-header"
         :class="{ expanded: taskManagerExpanded }"
@@ -2834,6 +2867,7 @@ watch(
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
 
     <el-dialog
+      v-if="!productDetail"
       v-model="taskDialogVisible"
       :title="taskDialogMode === 'edit' ? '编辑定时任务' : '新建定时任务'"
       width="370px"
