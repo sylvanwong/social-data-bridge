@@ -64,6 +64,67 @@ function fixture(t, page, taskName, overrides = {}) {
   return { feedback, bindings, notifications, handler, callbacks, app };
 }
 
+for (const [page, taskName] of pages) {
+  for (const stage of ['before-write', 'after-write']) {
+    test(`${page}：${stage}保存重试耗尽后显示原原因和暂停恢复说明，保留恢复入口`, async t => {
+      const { feedback: f, bindings: b, callbacks } = fixture(t, page, taskName);
+      const source = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
+        .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
+      let saved, attempts = 0, sequence = 0;
+      const timers = new Map(), rows = [];
+      const sdkError = Object.assign(new Error('set data error, msg: set block entity error'), { code: 500 });
+      const bitable = { base: { getSelection: async () => ({ baseId: 'base' }) }, bridge: {
+        setData: async (_, task) => {
+          if ((stage === 'before-write' && task.pendingWrite) || (stage === 'after-write' && task.cursor === '1')) {
+            attempts++;
+            throw sdkError;
+          }
+          saved = structuredClone(task);
+        },
+        getData: async () => saved,
+      } };
+      const create = new Function('bitable', 'setTimeout', 'clearTimeout', `${source}; return useIncrementalTask;`)(bitable,
+        (fn, delay) => { timers.set(++sequence, { fn, delay }); return sequence; }, id => timers.delete(id));
+      let reportedError;
+      const task = create({ storageKey: 'feedback-test', operationTimeoutMs: 180000,
+        getStatus: async () => ({ status: 0 }),
+        getResults: async () => ({ items: [{ id: 'one' }], next_cursor: '1', has_more: false }),
+        writeBatch: async (items, task, controls) => {
+          task.pendingWrite = true;
+          await controls.saveProgress();
+          rows.push(...items.map(item => item.id));
+          task.pendingWrite = false;
+        },
+        onError: (error, task) => { reportedError = error; callbacks.onError(error, task); },
+      });
+      t.after(() => task.stop());
+      b.loading.value = true;
+      f.begin('正在写入结果…');
+      const running = task.start({ taskId: 'task-1', targetTableId: 'table', pendingWrite: false });
+      for (let i = 0; i < 20 && ![...timers.values()].some(timer => timer.delay === 1000); i++) await flush();
+      assert.equal(attempts, 1);
+      assert.equal(f.toastType.value, 'loading');
+      assert.equal(b.loading.value, true);
+      const [id, retry] = [...timers].find(([, timer]) => timer.delay === 1000);
+      timers.delete(id); retry.fn();
+      await running;
+      assert.equal(attempts, 2);
+      assert.equal(reportedError.cause, sdkError);
+      assert.equal(reportedError.stopPolling, true);
+      assert.equal(f.taskNotice.value, '保存任务进度失败：set data error, msg: set block entity error。已暂停，已写入的数据会保留，请点击「恢复任务」继续。');
+      assert.equal(f.toastText.value, f.taskNotice.value);
+      assert.equal(f.toastType.value, 'error');
+      assert.equal(b.hasRecoverableTask.value, true);
+      assert.equal(b.recoveryRequiresReopen.value, false);
+      assert.equal(b.loading.value, false);
+      assert.equal(saved.cursor, '');
+      assert.equal(saved.writtenCount, 0);
+      assert.deepEqual(rows, stage === 'before-write' ? [] : ['one']);
+      assert.equal(timers.size, 0);
+    });
+  }
+}
+
 for (const [page, taskName, resumeName, postName, unit] of [
   ['ProfileFetch', 'profileStreamTask', 'resumeSavedStreamTask', 'postProfileTask', '作者作品'],
   ['SeriesFetch', 'seriesStreamTask', 'resumeSeriesTask', 'postSeriesTask', '短剧'],

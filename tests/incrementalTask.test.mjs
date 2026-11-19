@@ -22,6 +22,224 @@ function harness(options = {}) {
     tick: async () => { const [id, timer] = [...timers].find(([, timer]) => timer.delay < 60000); timers.delete(id); await timer.fn(); } };
 }
 
+const flush = async () => { for (let i = 0; i < 80; i++) await Promise.resolve(); };
+const releaseSaveRetry = async h => {
+  const retry = [...h.timers].find(([, timer]) => timer.delay === 1000);
+  assert.ok(retry, '保存失败后应等待 1 秒，而不是立即暂停或继续写表');
+  h.timers.delete(retry[0]);
+  retry[1].fn();
+  await flush();
+};
+
+for (const stage of ['before-write', 'after-write']) {
+  for (const persisted of [false, true]) {
+    test(`${stage}进度保存${persisted ? '已生效但响应报错' : '失败'}：等1秒重存同一快照，不重复写表`, async () => {
+      let attempts = 0;
+      const payloads = [], rows = [];
+      const h = harness({ operationTimeoutMs: 180000,
+        getResults: async task => ({ items: task.cursor ? [] : [{ id: 'one' }], next_cursor: '1', has_more: false }),
+        writeBatch: async (items, task, controls) => {
+          task.pendingWrite = true;
+          task.pendingWriteCount = items.length;
+          await controls.saveProgress();
+          controls.assertActive();
+          rows.push(...items.map(item => item.id));
+          task.pendingWrite = false;
+          delete task.pendingWriteCount;
+        },
+      });
+      const save = h.bitable.bridge.setData;
+      h.bitable.bridge.setData = async (key, value) => {
+        if ((stage === 'before-write' && value.pendingWrite) || (stage === 'after-write' && value.cursor === '1')) {
+          payloads.push(structuredClone(value));
+          if (++attempts === 1) {
+            if (persisted) await save(key, value);
+            throw new Error('set data error, msg: set block entity error');
+          }
+        }
+        return save(key, value);
+      };
+      try {
+        const running = h.task.start({ taskId: 'original', targetTableId: 'table', selectedFieldKeys: ['id'] });
+        await flush();
+        assert.equal(attempts, 1);
+        assert.deepEqual(rows, stage === 'before-write' ? [] : ['one']);
+        assert.deepEqual(h.errors, []);
+        // 外部对象变化不能改变已经开始保存的检查点。
+        h.task.getActiveTask().selectedFieldKeys.push('later-field');
+        await releaseSaveRetry(h);
+        await running;
+        assert.deepEqual(payloads[0], payloads[1]);
+        assert.deepEqual(rows, ['one']);
+        assert.equal(h.saved().cursor, '1');
+        assert.equal(h.saved().writtenCount, 1);
+        await h.tick();
+        assert.deepEqual(h.finished, [1]);
+        assert.deepEqual(h.saved(), {});
+        assert.deepEqual(h.errors, []);
+      } finally { h.task.stop(); }
+    });
+  }
+}
+
+for (const stage of ['before-write', 'after-write']) {
+  test(`${stage}进度连续保存失败只尝试两次，外层不再补存，恢复原游标`, async () => {
+    let attempts = 0, fail = true;
+    const rows = new Map();
+    const h = harness({ getResults: async task => ({ items: task.cursor ? [] : [{ id: 'one' }], next_cursor: '1', has_more: false }),
+      writeBatch: async (items, task, controls) => {
+        task.pendingWrite = true;
+        task.pendingWriteCount = items.length;
+        await controls.saveProgress();
+        controls.assertActive();
+        for (const item of items) rows.set(item.id, item);
+        task.pendingWrite = false;
+        delete task.pendingWriteCount;
+      },
+    });
+    const save = h.bitable.bridge.setData;
+    h.bitable.bridge.setData = async (key, value) => {
+      if (fail && ((stage === 'before-write' && value.pendingWrite) || (stage === 'after-write' && value.cursor === '1'))) {
+        attempts++;
+        throw new Error('set data error, msg: set block entity error');
+      }
+      return save(key, value);
+    };
+    try {
+      const running = h.task.start({ taskId: 'original', targetTableId: 'table', pendingWrite: false });
+      await flush();
+      await releaseSaveRetry(h);
+      await running;
+      assert.equal(attempts, 2);
+      assert.equal(h.errors.length, 1);
+      assert.equal(h.errors[0].message, '保存任务进度失败：set data error, msg: set block entity error。已暂停，已写入的数据会保留，请点击「恢复任务」继续。');
+      assert.equal(h.errors[0].cause.message, 'set data error, msg: set block entity error');
+      assert.equal(h.errors[0].stopPolling, true);
+      assert.equal(h.task.getActiveTask(), null);
+      assert.equal(h.saved().cursor, '');
+      assert.equal(h.saved().writtenCount, 0);
+      assert.equal(h.saved().pendingWrite, stage === 'after-write');
+      assert.equal(h.timers.size, 0);
+      fail = false;
+      await h.task.resume();
+      assert.deepEqual([...rows.keys()], ['one']);
+      assert.equal(h.saved().writtenCount, 1);
+      await h.tick();
+      assert.deepEqual(h.finished, [1]);
+    } finally { h.task.stop(); }
+  });
+}
+
+for (const stage of ['before-write', 'after-write']) {
+  test(`${stage}重试等待期间仍有在途保存保护，停止后不再补存旧任务或推进游标`, async () => {
+    const h = harness({
+      getResults: async task => ({ items: task.cursor ? [] : [{ id: 'one' }], next_cursor: '1', has_more: false }),
+      writeBatch: async (items, task, controls) => {
+        task.pendingWrite = true;
+        await controls.saveProgress();
+        h.calls.push('write');
+      },
+    });
+    const save = h.bitable.bridge.setData;
+    let attempts = 0;
+    h.bitable.bridge.setData = async (key, value) => {
+      if ((stage === 'before-write' && value.pendingWrite) || (stage === 'after-write' && value.cursor === '1')) {
+        attempts++; throw new Error('set data error, msg: set block entity error');
+      }
+      return save(key, value);
+    };
+    const running = h.task.start({ taskId: 'original' });
+    await flush();
+    assert.equal(attempts, 1);
+    h.task.stop();
+    await assert.rejects(h.task.resume(), error => error.pendingMutation && error.requiresReopen);
+    await releaseSaveRetry(h);
+    await running;
+    assert.equal(attempts, 1);
+    assert.deepEqual(h.calls, stage === 'before-write' ? [] : ['write']);
+    assert.deepEqual(h.errors, []);
+    assert.equal(h.saved().cursor, '');
+    h.bitable.bridge.setData = save;
+    await h.task.start({ taskId: 'new' });
+    assert.equal(h.saved().taskId, 'new');
+    assert.equal(h.saved().writtenCount, 1);
+    h.task.stop();
+  });
+}
+
+test('保存已超时后原请求才报错，不启动延迟重试；晚响应前仍禁止恢复', async () => {
+  const h = harness({ operationTimeoutMs: 180000 });
+  const save = h.bitable.bridge.setData;
+  let rejectSave, attempts = 0;
+  h.bitable.bridge.setData = (key, value) => {
+    if (++attempts === 1) return new Promise((_, reject) => { rejectSave = reject; });
+    return save(key, value);
+  };
+  const running = h.task.start({ taskId: 'original' });
+  await flush();
+  const [id, timeout] = [...h.timers].find(([, timer]) => timer.delay === 180000);
+  h.timers.delete(id); timeout.fn();
+  await running;
+  assert.equal(h.errors.length, 1);
+  assert.equal(h.errors[0].requiresReopen, true);
+  await assert.rejects(h.task.resume(), error => error.pendingMutation);
+  rejectSave(new Error('set data error, msg: set block entity error'));
+  await flush();
+  assert.equal(attempts, 1);
+  assert.equal(h.timers.size, 0);
+  assert.deepEqual(h.calls, []);
+  h.task.stop();
+});
+
+test('重试等待期间达到原保存超时，不再发起第二次保存', async () => {
+  const h = harness({ operationTimeoutMs: 180000 });
+  let attempts = 0;
+  h.bitable.bridge.setData = async () => { attempts++; throw new Error('set data error, msg: set block entity error'); };
+  const running = h.task.start({ taskId: 'original' });
+  await flush();
+  const retry = [...h.timers].find(([, timer]) => timer.delay === 1000);
+  assert.ok(retry);
+  const [id, timeout] = [...h.timers].find(([, timer]) => timer.delay === 180000);
+  h.timers.delete(id); timeout.fn();
+  await running;
+  assert.equal(h.errors[0].requiresReopen, true);
+  await releaseSaveRetry(h);
+  assert.equal(attempts, 1);
+  assert.deepEqual(h.calls, []);
+  assert.equal(h.timers.size, 0);
+});
+
+for (const [name, detail] of [
+  ['权限错误', { response: { status: 403 } }],
+  ['参数错误', { response: { status: 400 } }],
+  ['鉴权错误', { code: 'INVALID_API_KEY' }],
+  ['原保护要求暂停', { stopPolling: true }],
+  ['原保护要求重开', { requiresReopen: true }],
+  ['未知错误', null],
+]) {
+  test(`非临时保存错误不重试或外层补存：${name}`, async () => {
+    const error = Object.assign(new Error(detail ? 'set data error, msg: set block entity error' : 'unknown SDK error'), detail);
+    const h = harness({ getResults: async () => ({ items: [] }), getStatus: async () => ({ status: 0 }) });
+    const save = h.bitable.bridge.setData;
+    let attempts = 0;
+    h.bitable.bridge.setData = async (key, value) => {
+      if (++attempts > 1) throw error;
+      return save(key, value);
+    };
+    await h.task.start({ taskId: 'original' });
+    assert.equal(attempts, 2, '首次身份保存成功，轮询保存失败后不得外层再补存');
+    assert.equal(h.errors.length, 1);
+    if (detail?.stopPolling || detail?.requiresReopen) assert.equal(h.errors[0], error);
+    else {
+      assert.equal(h.errors[0].cause, error);
+      assert.match(h.errors[0].message, /保存任务进度失败.*已暂停.*恢复任务/);
+    }
+    assert.equal(h.saved().taskId, 'original');
+    assert.equal(h.timers.size, 0);
+    h.task.stop();
+  });
+}
+
 test('停止后仍写完结果，成功保存游标，排空后结束', async () => {
   const h = harness();
   await h.task.start({ taskId: 'task' });
