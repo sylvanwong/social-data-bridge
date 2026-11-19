@@ -4,16 +4,18 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
+import { FieldType, DateFormatter, NumberFormatter } from '@lark-base-open/js-sdk';
 
 const source = parse(fs.readFileSync(new URL('../src/components/VideoDataFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
 const declarations = parseJS(source, { sourceType: 'module' }).program.body
   .filter(node => node.type === 'VariableDeclaration').flatMap(node => node.declarations);
 const load = (node, bindings) => new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
-const FieldType = { Number: 2, Text: 1, SingleSelect: 3, Attachment: 17 };
+const fieldConfigs = load(declarations.find(node => node.id.name === 'FIELD_CONFIG').init, {
+  props: { productDetail: false }, FieldType, DateFormatter, NumberFormatter,
+});
 for (const metric of ['view_count', 'coin_count']) {
-  const configNode = declarations.find(node => node.id.name === 'FIELD_CONFIG').init.elements
-    .find(node => node.properties.some(prop => prop.key.name === 'key' && prop.value.value === metric));
-  const config = load(configNode, { FieldType, NumberFormatter: { INTEGER: 'integer' } });
+  const config = fieldConfigs.find(field => field.key === metric);
+  assert.ok(config, `作品详情应保留 ${metric} 字段`);
   const normalizeFieldValue = load(declarations.find(node => node.id.name === 'normalizeFieldValue').init, { FieldType });
 
   for (const fieldType of [FieldType.Number, FieldType.Text]) {
