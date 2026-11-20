@@ -4,6 +4,7 @@ import { ElMessage } from "element-plus";
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import ProfileFetch from './ProfileFetch.vue'
 import KeywordSearch from './KeywordSearch.vue'
+import ProductSearch from './ProductSearch.vue'
 import BloggerSearch from './BloggerSearch.vue'
 import CommentFetch from './CommentFetch.vue'
 import ProductReviewFetch from './ProductReviewFetch.vue'
@@ -319,6 +320,10 @@ const fetchPlatformConfig = async (name, fallbackOptions = [], isCurrent = () =>
           </div>
           <span class="func-name">商品详情</span>
         </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('productSearch')">
+          <div class="func-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="10" cy="10" r="6" /><path d="m15 15 6 6M7 10h6M10 7v6" /></svg></div>
+          <span class="func-name">商品搜索</span>
+        </button>
         <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('productReview')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
@@ -357,6 +362,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = [], isCurrent = () =>
 
   <!-- 二级页面：作品评论 -->
   <CommentFetch v-if="currentPage === 'comment'" :api_key="api_key" @back="currentPage = 'home'" />
+
+  <ProductSearch v-if="currentPage === 'productSearch'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：商品评价 -->
   <ProductReviewFetch v-if="currentPage === 'productReview'" :api_key="api_key" @back="currentPage = 'home'" />
