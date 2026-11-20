@@ -1220,6 +1220,11 @@ const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFie
           throw new Error(`字段类型不匹配:字段"${config.name}"，仅支持${getExpectedFieldTypeName(config)}`);
         }
         if (config.type === FieldType.Attachment) {
+          if (getAttachmentUrls(config, item).length === 0) {
+            const cell = await field.createCell([]);
+            fields[fieldId] = await cell.getValue();
+            continue;
+          }
           const files = await createAttachmentFiles(config, item);
           if (files.length > 0) {
             const cell = await field.createCell(files.length === 1 ? files[0] : files);
@@ -1271,6 +1276,9 @@ const createCellValue = async (table, fieldId, item, config) => {
     throw new Error(`字段类型不匹配:字段"${config.name}"，仅支持${getExpectedFieldTypeName(config)}`);
   }
   if (config.type === FieldType.Attachment) {
+    if (getAttachmentUrls(config, item).length === 0) {
+      return await field.createCell([]);
+    }
     try {
       const files = await createAttachmentFiles(config, item);
       if (files.length === 0) {
