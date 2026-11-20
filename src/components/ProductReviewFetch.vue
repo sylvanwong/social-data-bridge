@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { bitable, FieldType } from '@lark-base-open/js-sdk';
+import { bitable, FieldType, NumberFormatter } from '@lark-base-open/js-sdk';
 
 import { ElMessage } from 'element-plus';
 import { feishuRequest, buildFeishuApiPath } from '@/utils/request';
@@ -34,20 +34,20 @@ const sortOptions = [
   { value: 'time_descending', label: '最新评价优先' },
 ];
 
-// 与商品评价任务结果的15个业务字段一一对应。
+// 14个输出字段按阅读顺序排列；两平台的有用数合并为一列。
 const FIELD_CONFIG = [
   { key: 'review_id', name: '评价ID', required: true },
   { key: 'social_type', name: '平台' },
   { key: 'product_url', name: '商品链接', type: FieldType.Url, allowedTypes: [FieldType.Url, FieldType.Text] },
   { key: 'user_name', name: '评价者名称', allowedTypes: [FieldType.Text, FieldType.SingleSelect] },
-  { key: 'review_time', name: '初评时间' },
-  { key: 'review_type', name: '评价类型', hint: '仅抖音' },
   { key: 'sku_text', name: '购买规格' },
+  { key: 'review_type', name: '评价类型', hint: '仅抖音' },
+  { key: 'review_time', name: '初评时间' },
   { key: 'content', name: '初评' },
   { key: 'media_urls', name: '晒图/视频' },
-  { key: 'helpful_count', name: '有用', type: FieldType.Number },
-  { key: 'additional_content', name: '追评', hint: '仅抖音' },
+  { key: 'helpful_count', name: '有用', type: FieldType.Number, formatter: NumberFormatter.INTEGER },
   { key: 'additional_time', name: '追评时间', hint: '仅抖音' },
+  { key: 'additional_content', name: '追评', hint: '仅抖音' },
   { key: 'additional_media_urls', name: '追评晒图/视频', hint: '仅抖音' },
   { key: 'replies', name: '评价回复' },
 ].map(field => ({ type: FieldType.Text, ...field }));
@@ -104,9 +104,13 @@ const cloudConfigs = new Map();
 const configPath = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
 const configListPath = `${configPath}s`;
 let configRequest = null, configApplying = false;
-const { loading, hasRecoverableTask, isCancelling, clearing, feedback, assertMounted, resumeTask, submitTask, cancelTask } = useProductReviewTask({ props, fields: FIELD_CONFIG, onIdle: () => {
+const { loading, hasRecoverableTask, isCancelling, clearing, feedback, assertMounted, resumeTask, submitTask, cancelTask } = useProductReviewTask({ props, fields: FIELD_CONFIG, onCancelError: error => showError(error), onIdle: () => {
   if (disposed) return;
   if (pendingSelection) { const selection = pendingSelection; pendingSelection = null; void loadSourceFields(selection); }
+  if (!hasRecoverableTask.value && formData.value.radio === 2 && formData.value.table_id) {
+    if (loadedTargetTableId.value !== formData.value.table_id && !targetFieldLoading.value) void loadTargetFields();
+    if (!tableConfigsLoaded.value && !tableConfigsLoading.value) void loadTableOutputConfigs();
+  }
 }, onRestore: task => {
   if (!task.sourceSnapshot) return;
   configApplying = true;
@@ -114,6 +118,11 @@ const { loading, hasRecoverableTask, isCancelling, clearing, feedback, assertMou
   selectedFieldKeys.value = [...task.selectedFieldKeys];
   mappingDraft.value = task.fieldMappings.map(row => ({ ...row }));
   formData.value.writeMode = task.writeMode;
+  if (formData.value.radio === 2 && formData.value.table_id) {
+    // 恢复期间跳过了目标表 watcher；结束后补加载时仍以原任务草稿为准。
+    draftTableId = formData.value.table_id;
+    targetDrafts.set(draftTableId, { mappings: mappingDraft.value.map(row => ({ ...row })), writeMode: task.writeMode });
+  }
   reviewPagesType.value = task.requestSnapshot.pages === 0 ? 'all' : 'pages';
   replyPagesType.value = task.requestSnapshot.reply_pages === -1 ? 'none' : task.requestSnapshot.reply_pages === 0 ? 'all' : 'pages';
   configApplying = false;
@@ -230,7 +239,7 @@ const handleSubmit = async () => {
       }
       assertPreparing();
       if (output.fieldMappings.some(row => !row.source_key || !row.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
-      await validateTableFields(input.table_id, output.selectedFieldKeys, { fieldMappings: output.fieldMappings, writeMode: output.writeMode, uniqueKey: 'review_id', throwOnError: true, assertActive: assertPreparing, onProgress: feedback.progress }); assertPreparing();
+      await validateTableFields(input.table_id, output.selectedFieldKeys, { fieldMappings: output.fieldMappings, writeMode: output.writeMode, uniqueKey: 'review_id', preserveExistingFieldFormat: true, throwOnError: true, assertActive: assertPreparing, onProgress: feedback.progress }); assertPreparing();
     }
     await submitTask({ ...output, sourceSnapshot: { ...source, ...input }, requestSnapshot: { url: urls.join('\n'), pages, reply_pages: replies, sort_type: input.sortType } });
   } catch (error) { if (!disposed) { loading.value = false; isCancelling.value = false; if (error.cancelled) feedback.finish('任务已停止，已写入 0 条商品评价', { stopped: true }); else feedback.fail(error); } }
@@ -355,6 +364,11 @@ watch([() => formData.value.radio, () => formData.value.table_id], ([radio, tabl
 }, { flush: 'sync' });
 watch(selectedFieldKeys, keys => {
   mappingDraft.value = mappingDraft.value.filter(row => !row.source_key || keys.includes(row.source_key));
+  // 配置等待期间也保留本地删减；云端保存仍由 rememberDraft 的就绪判断控制。
+  const draft = targetDrafts.get(draftTableId);
+  if (draft && !busy.value && !configApplying && draftTableId === formData.value.table_id) {
+    draft.mappings = mappingDraft.value.map(row => ({ ...row }));
+  }
 });
 
 watch(() => formData.value.mode, mode => {
@@ -560,8 +574,8 @@ onUnmounted(() => {
         </div>
       </el-form>
       <div class="action-group">
-        <p v-if="taskNotice" class="sub-hint" role="status">{{ taskNotice }}{{ noticeRequiresReopen ? ' 请重新进入插件恢复。' : ' 请核对目标表格结果后恢复原任务。' }}</p>
-        <el-button v-if="loading && !clearing" class="commit-btn" :loading="isCancelling" :disabled="isCancelling" @click="handleCancel">停止任务</el-button>
+        <p v-if="taskNotice" class="sub-hint" role="status">{{ taskNotice }}{{ noticeRequiresReopen ? ' 请重新进入插件恢复。' : '' }}</p>
+        <el-button v-if="loading && !clearing" class="commit-btn" :loading="isCancelling" :disabled="isCancelling" @click="handleCancel">{{ isCancelling ? '正在停止…' : '停止任务' }}</el-button>
         <el-button v-else class="commit-btn" :loading="loading || !initialReady" :disabled="loading || !initialReady || noticeRequiresReopen" @click="handleSubmit">{{ hasRecoverableTask ? '恢复任务' : !initialReady ? '准备中…' : '立即执行' }}</el-button>
       </div>
     </div>
@@ -621,7 +635,7 @@ onUnmounted(() => {
 .output-fields :deep(.el-checkbox__input.is-indeterminate .el-checkbox__inner) { background: #a8071a; border-color: #a8071a; }
 .output-fields :deep(.is-disabled.is-checked .el-checkbox__inner) { background: #f7f8fa; border-color: #e5e6eb; }
 .output-fields :deep(.is-disabled.is-checked .el-checkbox__inner::after) { border-color: #c9cdd4; }
-.field-checkbox-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+.field-checkbox-group { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 12px 16px; }
 .field-checkbox-group :deep(.el-checkbox) { height: auto; min-height: 22px; min-width: 0; margin: 0; align-items: center; }
 .field-checkbox-group :deep(.el-checkbox__label) { display: flex; align-items: baseline; min-width: 0; white-space: nowrap; }
 .field-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

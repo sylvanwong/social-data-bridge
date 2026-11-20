@@ -18,7 +18,7 @@ export function createProductDetailFields({ FieldType, DateFormatter, NumberForm
     { key: 'shop_id', name: '店铺ID' },
     { key: 'shop_name', name: '店铺名称' },
     { key: 'seller_id', name: '卖家ID' },
-    { key: 'cover_url', name: '封面图' },
+    { key: 'cover_url', name: '封面图', type: FieldType.Url },
     { key: 'main_image_urls', name: '商品图链接' },
     { key: 'detail_image_urls', name: '详情图链接' },
     { key: 'sold_count', name: '销量', type: FieldType.Number, formatter: NumberFormatter.INTEGER,

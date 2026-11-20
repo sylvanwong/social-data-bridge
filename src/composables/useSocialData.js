@@ -429,7 +429,7 @@ const normalizeCellValue = async (table, field, value, config, fieldType, extra 
   return normalizeTextCompatibleValue(nextValue);
 };
 
-const applyFieldDisplayConfig = async (field, config, assertActive) => {
+export const applyFieldDisplayConfig = async (field, config, assertActive) => {
   assertActive?.();
   const fieldType = await field.getType();
   assertActive?.();
@@ -636,6 +636,7 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
     const refreshedFieldMetaByName = new Map(refreshedFieldMetaList.map(meta => [meta.name, meta]));
     const refreshedFieldMetaById = new Map(refreshedFieldMetaList.map(meta => [meta.id, meta]));
     for (const config of activeFieldMapping) {
+      if (options.preserveExistingFieldFormat && !missingFields.includes(config)) continue;
       const explicitMapping = explicitMappings.get(config.key);
       const matchedField = explicitMapping?.target_field_id
         ? { fieldMeta: refreshedFieldMetaById.get(explicitMapping.target_field_id) }
@@ -762,6 +763,10 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       return;
     }
     const selectedFieldMapping = getActiveFieldMapping(selectedFieldKeys, fieldMapping);
+    if (options.fieldOrder) {
+      const order = new Map(options.fieldOrder.map((key, index) => [key, index]));
+      selectedFieldMapping.sort((a, b) => (order.get(a.key) ?? order.size) - (order.get(b.key) ?? order.size));
+    }
     const uniqueKey = options.uniqueKey || 'aweme_id';
     const fallbackUniqueKey = options.fallbackUniqueKey;
     const fallbackConfig = fieldMapping.find(config => config.key === fallbackUniqueKey);
@@ -1147,7 +1152,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
     } catch (error) {
       if (options.appendState) throw error;
       if (options.stopAfterCurrentBatch) {
-        const writeError = new Error(`${error?.message || '写入失败'}；已暂停写入，请核对表格结果后再恢复任务`, { cause: error });
+        const writeError = new Error(`${error?.message || '写入失败'}；已暂停写入，已写入的数据会保留，请点击「恢复任务」继续。`, { cause: error });
         writeError.stopPolling = true;
         throw writeError;
       }

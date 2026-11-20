@@ -139,11 +139,14 @@ const getCurrentTime = () => {
 };
 
 const getAllowedFieldTypes = (config) => {
-  if (config.key === 'note_url' || config.key === 'profile_url') {
+  if (config.key === 'note_url' || config.key === 'profile_url' || config.key === 'cover_url') {
     return [FieldType.Url, FieldType.Text];
   }
   if (config.type === FieldType.Number) {
     return [FieldType.Number, FieldType.Text];
+  }
+  if (config.key === 'extract_time') {
+    return [FieldType.DateTime, FieldType.Text];
   }
   if (config.name === '作者名称' || config.name === '平台') {
     return [FieldType.Text, FieldType.SingleSelect];
@@ -251,6 +254,10 @@ const normalizeFieldValue = (value, config, fieldType) => {
   if ((fieldType === FieldType.Number || fieldType === FieldType.DateTime) && (value == null || value === '')) return null;
   if (config.type === FieldType.Number && fieldType === FieldType.Text) {
     return String(value ?? '');
+  }
+  if (config.key === 'extract_time' && fieldType === FieldType.Text) {
+    // 商品接口时间按 UTC+8 解析；文本列保持同一北京时间，不依赖浏览器时区。
+    return value == null ? '' : new Date(value + 8 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
   }
 
   if ((config.name === '作者名称' || config.name === '平台') && fieldType === FieldType.SingleSelect) {
@@ -2108,7 +2115,6 @@ const handleTableModeSubmit = async () => {
   console.log('当前选中的数据范围:', formData.value.scope);
   console.log('选中的字段ID:', formData.value.videoLinkFieldId);
   console.log('行数:', formData.value.rowCount);
-  console.log('api_key:', props.api_key);
 
   if (!validateBaseForm({
     ...formData.value,
@@ -2530,7 +2536,7 @@ watch(
       <span class="sub-page-title">{{ detailSubject }}详情获取</span>
     </div>
     <div class="form-card">
-      <div class="execution-config" :inert="loading ? '' : null" :aria-busy="loading">
+      <div class="execution-config" :class="{ 'product-detail-config': productDetail }" :inert="loading ? '' : null" :aria-busy="loading">
       <div class="section-heading"><span class="section-step">1</span><span>获取设置</span></div>
       <div class="choice-group">
         <div class="choice-label">{{ detailSubject }}链接来源</div>
@@ -2559,7 +2565,7 @@ watch(
           </el-select>
         </el-form-item>
 
-        <el-form-item label="" style="margin-top: 12px">
+        <el-form-item label="">
           <div slot="label" class="c-label">
             输入行范围
           </div>
@@ -2638,21 +2644,16 @@ watch(
           </el-form-item>
 
           <div class="mapping-accordion fields-accordion">
-            <button type="button" class="mapping-accordion-trigger" :aria-expanded="true">
-              <span class="mapping-accordion-label ui-disclosure-label">输出字段</span>
-              <span class="mapping-chevron is-expanded" aria-hidden="true"></span>
-            </button>
-            <div class="mapping-accordion-panel">
-              <el-checkbox
-                :model-value="selectedFieldKeys.length === FIELD_CONFIG.length"
-                :indeterminate="selectedFieldKeys.length > 0 && selectedFieldKeys.length < FIELD_CONFIG.length"
-                class="select-all-fields"
-                @change="(checked) => selectedFieldKeys = checked ? FIELD_CONFIG.map(field => field.key) : []"
-              >全选</el-checkbox>
-              <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
-                <el-checkbox v-for="field in FIELD_CONFIG" :key="field.key" :label="field.key" class="field-checkbox-item">{{ field.name }}<span v-if="field.hint" class="field-platform-hint">{{ field.hint }}</span></el-checkbox>
-              </el-checkbox-group>
-            </div>
+            <div class="field-selection-title"><span class="ui-disclosure-label">输出字段</span></div>
+            <el-checkbox
+              :model-value="selectedFieldKeys.length === FIELD_CONFIG.length"
+              :indeterminate="selectedFieldKeys.length > 0 && selectedFieldKeys.length < FIELD_CONFIG.length"
+              class="select-all-fields"
+              @change="(checked) => selectedFieldKeys = checked ? FIELD_CONFIG.map(field => field.key) : []"
+            >全选</el-checkbox>
+            <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+              <el-checkbox v-for="field in FIELD_CONFIG" :key="field.key" :label="field.key" class="field-checkbox-item">{{ field.name }}<span v-if="field.hint" class="field-platform-hint">{{ field.hint }}</span></el-checkbox>
+            </el-checkbox-group>
           </div>
 
           <div v-if="formData.mode === 'table' || (formData.mode === 'manual' && formData.targetType === 'existing')" class="mapping-accordion">
@@ -3213,6 +3214,21 @@ watch(
   border-radius: 8px;
   box-sizing: border-box;
   font-family: var(--app-font-family);
+}
+.product-detail-config,
+.product-detail-config > .form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-space-group);
+}
+.product-detail-config > .section-heading,
+.product-detail-config > .choice-group,
+.product-detail-config > .form > .el-form-item,
+.product-detail-config > .form > .input-filter {
+  margin: 0;
+}
+.product-detail-config > .form > .output-config {
+  margin-top: calc(var(--app-space-section) - var(--app-space-group));
 }
 .mode-switch {
   display: flex;
