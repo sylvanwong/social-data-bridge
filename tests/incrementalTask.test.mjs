@@ -416,7 +416,9 @@ test('SDK 写入报错后暂停，后续定时器不会重写，保留上一批�
       assert.equal(h.timers.size, 0);
       assert.deepEqual(h.finished, []);
       assert.equal(h.errors.length, 1);
-      assert.match(h.errors[0].message, /核对/);
+      assert.match(h.errors[0].message, /SDK response lost.*已写入的数据会保留.*恢复任务/);
+      assert.doesNotMatch(h.errors[0].message, /请核对表格/);
+      assert.equal(h.errors[0].cause.message, 'SDK response lost');
     });
   }
 });

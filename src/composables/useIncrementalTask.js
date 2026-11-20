@@ -161,7 +161,7 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
       } catch (error) {
         if (error?.stopPolling) throw error;
         // SDK 报错时写入结果可能未知，不能自动重发同一批数据。
-        const writeError = new Error(`${error?.message || '写入表格失败'}；已暂停写入，请核对表格结果后再恢复任务`);
+        const writeError = new Error(`${error?.message || '写入表格失败'}；已暂停写入，已写入的数据会保留，请点击「恢复任务」继续。`, { cause: error });
         writeError.stopPolling = true;
         throw writeError;
       } finally {

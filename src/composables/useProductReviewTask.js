@@ -1,7 +1,7 @@
 import { onUnmounted, ref } from 'vue';
 import { bitable } from '@lark-base-open/js-sdk';
 import { feishuRequest, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, buildFeishuApiPath } from '@/utils/request';
-import { createSequentialTable, useSocialData } from './useSocialData';
+import { applyFieldDisplayConfig, createSequentialTable, useSocialData } from './useSocialData';
 import { useIncrementalTask } from './useIncrementalTask';
 import { useTaskFeedback } from './useTaskFeedback.mjs';
 import { getTaskStoppingText } from '../utils/taskStopText';
@@ -13,7 +13,7 @@ export const unwrapProductResponse = response => {
   if (envelope?.sta !== 0) throw new Error(envelope?.msg || '商品评价请求失败');
   return envelope.data;
 };
-export function useProductReviewTask({ props, fields, onIdle, onRestore }) {
+export function useProductReviewTask({ props, fields, onIdle, onRestore, onCancelError }) {
   const loading = ref(false), hasRecoverableTask = ref(false), isCancelling = ref(false), clearing = ref(false);
   const feedback = useTaskFeedback();
   const { createAndWriteData } = useSocialData(() => '商品评价', '', fields);
@@ -28,7 +28,12 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore }) {
     storageKey: PRODUCT_REVIEW_TASK_KEY, operationTimeoutMs: 60000,
     isTerminal: status => [1, 2, 3].includes(Number(status.status)),
     getStatus: async task => unwrapProductResponse(await api(task, 'get', 'task', { task_id: task.taskId })),
-    getResults: async task => unwrapProductResponse(await api(task, 'post', 'list', { task_id: task.taskId, after_id: task.cursor || '', limit: 20, ...(Number(task.latestStatus?.status) === 3 ? { include_count: true } : {}) })),
+    getResults: async task => {
+      const pendingCount = task.writeMode === 'append' ? task.appendState?.pendingCount : 0;
+      // 后台仍可能追加结果，先核对原失败批次，成功后再恢复正常批量。
+      const limit = Number.isInteger(pendingCount) && pendingCount > 0 && pendingCount <= 20 ? pendingCount : 20;
+      return unwrapProductResponse(await api(task, 'post', 'list', { task_id: task.taskId, after_id: task.cursor || '', limit, ...(Number(task.latestStatus?.status) === 3 ? { include_count: true } : {}) }));
+    },
     writeBatch: async (items, task, { assertActive, saveProgress }) => {
       const active = value => { assertMounted(); assertActive(); return value; };
       active();
@@ -48,6 +53,17 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore }) {
           if (index === 0 && meta[0]) await table.setField(meta[0].id, { name: config.name, type: config.type });
           else await table.addField({ name: config.name, type: config.type });
           active(); meta = active(await table.getFieldMetaList());
+          if (config.formatter || config.dateFormat) {
+            const field = active(await table.getFieldById(meta.find(field => field.name === config.name).id));
+            try {
+              await applyFieldDisplayConfig(field, config, active);
+            } catch (error) {
+              active();
+              if (error?.stopPolling || error?.cancelled) throw error;
+              console.error(`设置字段 ${config.name} 格式失败:`, error);
+            }
+            active();
+          }
         }
         task.initializingTableId = ''; await saveProgress(); active();
       }
@@ -62,7 +78,8 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore }) {
       await createAndWriteData(normalized, 'stream', task.taskId, task.targetTableId, task.selectedFieldKeys, {
         stopAfterCurrentBatch: true, uniqueKey: 'review_id', writeMode: task.writeMode, fieldMappings: task.fieldMappings,
         reconcile: !append && !!task.pendingWrite, skipFieldDisplayConfig: true, assertActive: active,
-        ...(append ? { appendState } : {}),
+        // 原任务的字段key顺序与追加批次的fieldIds配套，不随界面排序变化。
+        ...(append ? { appendState, fieldOrder: task.selectedFieldKeys } : {}),
         onBeforeWrite: async () => { if (append) syncAppend(); else task.pendingWrite = true; await saveProgress(); active(); },
       });
       active();
@@ -71,6 +88,7 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore }) {
     },
     onProgress: (status, task, phase) => {
       if (disposed) return;
+      if (status?.cancel_requested || Number(status?.status) === 3) isCancelling.value = true;
       clearing.value = phase === 'clearing';
       if (clearing.value) feedback.progress('正在清理商品评价任务进度…', { stopping: isCancelling.value });
       else if (isCancelling.value || status?.cancel_requested || Number(status?.status) === 3) feedback.progress(getTaskStoppingText(task, '商品评价'), { stopping: true });
@@ -93,10 +111,18 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore }) {
     try {
       const found = await taskEngine.resume(task => {
         assertMounted();
-        feedback.begin('正在恢复未完成的商品评价任务…');
+        const pendingCancel = isCancelling.value;
+        const confirmedStop = !!(task.latestStatus?.cancel_requested || Number(task.latestStatus?.status) === 3);
+        isCancelling.value = pendingCancel || confirmedStop;
+        feedback.begin(isCancelling.value ? getTaskStoppingText(task, '商品评价') : '正在恢复未完成的商品评价任务…', { stopping: isCancelling.value });
         hasRecoverableTask.value = true;
         if (!task.apiPrefix) task.apiPrefix = FEISHU_API_PATH_PREFIX;
         onRestore?.(task);
+        if (pendingCancel && !confirmedStop) {
+          // 交回原取消入口，复用请求与失败归属判断，不阻塞轮询。
+          isCancelling.value = false;
+          void cancelTask().catch(error => onCancelError?.(error));
+        }
       });
       if (!found && !disposed) { hasRecoverableTask.value = false; idle(); feedback.hide(); }
       return found;
@@ -120,7 +146,13 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore }) {
     isCancelling.value = true; feedback.progress(getTaskStoppingText(task || {}, '商品评价'), { stopping: true });
     if (!task) return;
     try { unwrapProductResponse(await api(task, 'post', 'task/cancel', { task_id: task.taskId })); }
-    catch (error) { if (!disposed) { isCancelling.value = false; throw error; } }
+    catch (error) {
+      if (disposed || taskEngine.getActiveTask() !== task) return;
+      if (task.latestStatus?.cancel_requested || Number(task.latestStatus?.status) === 3) return;
+      isCancelling.value = false;
+      feedback.progress(`任务继续执行，已写入 ${task.writtenCount || 0} 条商品评价`);
+      throw error;
+    }
   };
   onUnmounted(() => { disposed = true; taskEngine.stop(); });
   return { loading, hasRecoverableTask, isCancelling, clearing, feedback, assertMounted, resumeTask, submitTask, cancelTask };

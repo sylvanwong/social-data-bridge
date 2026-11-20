@@ -50,12 +50,12 @@ for(const mode of ['empty','failure','mixed'])test(`推荐词${mode}终态如实
 test('推荐词HTTP延迟时立即显示提醒',async t=>{let release;const{f,run}=setup(t,'SearchSuggestions',{fetchSuggestions:()=>new Promise(r=>{release=r;})});const pending=run('execute')(['a']);await nextTick();assert.equal(f.toastLoading.value,true);assert.match(f.toastText.value,/请勿关闭插件/);release([]);await pending;});
 
 test('聚合首页API Key保存失败以顶部Message显示SDK实际原因5秒', async () => {
-  const notices = [], b = { api_key: ref('key'), api_key_disabled: ref(false), API_KEY_CLEARED_MARKER:'cleared', social_type_options:ref([]), TYPE_OPTIONS:[], PLATFORM_CONFIG_NAMES:{search:'search'}, fetchPlatformConfig:async()=>[], bitable:{bridge:{setData:async()=>{throw new Error('SDK保存失败');}}}, ElMessage: n=>notices.push(n) };
+  const notices = [], b = { api_key: ref('key'), api_key_disabled: ref(false), api_key_saving: ref(false), apiKeyInitializationActive: true, API_KEY_CLEARED_MARKER:'cleared', social_type_options:ref([]), TYPE_OPTIONS:[], PLATFORM_CONFIG_NAMES:{search:'search'}, fetchPlatformConfig:async()=>[], bitable:{bridge:{setData:async()=>{throw new Error('SDK保存失败');}}}, ElMessage: n=>notices.push(n) };
   await extract('Form','saveApiKey',b)();
   assert.equal(notices.length,1);assert.equal(notices[0].message,'SDK保存失败');assert.equal(notices[0].type,'error');assert.equal(notices[0].duration,5000);assert.equal(notices[0].plain,true);
 });
 test('聚合首页API Key保存成功沿用原文和3秒', async () => {
-  const notices=[], b={api_key:ref('key'),api_key_disabled:ref(false),API_KEY_CLEARED_MARKER:'cleared',social_type_options:ref([]),TYPE_OPTIONS:[],PLATFORM_CONFIG_NAMES:{search:'search'},fetchPlatformConfig:async()=>[],bitable:{bridge:{setData:async()=>{}}},ElMessage:n=>notices.push(n)};
+  const notices=[], b={api_key:ref('key'),api_key_disabled:ref(false),api_key_saving:ref(false),apiKeyInitializationActive:true,API_KEY_CLEARED_MARKER:'cleared',social_type_options:ref([]),TYPE_OPTIONS:[],PLATFORM_CONFIG_NAMES:{search:'search'},fetchPlatformConfig:async()=>[],bitable:{bridge:{setData:async()=>{}}},ElMessage:n=>notices.push(n)};
   await extract('Form','saveApiKey',b)();assert.equal(notices[0].message,'保存成功');assert.equal(notices[0].duration,3000);
 });
 test('推荐词部分失败其余为空时保留两类摘要及重试文案', async t=>{

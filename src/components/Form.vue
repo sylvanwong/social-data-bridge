@@ -1,7 +1,7 @@
 <script setup>
 import { bitable } from "@lark-base-open/js-sdk";
 import { ElMessage } from "element-plus";
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import ProfileFetch from './ProfileFetch.vue'
 import KeywordSearch from './KeywordSearch.vue'
 import BloggerSearch from './BloggerSearch.vue'
@@ -19,8 +19,11 @@ import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
 
 const api_key = ref("");
 const api_key_disabled = ref(true);
+const api_key_saving = ref(false);
+const api_key_compact = computed(() => api_key_disabled.value && Boolean(api_key.value));
 const currentPage = ref("home");
 const currentCategory = ref("works");
+let apiKeyInitializationActive = true;
 
 const PLATFORM_CONFIG_NAMES = {
   search: 'feishu_social_type',
@@ -46,34 +49,61 @@ const TYPE_OPTIONS = [
 ]
 const social_type_options = ref([...TYPE_OPTIONS]);
 
+onBeforeUnmount(() => { apiKeyInitializationActive = false; });
+
 onMounted(async () => {
-  const key = await bitable.bridge.getData("api_key");
-  if (key && typeof key === "string" && key.trim() && key !== API_KEY_CLEARED_MARKER) {
-    api_key.value = key;
-    social_type_options.value = await fetchPlatformConfig(PLATFORM_CONFIG_NAMES.search, TYPE_OPTIONS);
+  try {
+    const key = await bitable.bridge.getData("api_key");
+    if (!apiKeyInitializationActive) return;
+    if (key && typeof key === "string" && key.trim() && key !== API_KEY_CLEARED_MARKER) {
+      api_key.value = key;
+      const options = await fetchPlatformConfig(PLATFORM_CONFIG_NAMES.search, TYPE_OPTIONS, () => apiKeyInitializationActive);
+      if (apiKeyInitializationActive) social_type_options.value = options;
+    }
+  } catch (error) {
+    if (apiKeyInitializationActive) throw error;
   }
 });
 
+const openPage = (page) => {
+  if (api_key_saving.value) return;
+  currentPage.value = page;
+};
+
+const editApiKey = () => {
+  apiKeyInitializationActive = false;
+  api_key_disabled.value = false;
+};
+
 const saveApiKey = async () => {
-  api_key_disabled.value = true;
+  if (api_key_saving.value) return;
+  apiKeyInitializationActive = false;
+  api_key_saving.value = true;
+  const key = api_key.value.trim();
+  api_key.value = key;
   try {
-    if (api_key.value === "") {
+    if (key === "") {
       await bitable.bridge.setData("api_key", API_KEY_CLEARED_MARKER);
+      api_key_disabled.value = true;
       social_type_options.value = [...TYPE_OPTIONS];
       return;
     }
-    await bitable.bridge.setData("api_key", api_key.value);
-    ElMessage({ message: "保存成功", type: "success", plain: true, duration: 3000 });
+    await bitable.bridge.setData("api_key", key);
     social_type_options.value = await fetchPlatformConfig(PLATFORM_CONFIG_NAMES.search, TYPE_OPTIONS);
+    api_key_disabled.value = true;
+    ElMessage({ message: "保存成功", type: "success", plain: true, duration: 3000 });
   } catch (error) {
     ElMessage({ message: error?.message || "保存 API Key 失败，请重试", type: "error", plain: true, duration: 5000 });
+  } finally {
+    api_key_saving.value = false;
   }
 };
 
-const fetchPlatformConfig = async (name, fallbackOptions = []) => {
+const fetchPlatformConfig = async (name, fallbackOptions = [], isCurrent = () => true) => {
   try {
     return await fetchPlatformConfigOptions(api_key.value, name, fallbackOptions);
   } catch (error) {
+    if (!isCurrent()) return [...fallbackOptions];
     console.error('获取平台配置失败:', error);
     ElMessage({ message: "获取平台配置失败，使用默认设置", type: "warning", plain: true, duration: 5000 });
     return [...fallbackOptions];
@@ -89,55 +119,57 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
     <div class="banner-section">
       <div class="banner-deco-dot"></div>
       <div class="banner-deco-ring"></div>
-      <a
-        class="banner-help"
-        href="https://congxin.feishu.cn/docx/IKK4drqhdo5WkqxbJMCcHpeWnHe?from=from_copylink"
-        target="_blank"
-      >
-        <svg class="help-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-          <circle cx="12" cy="12" r="10"></circle>
-          <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
-          <line x1="12" y1="17" x2="12.01" y2="17"></line>
-        </svg>
-        <span class="help-text">帮助文档</span>
-      </a>
-      <div class="banner-title">加入交流群</div>
-      <div class="banner-subtitle">
-        <span>使用插件遇问题可进群答疑，</span><span class="highlight">新版本更新群内抢先通知</span>
+      <div class="banner-heading">
+        <div class="banner-title">加入交流群</div>
+        <a
+          class="banner-help"
+          href="https://congxin.feishu.cn/docx/IKK4drqhdo5WkqxbJMCcHpeWnHe?from=from_copylink"
+          target="_blank"
+        >
+          <svg class="help-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+          <span class="help-text">帮助文档</span>
+        </a>
       </div>
-      <a class="banner-btn" href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=688icbad-0387-420e-a6e6-1ba184ac6e9a" target="_blank">
-        <span>立即进群</span>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
-          <circle cx="12" cy="12" r="10"></circle>
-          <polyline points="12 16 16 12 12 8"></polyline>
-          <line x1="8" y1="12" x2="16" y2="12"></line>
-        </svg>
-      </a>
+      <div class="banner-bottom">
+        <div class="banner-subtitle">使用答疑 · 更新通知</div>
+        <a class="banner-btn" href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=688icbad-0387-420e-a6e6-1ba184ac6e9a" target="_blank">
+          <span>立即进群</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 16 16 12 12 8"></polyline>
+            <line x1="8" y1="12" x2="16" y2="12"></line>
+          </svg>
+        </a>
+      </div>
     </div>
 
     <!-- API Key 配置区 -->
-    <div class="api-section">
+    <div class="api-section" :class="{ 'api-section--compact': api_key_compact }">
       <div class="api-header">
         <div class="api-title-group">
-          <span class="api-title">API Key 设置</span>
-          <a class="api-link" href="https://socialdatax.com?from=feishu:plugin" target="_blank">点击获取API密钥</a>
+          <span class="api-title">{{ api_key_compact ? 'API Key' : 'API Key 设置' }}</span>
+          <span v-if="api_key_compact" class="api-status">已配置</span>
+          <a v-else class="api-link" href="https://socialdatax.com?from=feishu:plugin" target="_blank">点击获取API密钥</a>
         </div>
-        <div class="api-edit" @click="api_key_disabled = !api_key_disabled">
+        <button v-if="api_key_disabled" type="button" class="api-edit" :disabled="api_key_saving" @click="editApiKey">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
             <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
           </svg>
-        </div>
+          {{ api_key ? '修改' : '配置' }}
+        </button>
       </div>
-      <div class="api-input-wrap">
-        <el-input type="password" v-model="api_key" class="arco-input" placeholder="" :disabled="api_key_disabled"
+      <div v-if="!api_key_compact" class="api-input-wrap">
+        <el-input type="password" v-model="api_key" class="arco-input" placeholder="" :disabled="api_key_disabled || api_key_saving"
           show-password />
       </div>
-      <div v-if="!api_key_disabled" class="api-save-btn" @click="saveApiKey">
-        <img src="https://cdn.zhinizhushou.com/material/20250826/2db36bfc55033175693a18a5f927d938.png"
-          style="width: 14px; height: 14px; margin-right: 8px" />
-        保存
-      </div>
+      <button v-if="!api_key_disabled" type="button" class="api-save-btn" :disabled="api_key_saving" @click="saveApiKey">
+        {{ api_key_saving ? '保存中…' : '保存' }}
+      </button>
     </div>
 
     <!-- 功能分组卡片区 -->
@@ -149,17 +181,17 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           :class="{ active: currentCategory === 'works' }"
           :aria-pressed="currentCategory === 'works'"
           @click="currentCategory = 'works'"
-        >作品数据</button>
+        >社媒数据</button>
         <button
           type="button"
           class="category-tab"
           :class="{ active: currentCategory === 'products' }"
           :aria-pressed="currentCategory === 'products'"
           @click="currentCategory = 'products'"
-        >商品数据</button>
+        >电商数据</button>
       </div>
       <div v-if="currentCategory === 'works'" class="cards-grid">
-        <div class="arco-card" @click="currentPage = 'video'">
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('video')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
@@ -168,9 +200,9 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <polyline points="9 10 12 7 15 10"></polyline>
             </svg>
           </div>
-          <span class="func-name">作品详情获取</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'blogger'">
+          <span class="func-name">作品详情</span>
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('blogger')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
@@ -178,9 +210,9 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <path d="M16 11l2 2 4-4"></path>
             </svg>
           </div>
-          <span class="func-name">获取作者信息</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'profile'">
+          <span class="func-name">作者信息</span>
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('profile')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <rect x="3" y="3" width="7" height="7" rx="1"></rect>
@@ -189,18 +221,18 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <rect x="3" y="14" width="7" height="7" rx="1"></rect>
             </svg>
           </div>
-          <span class="func-name">获取作者作品</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'search'">
+          <span class="func-name">作者作品</span>
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('search')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <circle cx="11" cy="11" r="8"></circle>
               <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
             </svg>
           </div>
-          <span class="func-name">关键词搜索获取</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'series'">
+          <span class="func-name">作品搜索</span>
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('series')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <rect x="2" y="2" width="20" height="20" rx="2" ry="2"></rect>
@@ -210,17 +242,17 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <line x1="16" y1="8" x2="16" y2="22"></line>
             </svg>
           </div>
-          <span class="func-name">博主短剧获取</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'comment'">
+          <span class="func-name">短剧获取</span>
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('comment')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
             </svg>
           </div>
-          <span class="func-name">评论列表获取</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'hot'">
+          <span class="func-name">作品评论</span>
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('hot')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <line x1="12" y1="20" x2="12" y2="10"></line>
@@ -228,9 +260,9 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <line x1="6" y1="20" x2="6" y2="16"></line>
             </svg>
           </div>
-          <span class="func-name">热榜获取</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'videoCopySummary'">
+          <span class="func-name">热榜</span>
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('videoCopySummary')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
@@ -239,34 +271,34 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
               <line x1="8" y1="17" x2="13" y2="17"></line>
             </svg>
           </div>
-          <span class="func-name">提取视频文案</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'xhsDownload'">
+          <span class="func-name">视频文案</span>
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('xhsDownload')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
             </svg>
           </div>
           <span class="func-name">小红书下载</span>
-        </div>
+        </button>
         <!-- 链接转附件 -->
-        <div class="arco-card" @click="currentPage = 'urlToAttachment'">
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('urlToAttachment')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
             </svg>
           </div>
           <span class="func-name">链接转附件</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'bloggerSearch'">
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('bloggerSearch')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <circle cx="10" cy="8" r="4"></circle><path d="M3 21a7 7 0 0 1 14 0"></path><circle cx="18" cy="17" r="3"></circle><path d="m20.2 19.2 2 2"></path>
             </svg>
           </div>
-          <span class="func-name">作者搜索获取</span>
-        </div>
-        <div class="arco-card" @click="currentPage = 'searchSuggestions'">
+          <span class="func-name">作者搜索</span>
+        </button>
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('searchSuggestions')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <circle cx="10.5" cy="10.5" r="6.5"></circle>
@@ -275,10 +307,10 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
             </svg>
           </div>
           <span class="func-name">搜索推荐词</span>
-        </div>
+        </button>
       </div>
       <div v-else class="cards-grid">
-        <button type="button" class="arco-card" @click="currentPage = 'productDetail'">
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('productDetail')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
               <path d="m12 3 9 5v8l-9 5-9-5V8l9-5z"></path>
@@ -287,7 +319,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
           </div>
           <span class="func-name">商品详情</span>
         </button>
-        <button type="button" class="arco-card" @click="currentPage = 'productReview'">
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('productReview')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
@@ -300,13 +332,13 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
     </div>
   </div>
 
-  <!-- 二级页面：获取作者作品 -->
+  <!-- 二级页面：作者作品 -->
   <ProfileFetch v-if="currentPage === 'profile'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：博主短剧获取 -->
+  <!-- 二级页面：短剧获取 -->
   <SeriesFetch v-if="currentPage === 'series'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：热榜获取 -->
+  <!-- 二级页面：热榜 -->
   <HotListFetch
     v-if="currentPage === 'hot'"
     :api_key="api_key"
@@ -314,16 +346,16 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
     @back="currentPage = 'home'"
   />
 
-  <!-- 二级页面：关键词搜索获取 -->
+  <!-- 二级页面：作品搜索 -->
   <KeywordSearch v-if="currentPage === 'search'" :api_key="api_key" :social_type_options="social_type_options" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：作者搜索获取 -->
+  <!-- 二级页面：作者搜索 -->
   <BloggerSearch v-if="currentPage === 'bloggerSearch'" :api_key="api_key" :social_type_options="social_type_options" @back="currentPage = 'home'" />
 
   <!-- 二级页面：搜索推荐词 -->
   <SearchSuggestions v-if="currentPage === 'searchSuggestions'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：评论列表获取 -->
+  <!-- 二级页面：作品评论 -->
   <CommentFetch v-if="currentPage === 'comment'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：商品评价 -->
@@ -331,13 +363,13 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
   <VideoDataFetch v-if="currentPage === 'productDetail'" product-detail :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：作品详情获取 -->
+  <!-- 二级页面：作品详情 -->
   <VideoDataFetch v-if="currentPage === 'video'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：获取作者信息 -->
+  <!-- 二级页面：作者信息 -->
   <BloggerInfoFetch v-if="currentPage === 'blogger'" :api_key="api_key" @back="currentPage = 'home'" />
 
-  <!-- 二级页面：提取视频文案 -->
+  <!-- 二级页面：视频文案 -->
   <VideoCopySummary v-if="currentPage === 'videoCopySummary'" :api_key="api_key" @back="currentPage = 'home'" />
 
   <!-- 二级页面：小红书下载 -->
@@ -353,7 +385,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 .home-page {
   font-family: var(--app-font-family);
   min-height: 100vh;
-  background: #fffcfc;
+  background: #FFFFFF;
 }
 
 /* Banner */
@@ -361,8 +393,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   padding: 10px
 }
 .banner-section {
-  margin: 0px 20px 20px 20px;
-  padding: 20px 20px 20px;
+  margin: 0 20px;
+  padding: var(--app-space-group);
   background: linear-gradient(135deg, #FFF0F2 0%, #FFE6E9 100%);
   border-radius: 8px;
   position: relative;
@@ -419,35 +451,42 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   z-index: 0;
   pointer-events: none;
 }
+.banner-heading,
+.banner-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--app-space-control);
+}
+.banner-bottom {
+  margin-top: var(--app-space-control);
+}
 .banner-title {
   font-size: var(--app-font-size-hero);
   font-weight: var(--app-font-weight-semibold);
   color: #1D2129;
   line-height: 28px;
-  margin-bottom: 8px;
+  margin-bottom: 0;
   position: relative;
   z-index: 1;
 }
 .banner-subtitle {
-  font-size: var(--app-font-size-body);
+  font-size: var(--app-font-size-small);
   font-weight: var(--app-font-weight-regular);
   line-height: 22px;
-  margin-bottom: 16px;
+  margin-bottom: 0;
   position: relative;
   z-index: 1;
   color: #4E5969;
 }
-.banner-subtitle .highlight {
-  color: #A8071A;
-  font-weight: var(--app-font-weight-medium);
-}
 .banner-btn {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 16px;
+  gap: 6px;
+  padding: 0 12px;
   height: 32px;
-  font-size: var(--app-font-size-body);
+  flex-shrink: 0;
+  font-size: var(--app-font-size-small);
   font-weight: var(--app-font-weight-medium);
   color: #FFFFFF;
   background: #A8071A;
@@ -471,14 +510,13 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   color: #FFFFFF;
 }
 .banner-help {
-  position: absolute;
-  top: 16px;
-  right: 16px;
+  position: relative;
+  flex-shrink: 0;
   z-index: 2;
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 8px;
+  padding: 0;
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -494,8 +532,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   color: #A8071A;
 }
 .banner-help .help-icon {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   stroke: #86909C;
   stroke-width: 1.8;
   stroke-linecap: round;
@@ -513,12 +551,28 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 
 /* API Key 区 */
 .api-section {
-  margin: 20px 20px 0;
+  margin: var(--app-space-group) 20px 0;
   padding: 16px;
   background: #FFFFFF;
   border: 1px solid rgba(0, 0, 0, 0.06);
   border-radius: 8px;
   box-sizing: border-box;
+}
+.api-section--compact {
+  padding: 12px 16px;
+}
+.api-section--compact .api-header {
+  margin-bottom: 0;
+}
+.api-section--compact .api-title {
+  font-size: var(--app-font-size-body);
+  font-weight: var(--app-font-weight-medium);
+  line-height: 22px;
+}
+.api-status {
+  font-size: var(--app-font-size-small);
+  color: #86909C;
+  line-height: 22px;
 }
 .api-header {
   display: flex;
@@ -529,7 +583,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 .api-title-group {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .api-title {
   font-size: var(--app-font-size-section);
@@ -552,10 +607,15 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   opacity: 0.85;
 }
 .api-edit {
-  width: 18px;
-  height: 18px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: var(--app-font-size-small);
+  line-height: 22px;
+  gap: 6px;
   cursor: pointer;
-  color: #86909C;
+  color: #A8071A;
   transition: color 0.2s;
   flex-shrink: 0;
   display: flex;
@@ -564,8 +624,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 }
 .api-edit:hover { color: #A8071A; }
 .api-edit svg {
-  width: 100%;
-  height: 100%;
+  width: 14px;
+  height: 14px;
   stroke-width: 1.6;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -574,6 +634,9 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   position: relative;
 }
 .api-save-btn {
+  border: 0;
+  padding: 0;
+  font-family: inherit;
   margin-top: 12px;
   background: #A8071A;
   width: 100%;
@@ -590,10 +653,19 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 }
 .api-save-btn:hover { background: #C11126; }
 .api-save-btn:active { background: #8A0515; }
+.api-save-btn:disabled {
+  background: #FAFAFA;
+  color: #86909C;
+  cursor: not-allowed;
+}
+.api-edit:disabled {
+  color: #86909C;
+  cursor: not-allowed;
+}
 
 /* 功能分组卡片区 */
 .cards-section {
-  padding: 32px 20px 32px;
+  padding: var(--app-space-section) 20px;
   box-sizing: border-box;
 }
 .category-tabs {
@@ -604,7 +676,7 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 }
 .category-tab {
   flex: 1 1 50%;
-  padding: 0 0 8px;
+  padding: 0 0 10px;
   border: 0;
   border-bottom: 2px solid transparent;
   background: transparent;
@@ -632,8 +704,8 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 }
 .cards-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--app-space-group);
 }
 
 /* 卡片 */
@@ -643,17 +715,20 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 22px 8px 20px;
+  box-sizing: border-box;
+  height: 88px;
+  min-width: 0;
+  padding: 16px 8px;
   background: #FFFFFF;
   border: 1px solid #E5E6EB;
   border-radius: 8px;
   cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 100ms, border-color 100ms, box-shadow 100ms;
 }
 .arco-card .func-icon {
   width: 24px;
   height: 24px;
-  margin-bottom: 10px;
+  margin-bottom: var(--app-space-control);
   color: #A8071A;
   display: flex;
   align-items: center;
@@ -687,4 +762,22 @@ const fetchPlatformConfig = async (name, fallbackOptions = []) => {
 }
 .arco-card:active .func-icon { color: #8A0515; }
 .arco-card:active .func-name { color: #8A0515; }
+.arco-card:disabled {
+  background: #FAFAFA;
+  border-color: #E5E6EB;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+.arco-card:disabled .func-icon,
+.arco-card:disabled .func-name {
+  color: #86909C;
+}
+@media (max-width: 359px) {
+  .banner-section { padding: 12px; }
+  .banner-subtitle { font-size: var(--app-font-size-caption); }
+  .banner-btn { padding: 0 8px; font-size: var(--app-font-size-caption); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .arco-card { transition: none; }
+}
 </style>
