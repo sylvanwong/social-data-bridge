@@ -6,6 +6,7 @@ import { parse as parseJS } from '@babel/parser';
 import { computed, createRenderer, nextTick, ref } from 'vue';
 import { useTaskFeedback } from '../src/composables/useTaskFeedback.mjs';
 import { loadRequestModule } from './helpers/requestService.mjs';
+import { buildProfileTaskResult } from '../src/utils/profileTaskResult.mjs';
 import { getPendingWriteLimit } from '../src/utils/taskWriteState.mjs';
 
 const pages = [
@@ -32,7 +33,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
     'submitting', 'isSubmitting', 'cancelling', 'isCancelling', 'clearing', 'taskId',
     'activeKeywordTaskId', 'activeProfileTaskId', 'activeCommentTaskId', 'activeSeriesTaskId',
     'hasRecoverableTask', 'requiresReopen', 'recoveryRequiresReopen', 'componentUnmounted',
-    'activeStreamTask', 'activeSeriesTask', 'feedback', 'storageKey', 'STREAM_TASK_STORAGE_KEY',
+    'activeStreamTask', 'activeSeriesTask', 'feedback', 'latestProfileResult', 'storageKey', 'STREAM_TASK_STORAGE_KEY',
     'TASK_TOAST_SUFFIX', 'STREAM_RESULT_LIMIT', 'listPageSize', 'normalizeCommentId',
     'showToast', 'hideToast', 'showCompletionToast', 'finishToast', 'showErrorMsg',
     'showFieldProgress', 'showProfileFieldProgress', 'getStreamProgressText',
@@ -60,7 +61,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
     bitable, (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; }, id => timers.delete(id));
   const dependencies = {
     ...loadRequestModule(),
-    computed, ref, nextTick, useTaskFeedback, useIncrementalTask, getTaskStoppingText, getPendingWriteLimit,
+    computed, ref, nextTick, useTaskFeedback, useIncrementalTask, getTaskStoppingText, getPendingWriteLimit, buildProfileTaskResult,
     loading: ref(false), props: { api_key: 'test-key' }, commentSubmission: { pending: null },
     ElMessage: notice => notices.push(notice), showErrorMsg: message => notices.push({ message }),
     console: { error() {}, log() {} },

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { buildProfileTaskResult } from '../src/utils/profileTaskResult.mjs';
 
 const file = new URL('../src/utils/taskStopText.js', import.meta.url);
 test('五类任务区分正在停止、剩余写入和已写完，数量按结果条数计算', () => {
@@ -40,6 +41,9 @@ for (const [page, engine, label] of [['CommentFetch','commentStreamTask','评论
       loading:{value:true}, hasRecoverableTask:{value:true}, recoveryRequiresReopen:{value:false},
       activeKeywordTaskId:{value:'task'}, activeCommentTaskId:{value:'task'}, activeProfileTaskId:{value:'task'},
       activeSeriesTaskId:{value:'task'}, taskId:{value:'task'} };
+    if (page === 'ProfileFetch') {
+      Object.assign(bindings, { latestProfileResult: { value: null }, buildProfileTaskResult });
+    }
     const load = name => {
       const node=properties.find(n=>n.key.name===name).value;
       return new Function(...Object.keys(bindings),`return (${source.slice(node.start,node.end)});`)(...Object.values(bindings));
