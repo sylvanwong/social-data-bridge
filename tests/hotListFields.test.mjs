@@ -11,13 +11,13 @@ function fieldLoader() {
   const source = parse(fs.readFileSync(new URL('../src/components/HotListFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
   const declarations = parseJS(source, { sourceType: 'module' }).program.body
     .filter(node => node.type === 'VariableDeclaration');
-  const selected = declarations.filter(node => node.declarations.some(item => ['targetFieldReadId', 'loadTargetFieldOptions'].includes(item.id.name)));
+  const selected = declarations.filter(node => node.declarations.some(item => ['targetFieldReadId', 'isCurrentTargetFieldRead', 'loadTargetFieldOptions'].includes(item.id.name)));
   const pending = new Map();
   const targetFieldOptions = { value: [{ id: 'previous' }] };
   const bitable = { base: { getTableById: async id => ({
     getFieldMetaList: () => new Promise((resolve, reject) => pending.set(id, { resolve, reject })),
   }) } };
-  const load = new Function('bitable', 'targetFieldOptions', selected.map(node => source.slice(node.start, node.end)).join('\n') + '\nreturn loadTargetFieldOptions;')(bitable, targetFieldOptions);
+  const load = new Function('bitable', 'targetFieldOptions', 'componentUnmounted', selected.map(node => source.slice(node.start, node.end)).join('\n') + '\nreturn tableId => loadTargetFieldOptions(tableId, ++targetFieldReadId);')(bitable, targetFieldOptions, false);
   return { load, pending, targetFieldOptions };
 }
 
@@ -150,7 +150,7 @@ for (const failFirst of [false, true]) {
 
 function configEditor() {
   const source = parse(fs.readFileSync(new URL('../src/components/HotListFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
-  const names = ['tableConfigLoading', 'tableConfigError', 'tableOutputConfigsLoaded', 'tableConfigSaves', 'mainOutputTableId', 'tableConfigReady', 'tableConfigReadId', 'tableConfigsRequest', 'targetFieldReadId', 'loadTargetFieldOptions', 'loadTableOutputConfigs', 'applyTableOutputConfig', 'persistTableOutputConfig', 'saveTableOutputConfig'];
+  const names = ['tableConfigLoading', 'tableConfigError', 'tableOutputConfigsLoaded', 'tableConfigSaves', 'mainOutputTableId', 'tableConfigReady', 'tableConfigsRequest', 'targetFieldReadId', 'isCurrentTargetFieldRead', 'loadTargetFieldOptions', 'loadTableOutputConfigs', 'applyTableOutputConfig', 'persistTableOutputConfig', 'saveTableOutputConfig'];
   const nodes = parseJS(source, { sourceType: 'module' }).program.body.filter(node => node.type === 'VariableDeclaration' && node.declarations.some(item => names.includes(item.id.name)));
   const formData = ref({ radio: 2, table_id: 'A' });
   const mappingDraft = ref([{ source_key: 'title', target_field_id: 'original' }]);
@@ -159,7 +159,7 @@ function configEditor() {
   let fieldRead = async id => [{ id: `${id}-title`, name: id }];
   const bindings = {
     ref, computed, createTableConfigSaver, parseTableConfigList, formData, mappingDraft, targetFieldOptions: ref([]), tableOutputConfigs: ref({}),
-    props: { api_key: 'test-only' }, getBaseId: async () => 'base',
+    props: { api_key: 'test-only' }, getBaseId: async () => 'base', componentUnmounted: false,
     bitable: { base: { getTableById: async id => ({ getFieldMetaList: () => fieldRead(id), getName: async () => id }) } },
     request: async args => {
       if (args.method === 'get') return { data: response };

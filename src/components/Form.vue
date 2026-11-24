@@ -311,6 +311,10 @@ const fetchPlatformConfig = async (name, fallbackOptions = [], isCurrent = () =>
         </button>
       </div>
       <div v-else class="cards-grid">
+        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('productSearch')">
+          <div class="func-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="10" cy="10" r="6" /><path d="m15 15 6 6M7 10h6M10 7v6" /></svg></div>
+          <span class="func-name">商品搜索</span>
+        </button>
         <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('productDetail')">
           <div class="func-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
@@ -319,10 +323,6 @@ const fetchPlatformConfig = async (name, fallbackOptions = [], isCurrent = () =>
             </svg>
           </div>
           <span class="func-name">商品详情</span>
-        </button>
-        <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('productSearch')">
-          <div class="func-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="10" cy="10" r="6" /><path d="m15 15 6 6M7 10h6M10 7v6" /></svg></div>
-          <span class="func-name">商品搜索</span>
         </button>
         <button type="button" class="arco-card" :disabled="api_key_saving" @click="openPage('productReview')">
           <div class="func-icon">
