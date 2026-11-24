@@ -3,6 +3,7 @@ import { getPendingWriteLimit } from '../utils/taskWriteState.mjs';
 import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import { getTaskStoppingText } from '@/utils/taskStopText';
 import TaskFeedback from './TaskFeedback.vue';
+import PageStepper from './PageStepper.vue';
 import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { bitable } from "@lark-base-open/js-sdk";
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
@@ -1162,13 +1163,7 @@ watch(selectedFieldKeys, (keys) => {
           <el-radio-group v-model="formData1.workFetchRange.type" class="custom-radio-group">
             <el-radio v-for="item in workRangeTypes" :key="item.value" :value="item.value" :disabled="item.value === 'days' && !supportsDayRange ? true : undefined" class="custom-radio-item">
               <span class="radio-label-text">{{ item.label }}</span>
-              <div v-if="item.value === 'pages'" class="custom-stepper-input range-stepper" :class="{ 'is-disabled': formData1.workFetchRange.type !== 'pages' }">
-                <input v-model.number="formData1.workFetchRange.pages" type="number" min="1" max="50" :disabled="formData1.workFetchRange.type !== 'pages'" @click.stop />
-                <div class="stepper-buttons">
-                  <button type="button" class="stepper-btn stepper-btn-up" :disabled="formData1.workFetchRange.type !== 'pages'" aria-label="增加页数" @click.stop="formData1.workFetchRange.pages = Math.min(50, (formData1.workFetchRange.pages || 1) + 1)"></button>
-                  <button type="button" class="stepper-btn stepper-btn-down" :disabled="formData1.workFetchRange.type !== 'pages'" aria-label="减少页数" @click.stop="formData1.workFetchRange.pages = Math.max(1, (formData1.workFetchRange.pages || 1) - 1)"></button>
-                </div>
-              </div>
+              <PageStepper v-if="item.value === 'pages'" v-model="formData1.workFetchRange.pages" label="作品获取页数" :disabled="formData1.workFetchRange.type !== 'pages'" />
               <span v-if="item.value === 'pages'" class="range-unit">页</span>
               <div v-if="item.value === 'days'" class="custom-stepper-input range-stepper" :class="{ 'is-disabled': formData1.workFetchRange.type !== 'days' }">
                 <input v-model.number="formData1.workFetchRange.days" type="number" min="1" max="365" :disabled="formData1.workFetchRange.type !== 'days'" @click.stop />

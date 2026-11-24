@@ -18,7 +18,7 @@ export function buildProductSearchRequest(form, token = '') {
   for (const [input, key] of [['minPrice', 'min_price'], ['maxPrice', 'max_price']]) {
     if (form[input] == null || form[input] === '') continue;
     const value = Number(form[input]);
-    if (!Number.isInteger(value) || value <= 0) throw new Error('价格须为大于0的整数，单位为元');
+    if (!Number.isInteger(value) || value <= 0) throw new Error('价格须为大于0的整数');
     data[key] = value;
   }
   if (data.min_price != null && data.max_price != null && data.min_price > data.max_price) throw new Error('最低价格不能大于最高价格');
@@ -39,8 +39,8 @@ export function createProductSearchFields({ FieldType, NumberFormatter }) {
     { key: 'sku_id', name: 'SKU ID' },
     { key: 'spu_id', name: 'SPU ID', hint: '仅小红书' },
     { key: 'description', name: '商品描述', hint: '仅小红书' },
-    { key: 'price', name: '价格（元）', type: FieldType.Number },
-    { key: 'coupon_price', name: '券后价（元）', type: FieldType.Number, hint: '仅小红书' },
+    { key: 'price', name: '价格', legacyNames: ['价格（元）'], type: FieldType.Number },
+    { key: 'coupon_price', name: '券后价', legacyNames: ['券后价（元）'], type: FieldType.Number, hint: '仅小红书' },
     { key: 'shop_avatar_url', name: '店铺头像', hint: '仅小红书' },
     { key: 'sales_text', name: '销量原文', hint: '仅小红书' },
     { key: 'stock_quantity', name: '库存', type: FieldType.Number, formatter: NumberFormatter.INTEGER, hint: '仅小红书' },

@@ -5,7 +5,7 @@ import TaskFeedback from './TaskFeedback.vue';
 import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import { bitable, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
-import { computed, ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted, onUnmounted, watch } from "vue";
 import { ElMessage } from "element-plus";
 import request, { feishuRequest, buildFeishuApiPath } from '@/utils/request'
 import { fetchPlatformConfigOptions } from '@/utils/platformConfig'
@@ -56,6 +56,9 @@ const props = defineProps({
 
 const emit = defineEmits(['back']);
 
+let componentUnmounted = false;
+onUnmounted(() => { componentUnmounted = true; });
+
 const formData = ref({
   radio: 1,
   table_id: "",
@@ -83,7 +86,6 @@ const tableConfigReady = computed(() => formData.value.radio !== 2 || (
   !!formData.value.table_id && mainOutputTableId.value === formData.value.table_id
   && !tableConfigLoading.value && !tableConfigError.value
 ));
-let tableConfigReadId = 0;
 let tableConfigsRequest = null;
 const mappingStatus = computed(() => {
   const count = mappingDraft.value.filter(item => item?.source_key && item?.target_field_id).length;
@@ -153,6 +155,7 @@ const loadSelectedFieldKeys = async () => {
 
   try {
     const savedValue = await bitable.bridge.getData(FIELD_SELECTION_STORAGE_KEY);
+    if (componentUnmounted) return;
 
     if (!Array.isArray(savedValue)) {
       selectedFieldKeys.value = defaultKeys;
@@ -164,6 +167,7 @@ const loadSelectedFieldKeys = async () => {
     const mergedKeys = Array.from(new Set([...validKeys, ...requiredKeys]));
     selectedFieldKeys.value = mergedKeys.length > 0 ? mergedKeys : defaultKeys;
   } catch (error) {
+    if (componentUnmounted) return;
     console.error('读取字段勾选状态失败:', error);
     selectedFieldKeys.value = defaultKeys;
   }
@@ -179,28 +183,34 @@ const saveSelectedFieldKeys = async (keys) => {
   }
 };
 let targetFieldReadId = 0;
-const loadTargetFieldOptions = async (tableId) => {
-  const readId = ++targetFieldReadId;
+const isCurrentTargetFieldRead = readId => !componentUnmounted && readId === targetFieldReadId;
+const loadTargetFieldOptions = async (tableId, readId) => {
   targetFieldOptions.value = [];
   if (!tableId) return;
   try {
-    const fields = await (await bitable.base.getTableById(tableId)).getFieldMetaList();
-    if (readId !== targetFieldReadId) return false;
+    const table = await bitable.base.getTableById(tableId);
+    if (!isCurrentTargetFieldRead(readId)) return false;
+    const fields = await table.getFieldMetaList();
+    if (!isCurrentTargetFieldRead(readId)) return false;
     targetFieldOptions.value = fields;
     return true;
   } catch (error) {
-    if (readId === targetFieldReadId) targetFieldOptions.value = [];
+    if (isCurrentTargetFieldRead(readId)) targetFieldOptions.value = [];
     return false;
   }
 };
 const getBaseId = async () => (await bitable.base.getSelection()).baseId || '';
 const loadTableOutputConfigs = async () => {
+  if (componentUnmounted) return false;
   if (tableOutputConfigsLoaded.value) return true;
   if (tableConfigsRequest) return tableConfigsRequest;
   tableConfigsRequest = (async () => {
     try {
       if (!props.api_key) throw new Error('请先设置 API Key');
-      const response = await feishuRequest({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: await getBaseId() } });
+      const baseId = await getBaseId();
+      if (componentUnmounted) return false;
+      const response = await feishuRequest({ url: TABLE_CONFIGS_API_PATH, method: 'get', headers: { authorization: `Bearer ${props.api_key}` }, params: { plugin_type: TASK_PLUGIN_TYPE, base_id: baseId } });
+      if (componentUnmounted) return false;
       if (response.data?.sta !== 0) throw new Error(response.data?.msg || '读取表格配置失败');
       const data = response.data?.data;
       const list = parseTableConfigList(data);
@@ -208,7 +218,7 @@ const loadTableOutputConfigs = async () => {
       tableOutputConfigsLoaded.value = true;
       return true;
     } catch (error) {
-      console.error('读取表格配置失败:', error);
+      if (!componentUnmounted) console.error('读取表格配置失败:', error);
       return false;
     }
   })();
@@ -216,27 +226,30 @@ const loadTableOutputConfigs = async () => {
   finally { tableConfigsRequest = null; }
 };
 const applyTableOutputConfig = async (tableId) => {
-  const readId = ++tableConfigReadId;
+  if (componentUnmounted) return;
+  const readId = ++targetFieldReadId;
   const pendingConfig = tableConfigSaves.get(tableId)?.config;
   mainOutputTableId.value = '';
   tableConfigError.value = '';
   tableConfigLoading.value = !!tableId;
   if (!tableId) {
-    await loadTargetFieldOptions('');
+    await loadTargetFieldOptions('', readId);
     return;
   }
   try {
-    if (!(await loadTableOutputConfigs())) throw new Error('无法读取表格配置，请重试');
-    if (readId !== tableConfigReadId) return;
-    if (!(await loadTargetFieldOptions(tableId))) throw new Error('无法读取目标表字段，请重试');
-    if (readId !== tableConfigReadId) return;
+    const configsLoaded = await loadTableOutputConfigs();
+    if (!isCurrentTargetFieldRead(readId)) return;
+    if (!configsLoaded) throw new Error('无法读取表格配置，请重试');
+    const fieldsLoaded = await loadTargetFieldOptions(tableId, readId);
+    if (!isCurrentTargetFieldRead(readId)) return;
+    if (!fieldsLoaded) throw new Error('无法读取目标表字段，请重试');
     const config = tableConfigSaves.get(tableId)?.config || pendingConfig || tableOutputConfigs.value[tableId];
     mappingDraft.value = Array.isArray(config?.field_mappings) ? config.field_mappings.map(item => ({ ...item })) : [];
     mainOutputTableId.value = tableId;
   } catch (error) {
-    if (readId === tableConfigReadId) tableConfigError.value = error.message;
+    if (isCurrentTargetFieldRead(readId)) tableConfigError.value = error.message;
   } finally {
-    if (readId === tableConfigReadId) tableConfigLoading.value = false;
+    if (isCurrentTargetFieldRead(readId)) tableConfigLoading.value = false;
   }
 };
 const persistTableOutputConfig = createTableConfigSaver(async ({ targetTableId, fieldMappings }) => {
@@ -276,8 +289,7 @@ const createSequentialTable = async (baseTableName) => {
   return await bitable.base.addTable({ name });
 };
 
-const setupTableFields = async (tableId, isNewTable = false) => {
-  const activeFieldMapping = getActiveFieldMapping();
+const setupTableFields = async (tableId, isNewTable = false, activeFieldMapping = getActiveFieldMapping()) => {
   const table = await bitable.base.getTableById(tableId);
   const fieldMetaList = await table.getFieldMetaList();
   const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
@@ -338,18 +350,18 @@ const setupTableFields = async (tableId, isNewTable = false) => {
   }
 };
 
-const validateTableFields = async (tableId, options = {}) => {
+const validateTableFields = async (tableId, { throwOnError = false, activeFieldMapping = getActiveFieldMapping() } = {}) => {
   try {
     if (mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
-    if (getActiveFieldMapping().length === 0) {
-      if (options.throwOnError) throw new Error("请至少选择一个需要更新的字段");
+    if (activeFieldMapping.length === 0) {
+      if (throwOnError) throw new Error("请至少选择一个需要更新的字段");
       showErrorMsg("请至少选择一个需要更新的字段");
       return false;
     }
-    await setupTableFields(tableId);
+    await setupTableFields(tableId, false, activeFieldMapping);
     return true;
   } catch (error) {
-    if (options.throwOnError) throw error;
+    if (throwOnError) throw error;
     console.error("验证表格字段时出错:", error);
     showErrorMsg(error.message || "验证表格字段失败，请稍后重试");
     return false;
@@ -365,11 +377,13 @@ const loadPlatformOptions = async () => {
 
   try {
     const options = await fetchPlatformConfigOptions(props.api_key, props.config_name, []);
+    if (componentUnmounted) return;
     platformOptions.value = options;
     if (!options.some(option => option.value === formData.value.platform)) {
       formData.value.platform = options[0]?.value || "";
     }
   } catch (error) {
+    if (componentUnmounted) return;
     console.error("获取平台配置失败:", error);
     platformOptions.value = [];
     formData.value.platform = "";
@@ -432,8 +446,7 @@ const extractList = (payload) => {
   return [];
 };
 
-const writeDataToTable = async (table, list, isExistingTable = false) => {
-  const activeFieldMapping = getActiveFieldMapping();
+const writeDataToTable = async (table, list, isExistingTable = false, activeFieldMapping = getActiveFieldMapping()) => {
   const fieldMetaList = await table.getFieldMetaList();
   const fieldMetaMap = new Map(fieldMetaList.map(meta => [meta.name, meta.id]));
   const fieldList = [];
@@ -468,7 +481,7 @@ const writeDataToTable = async (table, list, isExistingTable = false) => {
   await table.addRecords(records);
 };
 
-const submit = async (targetTableId = "") => {
+const submit = async (targetTableId = "", activeFieldMapping = getActiveFieldMapping()) => {
   if (!props.api_key) {
     showErrorMsg("请输入 API Key");
     return;
@@ -477,7 +490,7 @@ const submit = async (targetTableId = "") => {
     showErrorMsg("请选择平台");
     return;
   }
-  if (getActiveFieldMapping().length === 0) {
+  if (activeFieldMapping.length === 0) {
     showErrorMsg("请至少选择一个需要更新的字段");
     return;
   }
@@ -492,6 +505,7 @@ const submit = async (targetTableId = "") => {
       headers: { authorization: `Bearer ${props.api_key}` },
       params: {
         social_type: formData.value.platform,
+        selected_field_keys: activeFieldMapping.map(field => field.key).join(','),
       },
     });
     const res = response.data;
@@ -509,13 +523,13 @@ const submit = async (targetTableId = "") => {
     if (!currentTableId) {
       const tableName = '热榜获取';
       const { tableId } = await createSequentialTable(tableName);
-      await setupTableFields(tableId, true);
+      await setupTableFields(tableId, true, activeFieldMapping);
       await bitable.ui.switchToTable(tableId);
       currentTableId = tableId;
     }
 
     const table = await bitable.base.getTableById(currentTableId);
-    await writeDataToTable(table, list, Boolean(targetTableId));
+    await writeDataToTable(table, list, Boolean(targetTableId), activeFieldMapping);
 
     showToast(`处理完成：成功 ${list.length} 条，失败 0 条`, false);
 
@@ -528,10 +542,11 @@ const submit = async (targetTableId = "") => {
 };
 
 const commit = async () => {
-  if (loading.value || isSubmitting.value || noticeRequiresReopen.value) return;
+  if (!fieldSelectionReady.value || loading.value || isSubmitting.value || noticeRequiresReopen.value) return;
   if (!props.api_key) return showErrorMsg("请输入 API Key");
   if (!formData.value.platform) return showErrorMsg("请选择平台");
-  if (!getActiveFieldMapping().length) return showErrorMsg("请至少选择一个需要更新的字段");
+  const activeFieldMapping = getActiveFieldMapping();
+  if (!activeFieldMapping.length) return showErrorMsg("请至少选择一个需要更新的字段");
   isSubmitting.value = true;
   try {
     if (formData.value.radio === 2) {
@@ -545,11 +560,13 @@ const commit = async () => {
         return;
       }
       showToast("正在检查目标表字段…", true, { begin: true });
-      if (await validateTableFields(tableId, { throwOnError: true })) await submit(tableId);
+      if (await validateTableFields(tableId, { throwOnError: true, activeFieldMapping })) {
+        await submit(tableId, activeFieldMapping);
+      }
       return;
     }
     showToast("正在准备获取热榜…", true, { begin: true });
-    await submit("");
+    await submit("", activeFieldMapping);
   } catch (error) {
     taskFeedback.fail(error);
   } finally {
@@ -559,9 +576,11 @@ const commit = async () => {
 
 onMounted(async () => {
   await loadPlatformOptions();
+  if (componentUnmounted) return;
   await loadSelectedFieldKeys();
-  await loadTableOutputConfigs();
+  if (componentUnmounted) return;
   fieldSelectionReady.value = true;
+  await loadTableOutputConfigs();
 });
 
 watch(selectedFieldKeys, (keys) => {
@@ -623,9 +642,15 @@ watch(selectedFieldKeys, (keys) => {
           <el-form-item label="" style="margin-top: 12px">
             <div class="field-selection-title">
               <div class="c-label">输出字段</div>
-              <el-checkbox :model-value="isAllFieldsSelected" :indeterminate="isFieldsIndeterminate" class="select-all-fields" @change="toggleAllFields">全选</el-checkbox>
+              <el-checkbox
+                :model-value="isAllFieldsSelected"
+                :indeterminate="isFieldsIndeterminate"
+                :disabled="!fieldSelectionReady"
+                class="select-all-fields"
+                @change="toggleAllFields"
+              >全选</el-checkbox>
             </div>
-            <el-checkbox-group v-model="selectedFieldKeys" class="field-checkbox-group">
+            <el-checkbox-group v-model="selectedFieldKeys" :disabled="!fieldSelectionReady" class="field-checkbox-group">
               <el-checkbox
                 v-for="field in FIELD_MAPPING"
                 :key="field.key"
@@ -652,7 +677,13 @@ watch(selectedFieldKeys, (keys) => {
       </div>
 
       <p v-if="taskNotice" class="sub-hint" role="status">{{ taskNotice }}</p>
-      <el-button color="#a8071a" class="commit-btn" :loading="loading || isSubmitting" :disabled="!tableConfigReady || loading || isSubmitting || noticeRequiresReopen" @click="commit">{{ loading ? '执行中…' : isSubmitting ? '准备中…' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
+      <el-button
+        color="#a8071a"
+        class="commit-btn"
+        :loading="!fieldSelectionReady || loading || isSubmitting"
+        :disabled="!fieldSelectionReady || !tableConfigReady || loading || isSubmitting || noticeRequiresReopen"
+        @click="commit"
+      >{{ loading ? '执行中…' : (!fieldSelectionReady || isSubmitting) ? '准备中…' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
     </div>
 
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />

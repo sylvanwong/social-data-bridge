@@ -11,6 +11,7 @@ import { useIncrementalTask } from '../composables/useIncrementalTask';
 import { getPendingWriteLimit } from '../utils/taskWriteState.mjs';
 import { getTaskStoppingText } from '../utils/taskStopText';
 import TaskFeedback from './TaskFeedback.vue';
+import PageStepper from './PageStepper.vue';
 
 const props = defineProps({ api_key: String });
 const emit = defineEmits(['back']);
@@ -22,7 +23,11 @@ const loading = ref(false), stopping = ref(false), ready = ref(false);
 const submitting = ref(false), clearing = ref(false), hasRecoverableTask = ref(false), requiresReopen = ref(false);
 const activeTaskId = ref('');
 const tableOptions = ref([]), targetFields = ref([]), mappings = ref([]), mappingExpanded = ref(false);
-const targetLoading = ref(false), targetError = ref(''), saveError = ref(''), loadedTableId = ref('');
+const targetLoading = ref(false), targetError = ref(''), loadedTableId = ref('');
+const configSaveErrors = ref({});
+const saveError = computed(() => form.value.targetType === 'existing' ? configSaveErrors.value[form.value.targetTableId] || '' : '');
+const pendingConfigSaves = ref({});
+const configSaving = computed(() => form.value.targetType === 'existing' && !!pendingConfigSaves.value[form.value.targetTableId]);
 const feedback = useTaskFeedback();
 const { toastVisible, toastText, toastType, taskNotice } = feedback;
 const { createAndWriteData, validateTableFields } = useSocialData(() => '商品搜索', '', FIELD_CONFIG);
@@ -41,13 +46,15 @@ const assertMounted = value => { if (disposed) { const error = new Error('页面
 
 const configPath = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
 const saveConfig = createTableConfigSaver(async config => {
-  const response = await feishuRequest({ url: configPath, method: 'put', headers: headers(), data: config });
+  assertMounted();
+  const baseId = (await bitable.base.getSelection()).baseId; assertMounted();
+  const response = await feishuRequest({ url: configPath, method: 'put', headers: headers(), data: { ...config, base_id: baseId } });
   if (response.data?.sta !== 0) throw new Error(response.data?.msg || '保存表格配置失败');
 });
 const loadTarget = async () => {
   if (loading.value || hasRecoverableTask.value) return;
   const id = ++readId, tableId = form.value.targetTableId;
-  loadedTableId.value = ''; targetFields.value = []; targetError.value = ''; saveError.value = '';
+  loadedTableId.value = ''; targetFields.value = []; targetError.value = '';
   targetLoading.value = true;
   const owns = () => !disposed && id === readId && form.value.targetType === 'existing' && tableId === form.value.targetTableId;
   try {
@@ -62,8 +69,10 @@ const loadTarget = async () => {
     const config = drafts.get(tableId) || cloud || { write_mode: 'upsert', field_mappings: [] };
     applying = true;
     form.value.writeMode = config.write_mode === 'append' ? 'append' : 'upsert';
-    mappings.value = (config.field_mappings || []).filter(row => selectedKeys.value.includes(row.source_key)).map(row => ({ ...row }));
+    mappings.value = (config.field_mappings || []).filter(row => !row.source_key || selectedKeys.value.includes(row.source_key)).map(row => ({ ...row }));
     applying = false;
+    // 配置回显不能替换已有草稿，否则在途保存会丢失归属。
+    if (!drafts.has(tableId)) drafts.set(tableId, { write_mode: form.value.writeMode, field_mappings: mappings.value.map(row => ({ ...row })) });
     targetFields.value = fields; loadedTableId.value = tableId;
   } catch (error) { if (owns()) targetError.value = error?.message || '读取表格配置失败'; }
   finally { if (!disposed && id === readId) targetLoading.value = false; }
@@ -74,17 +83,23 @@ const persistOutput = async () => {
   const draft = { write_mode: form.value.writeMode, field_mappings: mappings.value.map(row => ({ ...row })) };
   drafts.set(tableId, draft);
   if (draft.field_mappings.some(row => !row.source_key || !row.target_field_id)) return;
-  saveError.value = '';
+  configSaveErrors.value[tableId] = '';
+  pendingConfigSaves.value[tableId] = (pendingConfigSaves.value[tableId] || 0) + 1;
   try {
-    const baseId = (await bitable.base.getSelection()).baseId; assertMounted();
-    await saveConfig({ targetTableId: tableId, base_id: baseId, target_table_id: tableId, plugin_type: 'product_search', ...draft });
-  } catch (error) { if (!disposed && form.value.targetTableId === tableId && drafts.get(tableId) === draft) saveError.value = error.message; }
+    await saveConfig({ targetTableId: tableId, target_table_id: tableId, plugin_type: 'product_search', ...draft });
+  } catch (error) { if (!disposed && drafts.get(tableId) === draft) configSaveErrors.value[tableId] = error.message; }
+  finally { if (!disposed) pendingConfigSaves.value[tableId]--; }
 };
 watch([() => form.value.writeMode, mappings], persistOutput, { deep: true, flush: 'sync' });
 watch([() => form.value.targetType, () => form.value.targetTableId], loadTarget);
 watch(selectedKeys, keys => {
   if (!ready.value || loading.value) return;
   mappings.value = mappings.value.filter(row => !row.source_key || keys.includes(row.source_key));
+  // 配置重读期间也保留已加载草稿的删减；云端保存仍等待 outputReady。
+  const draft = form.value.targetType === 'existing' && drafts.get(form.value.targetTableId);
+  if (draft && !applying && !submitting.value && !hasRecoverableTask.value) {
+    draft.field_mappings = draft.field_mappings.filter(row => !row.source_key || keys.includes(row.source_key));
+  }
   void bitable.bridge.setData('product_search_fields_v1', [...keys]).catch(error => { if (!disposed) ElMessage({ type: 'error', message: error.message }); });
 }, { deep: true });
 const loadTables = async () => {
@@ -151,7 +166,7 @@ const searchTask = useIncrementalTask({
     if (disposed) return;
     clearing.value = false; loading.value = false; stopping.value = false; activeTaskId.value = ''; hasRecoverableTask.value = false;
     if (form.value.targetType === 'existing') {
-      drafts.set(form.value.targetTableId, { write_mode: form.value.writeMode, field_mappings: mappings.value.map(row => ({ ...row })) });
+      if (!drafts.has(form.value.targetTableId)) drafts.set(form.value.targetTableId, { write_mode: form.value.writeMode, field_mappings: mappings.value.map(row => ({ ...row })) });
       void loadTarget();
     }
     if (Number(status.status) === 2) feedback.fail(`商品搜索失败，已写入 ${task.writtenCount || 0} 条商品：${status.reason || '获取失败'}`);
@@ -167,11 +182,13 @@ const searchTask = useIncrementalTask({
 const resumeSavedTask = async () => {
   if (disposed || loading.value || requiresReopen.value) return;
   loading.value = true;
+  feedback.begin('正在检查未完成任务…');
   try {
     const resumed = await searchTask.resume(task => restoreTask(task, true));
     if (!resumed && !disposed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
+      else feedback.hide();
     }
   } catch (error) {
     if (disposed) return;
@@ -192,8 +209,10 @@ const handleSubmit = async () => {
     if (input.targetType === 'existing' && (!input.targetTableId || !outputReady.value)) throw new Error(targetError.value || '请等待目标表配置就绪，或重新读取配置');
     if (fieldMappings.some(row => !row.source_key || !row.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
     const targetId = input.targetType === 'existing' ? input.targetTableId : '';
-    if (targetId) await validateTableFields(targetId, keys, { uniqueKey: 'product_id', writeMode: input.writeMode, fieldMappings, assertActive: assertMounted, throwOnError: true });
-    assertMounted(); loading.value = true; stopping.value = false; feedback.begin('正在启动商品搜索…');
+    feedback.begin('正在启动商品搜索…');
+    loading.value = true; stopping.value = false;
+    if (targetId) await validateTableFields(targetId, keys, { uniqueKey: 'product_id', writeMode: input.writeMode, fieldMappings, assertActive: assertMounted, throwOnError: true, onProgress: feedback.progress });
+    assertMounted();
     await searchTask.submit(async () => {
       const response = await feishuRequest({ url: buildFeishuApiPath('/v1/feishu/product/search/task'), method: 'post', headers: headers(),
         data: { social_type: input.platform, keyword, pages: input.range === 'all' ? 0 : input.pages, filter_config } });
@@ -201,7 +220,16 @@ const handleSubmit = async () => {
       return { taskId: response.data.data.task_id, pendingWrite: false, apiBaseUrl: FEISHU_API_BASE_URL, apiPathPrefix: FEISHU_API_PATH_PREFIX,
         formData: input, selectedFieldKeys: keys, fieldMappings, writeMode: input.writeMode, targetTableId: targetId };
     }, task => restoreTask(task));
-  } catch (error) { if (!disposed) { loading.value = false; feedback.fail(error); } }
+  } catch (error) {
+    if (!disposed) {
+      if (loading.value) feedback.fail(error);
+      else {
+        feedback.hide();
+        ElMessage({ message: error?.response?.data?.msg || error?.message || String(error), type: 'error', plain: true, duration: 3000 });
+      }
+      loading.value = false;
+    }
+  }
   finally { if (!disposed) submitting.value = false; }
 };
 const cancelTask = async () => {
@@ -238,11 +266,22 @@ const handleAction = () => actionState.value === 'running' ? cancelTask() : acti
             <el-form-item><div class="c-label">商品关键词</div><el-input v-model="form.keyword" type="textarea" :rows="3" placeholder="请输入商品名称、品牌或品类，多个关键词用换行、中英文逗号分隔，最多100个" /></el-form-item>
             <template v-if="form.platform === 'douyin'">
               <el-form-item><div class="c-label">商品排序</div><el-select v-model="form.sortType" style="width:100%"><el-option v-for="item in PRODUCT_SEARCH_SORTS" :key="item.value" :value="item.value" :label="item.label" /></el-select></el-form-item>
-              <el-form-item><div class="c-label">价格区间（元）</div><div class="price-range"><el-input v-model="form.minPrice" type="number" min="1" step="1" placeholder="最低价格" /><span>至</span><el-input v-model="form.maxPrice" type="number" min="1" step="1" placeholder="最高价格" /></div></el-form-item>
+              <el-form-item><div class="c-label">价格区间</div><div class="price-range"><el-input v-model="form.minPrice" type="number" min="1" step="1" placeholder="最低价格" /><span>至</span><el-input v-model="form.maxPrice" type="number" min="1" step="1" placeholder="最高价格" /></div></el-form-item>
               <el-form-item><div class="c-label">卖点筛选</div><el-select v-model="form.sellingPoint" style="width:100%"><el-option value="all" label="不限" /><el-option value="high_sales" label="月销过万" /><el-option value="high_rating" label="好评多" /></el-select></el-form-item>
               <el-form-item><div class="c-label">商品服务</div><div class="service-options"><el-checkbox v-for="item in PRODUCT_SEARCH_SERVICES" :key="item.key" v-model="form[item.key]">{{ item.label }}</el-checkbox></div></el-form-item>
             </template>
-            <el-form-item><div class="c-label">商品获取范围</div><el-radio-group v-model="form.range" class="custom-radio-group"><el-radio value="pages" class="custom-radio-item"><span>前</span><el-input-number v-model="form.pages" :min="1" :max="50" :precision="0" size="small" :disabled="form.range !== 'pages'" @click.stop /><span>页</span></el-radio><el-radio value="all">全部商品</el-radio></el-radio-group></el-form-item>
+            <el-form-item>
+              <div class="c-label">商品获取范围</div>
+              <el-radio-group v-model="form.range" class="custom-radio-group" aria-label="商品获取范围">
+                <el-radio value="pages">
+                  <span>前</span>
+                  <PageStepper :model-value="form.pages" label="商品获取页数" :disabled="form.range !== 'pages'" round-to-integer
+                    @update:model-value="form.pages = $event === '' ? null : $event" />
+                  <span class="range-unit">页</span>
+                </el-radio>
+                <el-radio value="all">全部商品</el-radio>
+              </el-radio-group>
+            </el-form-item>
           </section>
           <section class="settings-section settings-section-output" aria-labelledby="product-search-output">
             <h2 id="product-search-output" class="settings-section-heading"><span class="settings-step">2</span>输出设置</h2>
@@ -251,7 +290,8 @@ const handleAction = () => actionState.value === 'running' ? cancelTask() : acti
               <el-form-item><div class="c-label">选择现有表格</div><el-select v-model="form.targetTableId" style="width:100%" @visible-change="value => value && loadTables()"><el-option v-for="table in tableOptions" :key="table.id" :value="table.id" :label="table.name" /></el-select></el-form-item>
               <p v-if="targetLoading" class="sub-hint">正在读取目标表配置…</p>
               <p v-if="targetError" class="sub-hint" role="alert">{{ targetError }} <el-button link type="primary" @click="loadTarget">重新读取配置</el-button></p>
-              <p v-if="saveError" class="sub-hint" role="alert">{{ saveError }} <el-button link type="primary" @click="persistOutput">重试保存</el-button></p>
+              <p v-if="configSaving" class="sub-hint" role="status">正在保存字段映射…</p>
+              <p v-else-if="saveError" class="sub-hint" role="alert">{{ saveError }} <el-button link type="primary" @click="persistOutput">重试保存</el-button></p>
               <el-form-item><div class="c-label">数据写入方式</div><el-radio-group v-model="form.writeMode" :disabled="!outputReady"><el-radio value="upsert">更新或新增</el-radio><el-radio value="append">始终新增</el-radio></el-radio-group></el-form-item>
             </template>
             <div class="field-selection-content">
@@ -331,9 +371,10 @@ const handleAction = () => actionState.value === 'running' ? cancelTask() : acti
   box-sizing: border-box;
 }
 
-.settings-section-heading { display:flex; align-items:center; gap:8px; font-size:16px; font-weight:500; margin:0 0 16px; }
+.form { display:flex; flex-direction:column; gap:var(--app-space-section); }
+.settings-section { display:flex; flex-direction:column; gap:var(--app-space-group); }
+.settings-section-heading { display:flex; align-items:center; gap:8px; font-size:16px; font-weight:500; margin:0; }
 .settings-step { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; border-radius:50%; background:#fff1f2; color:#a8071a; font-size:12px; }
-.settings-section-output { margin-top:24px; padding-top:20px; border-top:1px solid #eff0f1; }
 .price-range { display:flex; align-items:center; gap:8px; width:100%; }
 .service-options { display:flex; flex-wrap:wrap; gap:0 16px; }
 .field-checkbox-group { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 16px; width:100%; }
@@ -348,24 +389,26 @@ const handleAction = () => actionState.value === 'running' ? cancelTask() : acti
   --el-checkbox-disabled-checked-icon-color:var(--el-checkbox-checked-icon-color);
 }
 .field-selection-content :deep(.el-checkbox__input + .el-checkbox__label) { color:#1d2129; font-family:inherit; font-size:var(--app-font-size-body); font-weight:var(--app-font-weight-regular); line-height:22px; }
-.field-hint { margin-left:4px; color:#8f959e; font-size:12px; }
-.custom-radio-group { display:flex; flex-direction:column; align-items:flex-start; gap:8px; width:100%; }
-.custom-radio-group :deep(.el-radio) { margin-right:0; }
-.custom-radio-item :deep(.el-radio__label) { display:inline-flex; align-items:center; gap:8px; }
-.custom-radio-item :deep(.el-input-number) { width:104px; }
-.field-selection-content { margin-bottom:16px; }
-.mapping-accordion { margin:12px 0 16px; border-top:1px solid #f0f1f3; border-bottom:1px solid #f0f1f3; }
-.mapping-accordion-trigger { display:flex; align-items:center; justify-content:space-between; width:100%; min-height:48px; padding:12px 0; background:transparent; border:0; color:#1d2129; cursor:pointer; text-align:left; }
-.mapping-accordion-body { padding-bottom:12px; }
+.field-hint { display:inline-block; margin-left:4px; color:#8f959e; font-size:12px; white-space:nowrap; }
+.custom-radio-group { display:flex; flex-direction:column; align-items:stretch; gap:var(--app-space-control); width:100%; }
+.custom-radio-group :deep(.el-radio) { display:flex; align-items:center; flex-wrap:nowrap; height:32px; margin-right:0; }
+.custom-radio-group :deep(.el-radio__input) { flex-shrink:0; margin-right:var(--app-space-control); }
+.custom-radio-group :deep(.el-radio__inner) { width:16px; height:16px; border-color:#e5e6eb; }
+.custom-radio-group :deep(.el-radio__input.is-checked .el-radio__inner) { border:4px solid #a8071a; background:#fff; }
+.custom-radio-group :deep(.el-radio__inner::after) { display:none; }
+.custom-radio-group :deep(.el-radio__label) { display:flex; align-items:center; padding-left:0; min-width:0; color:#1d2129; font-size:var(--app-font-size-body); font-weight:var(--app-font-weight-regular); line-height:22px; }
+.range-unit { margin-left:var(--app-space-control); color:#4e5969; }
+.mapping-accordion-trigger { display:flex; align-items:center; justify-content:space-between; width:100%; min-height:32px; padding:0; background:transparent; border:0; color:#1d2129; cursor:pointer; text-align:left; }
+.mapping-accordion-body { padding-top:var(--app-space-control); }
 .mapping-chevron { width:8px; height:8px; margin-right:4px; border-right:1.5px solid #86909c; border-bottom:1.5px solid #86909c; transform:rotate(45deg) translateY(-2px); }
 .mapping-chevron.is-expanded { transform:rotate(225deg) translateY(-2px); }
 .mapping-row { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
 .mapping-row :deep(.el-select) { flex:1; min-width:0; }
 .c-label { display:block; width:100%; margin-bottom:8px; color:#1d2129; font-size:14px; font-weight:500; line-height:20px; }
-.form :deep(.el-form-item) { margin-bottom:16px; }
+.form :deep(.el-form-item) { margin:0; }
 .form :deep(.el-input__wrapper),.form :deep(.el-select__wrapper) { min-height:36px; }
 .field-checkbox-group :deep(.el-checkbox__label) { white-space:normal; line-height:22px; }
 .sub-hint { font-size:12px; color:#8f959e; }
-.action-group { margin-top:20px; }
+.action-group { margin-top:var(--app-space-group); }
 .task-notice { margin-top:16px; font-size:13px; white-space:pre-wrap; overflow-wrap:anywhere; }
 </style>

@@ -10,6 +10,7 @@ import { parseManualUrls, extractCellLink } from '../utils/sourceLinks.mjs';
 import { useSocialData } from '../composables/useSocialData';
 import { useProductReviewTask } from '../composables/useProductReviewTask';
 import TaskFeedback from './TaskFeedback.vue';
+import PageStepper from './PageStepper.vue';
 
 const props = defineProps({ api_key: String });
 defineEmits(['back']);
@@ -463,13 +464,7 @@ onUnmounted(() => {
             <el-radio value="all">全部评价</el-radio>
             <el-radio value="pages">
               <span>前</span>
-              <div class="custom-stepper-input">
-                <input v-model.number="formData.pages" type="number" min="1" max="50" aria-label="商品评价页数" :disabled="busy || reviewPagesType !== 'pages'" @click.stop />
-                <div class="stepper-buttons">
-                  <button type="button" class="stepper-btn stepper-btn-up" aria-label="增加商品评价页数" :disabled="busy || reviewPagesType !== 'pages' || formData.pages >= 50" @click.stop="formData.pages = Math.min(50, (formData.pages || 1) + 1)"></button>
-                  <button type="button" class="stepper-btn stepper-btn-down" aria-label="减少商品评价页数" :disabled="busy || reviewPagesType !== 'pages' || formData.pages <= 1" @click.stop="formData.pages = Math.max(1, (formData.pages || 1) - 1)"></button>
-                </div>
-              </div>
+              <PageStepper v-model="formData.pages" label="商品评价页数" :disabled="busy || reviewPagesType !== 'pages'" />
               <span class="range-unit">页</span>
             </el-radio>
           </el-radio-group>
@@ -482,13 +477,7 @@ onUnmounted(() => {
             <el-radio value="all">全部回复</el-radio>
             <el-radio value="pages">
               <span>前</span>
-              <div class="custom-stepper-input">
-                <input v-model.number="formData.replyPages" type="number" min="1" max="50" aria-label="商品评价回复页数" :disabled="busy || replyPagesType !== 'pages'" @click.stop />
-                <div class="stepper-buttons">
-                  <button type="button" class="stepper-btn stepper-btn-up" aria-label="增加商品评价回复页数" :disabled="busy || replyPagesType !== 'pages' || formData.replyPages >= 50" @click.stop="formData.replyPages = Math.min(50, (formData.replyPages || 1) + 1)"></button>
-                  <button type="button" class="stepper-btn stepper-btn-down" aria-label="减少商品评价回复页数" :disabled="busy || replyPagesType !== 'pages' || formData.replyPages <= 1" @click.stop="formData.replyPages = Math.max(1, (formData.replyPages || 1) - 1)"></button>
-                </div>
-              </div>
+              <PageStepper v-model="formData.replyPages" label="商品评价回复页数" :disabled="busy || replyPagesType !== 'pages'" />
               <span class="range-unit">页</span>
             </el-radio>
           </el-radio-group>

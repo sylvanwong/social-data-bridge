@@ -24,7 +24,7 @@ function fixture(env, platform, reply) {
   const bindings = {
     ...api, request: api.service, props: { api_key: 'test-only' },
     formData: { value: { platform } }, loading: { value: false },
-    getActiveFieldMapping: () => [{ key: 'keyword' }], showErrorMsg: message => assert.fail(message),
+    getActiveFieldMapping: () => [{ key: 'rank' }, { key: 'keyword' }], showErrorMsg: message => assert.fail(message),
     showToast: (...args) => notices.push(args), taskFeedback: { fail: error => errors.push(error) },
     console: { error() {} },
     createSequentialTable: async name => { created.push(name); return { tableId: 'new-table' }; },
@@ -58,7 +58,7 @@ for (const [label, env, base] of environments) {
         assert.equal(f.calls[0].baseURL, base);
         assert.equal(f.calls[0].url, '/socialdatax/api/v1/feishu/hot/list');
         assert.equal(f.calls[0].method, 'get');
-        assert.deepEqual(f.calls[0].params, { social_type: platform, version: 'test-version' });
+        assert.deepEqual(f.calls[0].params, { social_type: platform, selected_field_keys: 'rank,keyword', version: 'test-version' });
         assert.equal(f.calls[0].headers.authorization, 'Bearer test-only');
         assert.deepEqual(f.writes, [{ tableId: existing ? 'existing-table' : 'new-table', items, existing }]);
         assert.deepEqual(f.created, existing ? [] : ['热榜获取']);
