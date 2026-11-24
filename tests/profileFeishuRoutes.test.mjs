@@ -27,7 +27,7 @@ function fixture(task = { taskId: 'old-task' }) {
     restoreProfileTask() {},
     profileStreamTask: { getActiveTask: () => task, submit: async create => { submitted = await create(); } },
   };
-  const names = ['STREAM_RESULT_LIMIT', 'profileTaskApiPath', 'unwrapApiData', 'getProfileTaskStatus', 'readAvailablePosts', 'postProfileTask', 'cancelProfileTask'];
+  const names = ['STREAM_RESULT_LIMIT', 'PROFILE_TASK_LATEST_PATH', 'profileTaskApiPath', 'unwrapApiData', 'getLatestProfileTaskStatus', 'getProfileTaskStatus', 'readAvailablePosts', 'postProfileTask', 'cancelProfileTask'];
   const helpers = names.map(name => {
     const node = declarations.find(item => item.id.name === name);
     assert.ok(node, `${name} 应使用任务保存的请求来源`);
@@ -36,6 +36,25 @@ function fixture(task = { taskId: 'old-task' }) {
   const handlers = new Function(...Object.keys(bindings), `${helpers}; return { ${names.join(',')} };`)(...Object.values(bindings));
   return { ...handlers, calls, submitted: () => submitted };
 }
+
+test('最近一次任务结果使用定时任务管理同款面板并默认展开', () => {
+  const template = parse(fs.readFileSync(new URL('../src/components/ProfileFetch.vue', import.meta.url), 'utf8')).descriptor.template.content;
+  assert.match(template, /class="task-manager profile-result-manager"/);
+  assert.match(template, /latestProfileResultExpanded/);
+  assert.match(template, /class="task-list profile-result-list"/);
+  assert.match(template, /最近一次任务结果/);
+  const script = parse(fs.readFileSync(new URL('../src/components/ProfileFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
+  assert.match(script, /const latestProfileResultExpanded = ref\(true\)/);
+});
+
+test('作者作品页面首次进入通过 latest 接口读取最近任务结果', async () => {
+  const f = fixture();
+  const status = await f.getLatestProfileTaskStatus();
+  assert.equal(f.calls[0].baseURL, 'https://api.socialdatax.com');
+  assert.equal(f.calls[0].url, '/socialdatax/api/v1/feishu/social/task/latest');
+  assert.equal(f.calls[0].method, 'get');
+  assert.equal(status.task_id, 'new-task');
+});
 
 test('作品新任务创建使用新域名及规范路径，并保存任务来源', async () => {
   const f = fixture();

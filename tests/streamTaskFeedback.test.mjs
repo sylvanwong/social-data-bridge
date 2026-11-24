@@ -35,6 +35,8 @@ function fixture(t, page, taskName, overrides = {}) {
     readRecordIds, readUniqueSourceLinks, feedback, ...feedback, toastLoading: ref(false), ref, nextTick, toastTimer: null,
     setTimeout, clearTimeout, console: { error() {}, log() {} },
     clearing: ref(false), loading: ref(false), isSubmitting: ref(false), isCancelling: ref(false), hasRecoverableTask: ref(false), recoveryRequiresReopen: ref(false),
+    latestProfileResult: ref(null), latestProfileResultLoading: ref(false), latestProfileResultError: ref(''),
+    buildProfileTaskResult: (status, task) => ({ status: Number(status?.status) === 2 ? 'failed' : Number(status?.status) === 3 ? 'stopped' : 'completed', taskId: task?.taskId || '', fetchedCount: task?.writtenCount || 0, succeeded: Number(status?.succeeded) || 0, failed: Number(status?.failed) || 0, requestCount: Number(status?.request_count) || 0, startedAt: status?.start || '', finishedAt: status?.end || '', reason: status?.reason || '' }),
     activeProfileTaskId: ref('task-1'), activeCommentTaskId: ref('task-1'), activeSeriesTaskId: ref('task-1'),
     activeStreamTask: { taskId: 'task-1' }, activeSeriesTask: { taskId: 'task-1' }, componentUnmounted: false,
     TASK_TOAST_SUFFIX: '请勿关闭插件，关闭将中断任务',
