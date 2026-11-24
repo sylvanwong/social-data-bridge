@@ -14,6 +14,7 @@ import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request, { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, buildFeishuApiPath, feishuRequest } from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
 import { useSocialData, showErrorMsg, PROFILE_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
+import { buildProfileTaskResult } from '@/utils/profileTaskResult.mjs'
 
 const props = defineProps({
   api_key: String,
@@ -27,6 +28,7 @@ const MANUAL_TABLE_BASE_NAME = '社媒数据助手';
 const STREAM_TASK_STORAGE_KEY = 'profile_fetch_stream_task_v1';
 const STREAM_RESULT_LIMIT = 100;
 const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
+const PROFILE_TASK_LATEST_PATH = buildFeishuApiPath('/v1/feishu/social/task/latest');
 
 const formData = ref({
   mode: 'table',
@@ -74,6 +76,48 @@ const taskMappingExpanded = ref(false);
 const fieldSelectionReady = ref(false);
 const feedback = useTaskFeedback();
 const { toastVisible, toastText, toastType, toastLoading, taskNotice } = feedback;
+const latestProfileResult = ref(null);
+const latestProfileResultLoading = ref(false);
+const latestProfileResultError = ref('');
+
+const getLatestProfileTaskStatus = async () => {
+  const response = await feishuRequest({
+    url: PROFILE_TASK_LATEST_PATH,
+    method: 'get',
+    headers: { authorization: `Bearer ${props.api_key}` },
+  });
+  return unwrapApiData(response.data);
+};
+
+const loadLatestProfileResult = async () => {
+  if (!props.api_key?.trim()) return;
+  latestProfileResultLoading.value = true;
+  latestProfileResultError.value = '';
+  try {
+    const status = await getLatestProfileTaskStatus();
+    if (!componentUnmounted && status?.task_id) latestProfileResult.value = buildProfileTaskResult(status);
+  } catch (error) {
+    if (!componentUnmounted) latestProfileResultError.value = error.message || '最近任务结果加载失败';
+  } finally {
+    if (!componentUnmounted) latestProfileResultLoading.value = false;
+  }
+};
+
+const profileResultStatusLabels = {
+  running: '执行中', completed: '已完成', stopped: '已停止', failed: '获取失败',
+};
+const profileResultStatusLabel = result => profileResultStatusLabels[result?.status] || '任务结果';
+const profileResultDuration = result => {
+  const seconds = Number(result?.finishedAt) - Number(result?.startedAt);
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  return seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+};
+const formatProfileResultTime = value => {
+  if (!value) return '';
+  const numeric = Number(value);
+  const date = new Date(Number.isFinite(numeric) ? numeric * 1000 : value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { hour12: false });
+};
 
 const getDefaultDeadlineDate = () => {
   const date = new Date();
@@ -162,6 +206,7 @@ const taskDialogForm = ref(getDefaultTaskDialogForm());
 const taskList = ref([]);
 const taskListLoading = ref(false);
 const taskManagerExpanded = ref(false);
+const latestProfileResultExpanded = ref(true);
 const isSubmitting = ref(true);
 const hasRecoverableTask = ref(false);
 const clearing = ref(false);
@@ -718,6 +763,7 @@ const profileStreamTask = useIncrementalTask({
     clearing.value = false;
     loading.value = false; isCancelling.value = false; activeProfileTaskId.value = ''; activeStreamTask = null;
     hasRecoverableTask.value = false; recoveryRequiresReopen.value = false;
+    latestProfileResult.value = buildProfileTaskResult(status, task);
     const stopped = Number(status.status) === 3;
     const failed = Number(status.status) === 2;
     showCompletionToast(stopped ? `任务已停止，已写入 ${task.writtenCount || 0} 条作品`
@@ -1257,6 +1303,10 @@ const toggleTaskManager = () => {
   taskManagerExpanded.value = !taskManagerExpanded.value;
 };
 
+const toggleLatestProfileResult = () => {
+  latestProfileResultExpanded.value = !latestProfileResultExpanded.value;
+};
+
 const updateTaskInList = (taskId, patch = {}) => {
   taskList.value = taskList.value.map(item => {
     if (item.id !== taskId) {
@@ -1624,7 +1674,11 @@ onMounted(async () => {
     await Promise.all([loadSelectedFieldKeys(), loadTaskList(), loadTableOutputConfigs()]);
     fieldSelectionReady.value = true;
   } finally {
-    if (!componentUnmounted) { isSubmitting.value = false; await resumeSavedStreamTask(); }
+    if (!componentUnmounted) {
+      isSubmitting.value = false;
+      await resumeSavedStreamTask();
+      if (!componentUnmounted && !profileStreamTask.getActiveTask()) await loadLatestProfileResult();
+    }
   }
 });
 
@@ -2081,6 +2135,47 @@ watch(
 
         <div class="action-group">
           <el-button color="#a8071a" class="commit-btn" :loading="taskDialogLoading" @click="saveTask">保存定时任务</el-button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="latestProfileResultLoading || latestProfileResult || latestProfileResultError" class="task-manager profile-result-manager">
+      <div
+        class="task-manager-header"
+        :class="{ expanded: latestProfileResultExpanded }"
+        @click="toggleLatestProfileResult"
+      >
+        <div class="task-manager-header-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 3h6"></path>
+            <path d="M9 3a3 3 0 0 0 6 0"></path>
+            <rect x="4" y="5" width="16" height="16" rx="2"></rect>
+            <path d="m8 13 2 2 5-5"></path>
+          </svg>
+          <span>最近一次任务结果</span>
+          <span class="task-count profile-result-status" :class="latestProfileResult ? `is-${latestProfileResult.status}` : ''">{{ latestProfileResult ? profileResultStatusLabel(latestProfileResult) : latestProfileResultLoading ? '加载中' : '读取失败' }}</span>
+        </div>
+        <div class="expand-arrow">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </div>
+      </div>
+
+      <div class="task-list profile-result-list" :class="{ active: latestProfileResultExpanded }">
+        <div>
+          <p v-if="latestProfileResultLoading" class="profile-result-loading" role="status">正在加载最近一次任务结果…</p>
+          <template v-else-if="latestProfileResult">
+            <div class="profile-result-grid" :class="`is-${latestProfileResult.status}`" aria-live="polite">
+              <div><span>作者主页处理</span><b>成功 {{ latestProfileResult.succeeded }} · 失败 {{ latestProfileResult.failed }}</b></div>
+              <div><span>获取作品</span><b>{{ latestProfileResult.fetchedCount }} 条</b></div>
+              <div><span>实际请求</span><b>{{ latestProfileResult.requestCount }} 次</b></div>
+              <div v-if="profileResultDuration(latestProfileResult)"><span>耗时</span><b>{{ profileResultDuration(latestProfileResult) }}</b></div>
+            </div>
+            <p v-if="latestProfileResult.finishedAt" class="profile-result-time">完成于 {{ formatProfileResultTime(latestProfileResult.finishedAt) }}</p>
+            <p v-if="latestProfileResult.reason" class="profile-result-reason">{{ latestProfileResult.reason }}</p>
+          </template>
+          <p v-if="latestProfileResultError" class="profile-result-error" role="status">{{ latestProfileResultError }}</p>
         </div>
       </div>
     </div>
@@ -3325,6 +3420,18 @@ watch(
   }
 }
 .sub-page { font-family: var(--app-font-family); }
+.profile-result-status.is-failed { color: #d4380d; }
+.profile-result-status.is-stopped { color: #d46b08; }
+.profile-result-status.is-running { color: #1754a1; }
+.profile-result-list > div { background: #fff; }
+.profile-result-loading { margin: 0; color: #86909c; font-size: 13px; line-height: 22px; }
+.profile-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin-top: 10px; }
+.profile-result-grid > div { display: flex; min-width: 0; justify-content: space-between; gap: 8px; font-size: 13px; line-height: 20px; }
+.profile-result-grid span { color: #86909c; }
+.profile-result-grid b { color: #1d2129; font-weight: 500; text-align: right; }
+.profile-result-time, .profile-result-reason, .profile-result-error { margin: 8px 0 0; color: #86909c; font-size: 12px; line-height: 18px; }
+.profile-result-reason, .profile-result-error { color: #d4380d; overflow-wrap: anywhere; }
+@media (max-width: 420px) { .profile-result-grid { grid-template-columns: 1fr; } }
 .section-heading { font-size: var(--app-font-size-section); font-weight: var(--app-font-weight-medium); line-height: 22px; }
 .group-label, .c-label { margin-bottom: 8px; font-size: var(--app-font-size-body); font-weight: var(--app-font-weight-medium); line-height: 20px; }
 .source-mode-radio, .radio-block { display: flex; flex-wrap: wrap; gap: 16px; }
