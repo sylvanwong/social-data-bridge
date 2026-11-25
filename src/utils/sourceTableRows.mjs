@@ -25,17 +25,25 @@ export async function readRecordIds(table, scope, rowCount, notify, assertMounte
   return ids.slice(0, limit);
 }
 
-export async function readSourceRows(table, recordIds, fieldId, toRow, assertMounted = value => value) {
+export async function readSourceRows(table, recordIds, fieldId, toRow, assertMounted = value => value, { throwOnEmptyWithReadError = false } = {}) {
   const field = assertMounted(await table.getFieldById(fieldId));
+  let readFailed = false;
+  let firstReadError;
   const rows = assertMounted(await Promise.all(recordIds.map(async recordId => {
     try {
       return toRow(recordId, assertMounted(await field.getValue(recordId)));
-    } catch {
+    } catch (error) {
       assertMounted();
+      if (throwOnEmptyWithReadError && !readFailed) {
+        firstReadError = error;
+        readFailed = true;
+      }
       return null;
     }
   })));
-  return rows.filter(Boolean);
+  const usableRows = rows.filter(Boolean);
+  if (readFailed && usableRows.length === 0) throw firstReadError;
+  return usableRows;
 }
 
 export async function readUniqueSourceLinks(table, recordIds, fieldId) {

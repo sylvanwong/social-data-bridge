@@ -56,7 +56,8 @@ for (const [label, env, base] of [
     assert.equal(f.calls[0].url, '/socialdatax/api/v1/feishu/keyword/task');
     assert.deepEqual(f.calls[0].data, { social_type: 'douyin', keyword: '露营\n徒步', pages: 2,
       work_fetch_range: { type: 'pages', value: 2, timezone: 'Asia/Shanghai' },
-      filter_config: { sort_type: 2, publish_time: 2, filter_duration: '0', content_type: 1 }, version: 'test-version' });
+      filter_config: { sort_type: 2, publish_time: 2, filter_duration: '0', content_type: 1 },
+      selected_field_keys: ['aweme_id'], version: 'test-version' });
     assert.equal(f.calls[0].headers.authorization, 'Bearer test-only');
     assert.equal(f.submitted().apiBaseUrl, base);
     assert.equal(f.submitted().apiPathPrefix, '/socialdatax/api');

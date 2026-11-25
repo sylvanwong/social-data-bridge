@@ -78,14 +78,15 @@ for (const [label, manualUrls, message] of [
 for (const [page, name, target, message] of [
   ['ProfileFetch', 'validateBaseForm', { mode: 'table' }, '请选择作者主页链接字段'],
   ['ProfileFetch', 'validateBaseForm', { mode: 'manual', manualUrls: '' }, '请输入作者主页链接'],
-  ['CommentFetch', 'commit', { mode: 'table' }, '请选择作品链接字段'],
-  ['CommentFetch', 'commit', { mode: 'manual', manualUrls: '' }, '请输入作品链接'],
+  ['CommentFetch', 'commit', { mode: 'table', pages: 1 }, '请选择作品链接字段'],
+  ['CommentFetch', 'commit', { mode: 'manual', manualUrls: '', pages: 1 }, '请输入作品链接'],
   ['VideoCopySummary', 'handleTableModeSubmit', { mode: 'table' }, '请选择作品链接字段'],
   ['VideoCopySummary', 'handleManualModeSubmit', { mode: 'manual', manualUrls: '' }, '请输入作品链接'],
 ]) {
   for (const key of ['', 'test-key']) test(`${page} ${target.mode} 缺少${key ? '输入' : '密钥'}时提示与界面字段一致`, async () => {
     const notices = [];
     const b = { props: { api_key: key }, formData: ref(target), hasRecoverableTask: ref(false),
+      ...(page === 'CommentFetch' ? { commentPagesType: ref('pages'), replyPagesType: ref('none'), replyPageCount: ref(1) } : {}),
       loading: ref(false), isSubmitting: ref(false), fieldSelectionReady: ref(true), sourceFieldLoading: ref(false), sourceFieldLoadError: ref(''),
       ElMessage: n => notices.push(n.message), showErrorMsg: n => notices.push(n) };
     await handler(page, name, b)(target);

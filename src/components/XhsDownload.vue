@@ -591,7 +591,8 @@ const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
   return null;
 };
 
-const fetchXhsByRows = async (rowList, { onSuccess = null } = {}) => {
+const fetchXhsByRows = async (rowList, { activeFieldConfigs = [], onSuccess = null } = {}) => {
+  const selectedFieldKeys = activeFieldConfigs.map(field => field.key);
   let successCount = 0;
   let failCount = 0;
   const successList = [];
@@ -613,7 +614,7 @@ const fetchXhsByRows = async (rowList, { onSuccess = null } = {}) => {
         method: 'post',
         timeout: 60000,
         headers: { 'authorization': `Bearer ${props.api_key}` },
-        data: { url }
+        data: { url, selected_field_keys: selectedFieldKeys }
       }));
 
       const res = response.data;
@@ -707,6 +708,7 @@ const handleTableModeSubmit = async () => {
 
     const rowList = assertMounted(await getCellValuesByFieldId(sourceTable, recordIdList, formData.value.xhsLinkFieldId));
     const { successCount, failCount, stopped } = assertMounted(await fetchXhsByRows(rowList, {
+      activeFieldConfigs,
       onSuccess: (item) => writeDataToRecord(sourceTable, item.__recordId, item, fieldNameToId, activeFieldConfigs),
     }));
 
@@ -764,7 +766,7 @@ const handleManualModeSubmit = async () => {
   try {
     if (!assertMounted(await ensureOutputConfigReady())) return;
     const rowList = urls.map(url => ({ url }));
-    const { successList, successCount, failCount, stopped } = assertMounted(await fetchXhsByRows(rowList));
+    const { successList, successCount, failCount, stopped } = assertMounted(await fetchXhsByRows(rowList, { activeFieldConfigs }));
     if (successList.length === 0) {
       finishToast(
         stopped

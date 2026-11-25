@@ -470,12 +470,12 @@ const sleep = (ms) =>
     setTimeout(resolve, ms);
   });
 
-const createMediaTask = async (url) => {
+const createMediaTask = async (url, selectedFieldKeys) => {
   const response = assertMounted(await feishuRequest({
     url: buildFeishuApiPath('/v1/feishu/media/task'),
     method: "post",
     headers: { authorization: `Bearer ${props.api_key}` },
-    data: { url, force_refresh: false },
+    data: { url, force_refresh: false, selected_field_keys: selectedFieldKeys },
   }));
 
   const res = response.data;
@@ -548,7 +548,8 @@ const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
   return null;
 };
 
-const fetchSummaryByEntries = async (recordEntries, { onSuccess = null } = {}) => {
+const fetchSummaryByEntries = async (recordEntries, { activeFieldConfigs = [], onSuccess = null } = {}) => {
+  const selectedFieldKeys = activeFieldConfigs.map(field => field.key);
   let successCount = 0;
   let failCount = 0;
 
@@ -563,7 +564,7 @@ const fetchSummaryByEntries = async (recordEntries, { onSuccess = null } = {}) =
 
     try {
       showToast(`正在提交第 ${i + 1}/${recordEntries.length} 条任务...`, true);
-      const task = assertMounted(await createMediaTask(url));
+      const task = assertMounted(await createMediaTask(url, selectedFieldKeys));
 
       showToast(`第 ${i + 1}/${recordEntries.length} 条任务处理中...`, true);
       const result = assertMounted(await pollMediaTask(task, task.next_poll_after_seconds));
@@ -657,6 +658,7 @@ const handleTableModeSubmit = async () => {
       }
 
       const { successCount, failCount, stopped } = assertMounted(await fetchSummaryByEntries(recordEntries, {
+        activeFieldConfigs,
         onSuccess: (item) => writeDataToRecord(sourceTable, item.__recordId, item, fieldNameToId, activeFieldConfigs),
       }));
 
@@ -676,6 +678,7 @@ const handleTableModeSubmit = async () => {
     }
 
     const { successCount, failCount, stopped } = assertMounted(await fetchSummaryByEntries(recordEntries, {
+      activeFieldConfigs,
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
     }));
 
@@ -739,6 +742,7 @@ const handleManualModeSubmit = async () => {
 
     const recordEntries = urls.map((url) => ({ url }));
     const { successCount, failCount, stopped } = assertMounted(await fetchSummaryByEntries(recordEntries, {
+      activeFieldConfigs,
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
     }));
 

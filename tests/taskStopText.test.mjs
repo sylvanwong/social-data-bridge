@@ -43,6 +43,9 @@ for (const [page, engine, label] of [['CommentFetch','commentStreamTask','评论
       activeSeriesTaskId:{value:'task'}, taskId:{value:'task'} };
     if (page === 'ProfileFetch') {
       Object.assign(bindings, { latestProfileResult: { value: null }, buildProfileTaskResult });
+      const helper = declarations.find(n => n.id.name === 'showProfileFieldProgress').init;
+      bindings.showProfileFieldProgress = new Function(...Object.keys(bindings),
+        `return (${source.slice(helper.start, helper.end)});`)(...Object.values(bindings));
     }
     const load = name => {
       const node=properties.find(n=>n.key.name===name).value;
@@ -65,6 +68,13 @@ for (const [page, engine, label] of [['CommentFetch','commentStreamTask','评论
       await onFinish({status},{...task,writtenCount:140});
       assert.doesNotMatch(message,/请勿关闭|自动结束/);
       if(status===3) assert.equal(message,`任务已停止，已写入 140 条${label}`);
+    }
+    if (page === 'ProfileFetch') {
+      await onFinish({ status: 1, failed: 2, reason: '请求超时' }, task);
+      assert.match(message, /2 条输入失败/);
+      assert.doesNotMatch(message, /请求超时/);
+      await onFinish({ status: 2, failed: 2, reason: '任务执行中断' }, task);
+      assert.equal(message, '任务执行中断');
     }
   });
 }

@@ -4,6 +4,7 @@ import { parseManualUrls, extractCellLink } from '../utils/sourceLinks.mjs';
 import { readRecordIds, readSourceRows } from '../utils/sourceTableRows.mjs';
 import { resolveWritableField } from "../utils/tableFields.js";
 import TaskFeedback from "./TaskFeedback.vue";
+import PageStepper from "./PageStepper.vue";
 import { useTaskFeedback } from "../composables/useTaskFeedback.mjs";
 import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import InputFilterEditor from './InputFilterEditor.vue';
@@ -1013,7 +1014,7 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
   if (creates.length) await table.addRecords(creates);
 };
 
-const fetchBloggerInfoByRows = async (rowList, { onSuccess = null } = {}) => {
+const fetchBloggerInfoByRows = async (rowList, { selectedFieldKeys: fields, onSuccess = null } = {}) => {
   let successCount = 0;
   let failCount = 0;
 
@@ -1033,7 +1034,7 @@ const fetchBloggerInfoByRows = async (rowList, { onSuccess = null } = {}) => {
         url: buildFeishuApiPath('/v1/feishu/blogger_info'),
         method: 'post',
         headers: { 'authorization': `Bearer ${props.api_key}` },
-        data: { url }
+        data: { url, selected_field_keys: fields }
       });
 
       const res = response.data;
@@ -1730,9 +1731,10 @@ const toggleTaskStatus = async (task) => {
 
 const handleTableModeSubmit = async () => {
   if (loading.value) return;
+  const fields = [...selectedFieldKeys.value];
   if (!validateBaseForm({
     ...formData.value,
-    selectedFieldKeys: selectedFieldKeys.value,
+    selectedFieldKeys: fields,
   })) {
     return;
   }
@@ -1752,7 +1754,7 @@ const handleTableModeSubmit = async () => {
       executionWriteMode = writeMode.value;
     }
     const inputFilter = await validateConfiguredInputFilter(formData.value, sourceTable);
-    const activeFieldConfigs = getActiveFieldConfigs();
+    const activeFieldConfigs = getActiveFieldConfigs(fields);
     showToast('正在读取待处理记录...');
     let recordIdList = await getRecordIdListByScope(
       sourceTable,
@@ -1795,6 +1797,7 @@ const handleTableModeSubmit = async () => {
         return;
       }
       const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
+        selectedFieldKeys: fields,
         onSuccess: (item) => writeDataToRecord(sourceTable, item.__recordId, item, fieldNameToId, activeFieldConfigs, executionMappings),
       });
 
@@ -1814,6 +1817,7 @@ const handleTableModeSubmit = async () => {
     }
 
     const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
+      selectedFieldKeys: fields,
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, {
         writeMode: executionWriteMode,
         fieldMappings: executionMappings,
@@ -1837,9 +1841,10 @@ const handleTableModeSubmit = async () => {
 
 const handleManualModeSubmit = async () => {
   if (loading.value) return;
+  const fields = [...selectedFieldKeys.value];
   if (!validateBaseForm({
     ...formData.value,
-    selectedFieldKeys: selectedFieldKeys.value,
+    selectedFieldKeys: fields,
   })) {
     return;
   }
@@ -1857,7 +1862,7 @@ const handleManualModeSubmit = async () => {
       executionMappings = JSON.parse(JSON.stringify(mappingDraft.value));
       executionWriteMode = writeMode.value;
     }
-    const activeFieldConfigs = getWriteFieldConfigs();
+    const activeFieldConfigs = getWriteFieldConfigs(fields);
     showToast('正在整理作者主页链接...');
     const rowList = urls.map(url => ({ url }));
     const targetTableId = await resolveTargetTableId(formData.value.targetType, activeFieldConfigs, showExecutionProgress, executionMappings);
@@ -1867,6 +1872,7 @@ const handleManualModeSubmit = async () => {
     }
 
     const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
+      selectedFieldKeys: fields,
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, {
         writeMode: executionWriteMode,
         fieldMappings: executionMappings,
@@ -1908,17 +1914,7 @@ const handleTaskAction = () => {
   return handleSubmit();
 };
 
-const stepNumber = (delta) => {
-  let val = formData.value.rowCount || 5;
-  val = Math.max(1, Math.min(100, val + delta));
-  formData.value.rowCount = val;
-};
-
-const stepTaskNumber = (delta) => {
-  let val = taskDialogForm.value.rowCount || 5;
-  val = Math.max(1, Math.min(100, val + delta));
-  taskDialogForm.value.rowCount = val;
-};
+const normalizeRowCount = value => Math.max(1, Math.min(100, Math.trunc(value) || 5));
 
 const handleTaskModeChange = async (mode) => {
   const form = taskDialogForm.value;
@@ -2207,30 +2203,8 @@ watch(
               <el-radio value="selected" class="custom-radio-item">选中行</el-radio>
               <el-radio value="n" class="custom-radio-item">
                 <span class="radio-label-text">前</span>
-                <div class="custom-stepper-input">
-                  <input
-                    type="number"
-                    :value="formData.rowCount"
-                    @input.stop="formData.rowCount = Math.max(1, Math.min(100, parseInt($event.target.value) || 5))"
-                    @click.stop
-                    min="1"
-                    max="100"
-                  />
-                  <div class="stepper-buttons">
-                    <button
-                      type="button"
-                      @click.stop="stepNumber(1)"
-                      :disabled="formData.rowCount >= 100"
-                      class="stepper-btn stepper-btn-up"
-                    ></button>
-                    <button
-                      type="button"
-                      @click.stop="stepNumber(-1)"
-                      :disabled="formData.rowCount <= 1"
-                      class="stepper-btn stepper-btn-down"
-                    ></button>
-                  </div>
-                  </div>
+                <PageStepper v-model="formData.rowCount" :max="100" label="输入行数" :disabled="loading || formData.scope !== 'n'"
+                  :normalize-value="normalizeRowCount" />
                   <span class="range-unit">行</span>
               </el-radio>
             </el-radio-group>
@@ -2573,30 +2547,8 @@ watch(
                   <el-radio value="all" class="custom-radio-item">全部行</el-radio>
                   <el-radio value="n" class="custom-radio-item">
                     <span class="radio-label-text">前</span>
-                    <div class="custom-stepper-input">
-                      <input
-                        type="number"
-                        :value="taskDialogForm.rowCount"
-                        @input.stop="taskDialogForm.rowCount = Math.max(1, Math.min(100, parseInt($event.target.value) || 5))"
-                        @click.stop
-                        min="1"
-                        max="100"
-                      />
-                      <div class="stepper-buttons">
-                        <button
-                          type="button"
-                          @click.stop="stepTaskNumber(1)"
-                          :disabled="taskDialogForm.rowCount >= 100"
-                          class="stepper-btn stepper-btn-up"
-                        ></button>
-                        <button
-                          type="button"
-                          @click.stop="stepTaskNumber(-1)"
-                          :disabled="taskDialogForm.rowCount <= 1"
-                          class="stepper-btn stepper-btn-down"
-                        ></button>
-                      </div>
-                    </div>
+                    <PageStepper v-model="taskDialogForm.rowCount" :max="100" label="定时任务输入行数" :disabled="taskDialogLoading || taskDialogForm.scope !== 'n'"
+                      :normalize-value="normalizeRowCount" />
                     <span class="range-unit">行</span>
                   </el-radio>
                 </el-radio-group>
@@ -3103,54 +3055,6 @@ watch(
   white-space: nowrap;
 }
 
-.custom-stepper-input {
-  display: flex;
-  align-items: center;
-  height: 32px;
-  width: 80px;
-  margin-left: auto;
-  background: #FFFFFF;
-  border: 1px solid #E5E6EB;
-  border-radius: 6px;
-  overflow: hidden;
-  transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.custom-radio-group .custom-stepper-input {
-  margin-left: 8px;
-}
-
-.custom-stepper-input:hover {
-  border-color: #86909C;
-}
-
-.custom-stepper-input:focus-within {
-  border-color: #A8071A;
-  box-shadow: 0 0 0 3px rgba(168, 7, 26, 0.2);
-}
-
-.custom-stepper-input input {
-  flex: 1;
-  height: 100%;
-  width: 44px;
-  padding: 0 8px;
-  font-size: var(--app-font-size-body);
-  color: #1D2129;
-  border: none;
-  outline: none;
-  background: transparent;
-  text-align: center;
-  font-family: inherit;
-  line-height: 30px;
-  -moz-appearance: textfield;
-}
-
-.custom-stepper-input input::-webkit-outer-spin-button,
-.custom-stepper-input input::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
-
 .field-checkbox-group {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3262,72 +3166,6 @@ watch(
 .mapping-delete { min-width: 28px; padding: 4px; }
 .mapping-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
 .mapping-actions :deep(.el-button) { margin-left: 0; }
-
-.stepper-buttons {
-  display: flex;
-  flex-direction: column;
-  width: 28px;
-  height: 100%;
-  border-left: 1px solid #E5E6EB;
-  flex-shrink: 0;
-  background: #F2F3F5;
-}
-
-.stepper-btn {
-  flex: 1;
-  width: 100%;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  transition: all 0.15s ease;
-  position: relative;
-}
-
-.stepper-btn-up {
-  border-bottom: 1px solid #E5E6EB;
-}
-
-.stepper-btn::before {
-  content: '';
-  width: 0;
-  height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  transition: border-color 0.15s;
-}
-
-.stepper-btn-up::before {
-  border-bottom: 4px solid #86909C;
-}
-
-.stepper-btn-down::before {
-  border-top: 4px solid #86909C;
-}
-
-.stepper-btn:not(:disabled):hover {
-  background: #FFF0F2;
-}
-
-.stepper-btn-up:not(:disabled):hover::before {
-  border-bottom-color: #A8071A;
-}
-
-.stepper-btn-down:not(:disabled):hover::before {
-  border-top-color: #A8071A;
-}
-
-.stepper-btn:not(:disabled):active {
-  background: #FFB3BB;
-}
-
-.stepper-btn:disabled {
-  cursor: not-allowed;
-  opacity: 0.4;
-}
 
 .task-manager {
   margin-top: 0;

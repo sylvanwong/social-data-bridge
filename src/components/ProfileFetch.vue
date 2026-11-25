@@ -28,7 +28,6 @@ const MANUAL_TABLE_BASE_NAME = '社媒数据助手';
 const STREAM_TASK_STORAGE_KEY = 'profile_fetch_stream_task_v1';
 const STREAM_RESULT_LIMIT = 100;
 const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
-const PROFILE_TASK_LATEST_PATH = buildFeishuApiPath('/v1/feishu/social/task/latest');
 
 const formData = ref({
   mode: 'table',
@@ -77,46 +76,59 @@ const fieldSelectionReady = ref(false);
 const feedback = useTaskFeedback();
 const { toastVisible, toastText, toastType, toastLoading, taskNotice } = feedback;
 const latestProfileResult = ref(null);
-const latestProfileResultLoading = ref(false);
-const latestProfileResultError = ref('');
-
-const getLatestProfileTaskStatus = async () => {
-  const response = await feishuRequest({
-    url: PROFILE_TASK_LATEST_PATH,
-    method: 'get',
-    headers: { authorization: `Bearer ${props.api_key}` },
-  });
-  return unwrapApiData(response.data);
-};
-
-const loadLatestProfileResult = async () => {
-  if (!props.api_key?.trim()) return;
-  latestProfileResultLoading.value = true;
-  latestProfileResultError.value = '';
+const manualCopyLinks = ref('');
+const failedInputLabel = result => result.failedItems.length === result.failed ? '全部失败输入' : '已返回的失败输入';
+const copyFailedProfileLinks = async () => {
+  const result = latestProfileResult.value;
+  const links = result.failedItems.map(item => item.url).join('\n');
   try {
-    const status = await getLatestProfileTaskStatus();
-    if (!componentUnmounted && status?.task_id) latestProfileResult.value = buildProfileTaskResult(status);
-  } catch (error) {
-    if (!componentUnmounted) latestProfileResultError.value = error.message || '最近任务结果加载失败';
-  } finally {
-    if (!componentUnmounted) latestProfileResultLoading.value = false;
+    await navigator.clipboard.writeText(links);
+    if (!componentUnmounted && latestProfileResult.value === result) {
+      manualCopyLinks.value = '';
+      ElMessage({ message: `已复制${failedInputLabel(result)}`, type: 'success' });
+    }
+  } catch {
+    if (!componentUnmounted && latestProfileResult.value === result) manualCopyLinks.value = links;
   }
 };
 
 const profileResultStatusLabels = {
-  running: '执行中', completed: '已完成', stopped: '已停止', failed: '获取失败',
+  running: '执行中', success: '全部成功', completed: '已完成', incomplete: '部分完成', partial: '部分失败', stopped: '已停止', failed: '获取失败', interrupted: '任务中断',
 };
-const profileResultStatusLabel = result => profileResultStatusLabels[result?.status] || '任务结果';
-const profileResultDuration = result => {
-  const seconds = Number(result?.finishedAt) - Number(result?.startedAt);
-  if (!Number.isFinite(seconds) || seconds < 0) return '';
-  return seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+const profileResultStatusLabel = result => {
+  if (result?.status === 'failed' && result.failed === result.inputCount) return '全部失败';
+  return profileResultStatusLabels[result?.status] || '任务结果';
+};
+// 状态标签颜色与任务提示图标一致：成功绿、部分失败橙、失败红，其余中性灰。
+const profileResultTone = result => {
+  if (result?.status === 'success') return 'success';
+  if (result?.status === 'failed' || result?.status === 'interrupted') return 'error';
+  if (['partial', 'incomplete'].includes(result?.status) || (result?.status === 'stopped' && result.failed > 0)) return 'warning';
+  return 'neutral';
+};
+const PROFILE_FAILURE_REASON_LIMIT = 5;
+const profileFailureReasonSummary = result => {
+  const shown = result.failureReasons.slice(0, PROFILE_FAILURE_REASON_LIMIT)
+    .map(({ reason, count }) => `${reason} ${count} 条`).join(' · ');
+  const rest = result.failureReasons.length - PROFILE_FAILURE_REASON_LIMIT;
+  return rest > 0 ? `${shown} 等 ${result.failureReasons.length} 类` : shown;
+};
+const profileResultDuration = seconds => {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) return minutes ? `${minutes} 分 ${remainder} 秒` : `${seconds} 秒`;
+  const parts = [`${Math.floor(minutes / 60)} 小时`];
+  if (minutes % 60) parts.push(`${minutes % 60} 分`);
+  if (remainder) parts.push(`${remainder} 秒`);
+  return parts.join(' ');
 };
 const formatProfileResultTime = value => {
   if (!value) return '';
   const numeric = Number(value);
   const date = new Date(Number.isFinite(numeric) ? numeric * 1000 : value);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { hour12: false });
+  if (Number.isNaN(date.getTime())) return '';
+  const time = date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `${date.toLocaleDateString('zh-CN')} ${time}`;
 };
 
 const getDefaultDeadlineDate = () => {
@@ -207,8 +219,15 @@ const taskList = ref([]);
 const taskListLoading = ref(false);
 const taskManagerExpanded = ref(false);
 const latestProfileResultExpanded = ref(true);
+const profileFailuresOpen = ref(true);
+watch(latestProfileResult, () => {
+  latestProfileResultExpanded.value = true;
+  profileFailuresOpen.value = true;
+  manualCopyLinks.value = '';
+});
 const isSubmitting = ref(true);
 const hasRecoverableTask = ref(false);
+const pausedWriteCount = ref(0);
 const clearing = ref(false);
 const recoveryRequiresReopen = ref(false);
 let componentUnmounted = false;
@@ -655,18 +674,53 @@ const showToast = (text, isLoading = true, options = {}) => {
 const hideToast = () => feedback.hide();
 const showCompletionToast = (text, options = {}) => feedback.finish(text, options);
 
-const showProfileFieldProgress = (message) => {
-  showToast(isCancelling.value ? getStoppingText(activeStreamTask) : message, true);
-};
-
-const getStreamProgressText = (taskStatus, streamTask) => {
+const getStreamProgressText = (taskStatus, streamTask, writingText) => {
+  // 进度浮层空间有限，后端原因去掉结尾标点后截到 30 字，完整原因在结果卡片的失败明细中查看。
+  const shortProgressReason = value => {
+    const chars = [...String(value || '').trim().replace(/[。.！!；;，,\s]+$/u, '')];
+    return chars.length > 30 ? `${chars.slice(0, 30).join('')}…` : chars.join('');
+  };
   const processed = Number(taskStatus.processed) || 0;
   const total = Number(taskStatus.total) || 0;
   const progress = total > 0 ? `${processed}/${total}` : `${processed}`;
-  return `已处理 ${progress} 个主页，已写入 ${streamTask.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`;
+  const { failed: fetchFailed, invalid_url_count: reportedInvalid, input_count: inputCount, scope_warning: scopeWarning } = taskStatus;
+  const usesCurrentApi = streamTask.apiPathPrefix === FEISHU_API_PATH_PREFIX;
+  const hasFetchCount = Number.isInteger(fetchFailed) && fetchFailed >= 0;
+  // 只减页仍保留全部已解析的作者，跳过作者时则不能用总数差推算解析失败数。
+  const canInferInvalid = usesCurrentApi && (!scopeWarning || scopeWarning === '积分不足，本次获取页数已减少')
+    && Number.isInteger(taskStatus.total) && total >= 0 && Number.isInteger(inputCount) && inputCount >= total;
+  let invalid = null;
+  if (Number.isInteger(reportedInvalid) && reportedInvalid >= 0) invalid = reportedInvalid;
+  else if (canInferInvalid) invalid = inputCount - total;
+
+  if (writingText && !(invalid > 0 || (hasFetchCount && fetchFailed > 0))) return writingText;
+  const messages = [writingText || `作者处理进度 ${progress} · 已写入 ${streamTask.writtenCount || 0} 条作品`];
+  const failures = [];
+  const status = Number(taskStatus.status);
+  if (hasFetchCount && (fetchFailed > 0 || !(invalid > 0))) {
+    let summary = `获取失败 ${fetchFailed} 条`;
+    if (fetchFailed > 0 && (status === 0 || (writingText && usesCurrentApi && status === 1))) {
+      const reason = usesCurrentApi && typeof taskStatus.reason === 'string' ? shortProgressReason(taskStatus.reason) : '';
+      summary += reason && reason !== '作品获取失败' ? `，最近一次原因：${reason}` : '，暂未返回具体原因';
+    }
+    failures.push(summary);
+  }
+  if (invalid > 0) failures.push(`${failures.length ? '另有 ' : ''}${invalid} 条输入未能识别`);
+  if (failures.length) messages.push(`${failures.join('。')}。`);
+  if (scopeWarning && !writingText) messages.push(scopeWarning);
+  messages.push(TASK_TOAST_SUFFIX);
+  return messages.join('\n');
 };
 
 const getStoppingText = task => getTaskStoppingText(task, '作品');
+
+const showProfileFieldProgress = (message, task) => {
+  if (isCancelling.value) {
+    showToast(getStoppingText(task ?? activeStreamTask), true);
+    return;
+  }
+  showToast(task?.latestStatus ? getStreamProgressText(task.latestStatus, task, message) : message, true);
+};
 
 const profileTaskApiPath = (task, path) => buildFeishuApiPath(path,
   task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX);
@@ -699,6 +753,7 @@ const readAvailablePosts = async (streamTask) => {
 };
 
 const restoreProfileTask = (task, progressText = '正在恢复未完成的作者作品获取任务...') => {
+  latestProfileResult.value = null;
   activeStreamTask = task;
   activeProfileTaskId.value = task.taskId;
   hasRecoverableTask.value = true;
@@ -717,6 +772,7 @@ const profileStreamTask = useIncrementalTask({
   writeBatch: async (items, task, controls) => {
     const reconcile = task.pendingWrite ?? !!task.targetTableId;
     task.pendingWrite = reconcile;
+    let readyToWrite = false;
     const appendState = task.writeMode === 'append' ? (task.appendState ||= {}) : undefined;
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId,
       task.targetTableId || '', task.selectedFieldKeys, {
@@ -730,12 +786,15 @@ const profileStreamTask = useIncrementalTask({
         attachmentPipeline: true, uploadBatchSize: 5,
         writeMode: task.writeMode || 'upsert', fieldMappings: task.fieldMappings || [],
         upsertCacheKey: task.taskId, reconcile, appendState, assertActive: controls.assertActive,
-        onProgress: message => { controls.assertActive(); showProfileFieldProgress(message); },
+        onProgress: message => { controls.assertActive(); showProfileFieldProgress(message, task); },
         onBeforeWrite: async () => {
           controls.assertActive();
           task.pendingWrite = true;
           task.pendingWriteCount = items.length;
           await controls.saveProgress();
+          controls.assertActive();
+          readyToWrite = true;
+          showProfileFieldProgress('正在写入本批作品', task);
         },
         onTargetTableReady: async tableId => {
           controls.assertActive();
@@ -743,6 +802,18 @@ const profileStreamTask = useIncrementalTask({
           task.initializingTableId = tableId;
           await controls.saveProgress();
         },
+      }).catch(error => {
+        const cause = error?.writePaused ? error.cause : error;
+        if (!(cause instanceof Error) || cause.stopPolling || cause.requiresReopen) throw error;
+        const unwritten = !task.pendingWrite && !task.initializingTableId;
+        if (!unwritten && !readyToWrite) throw error;
+        const reason = cause.message || '写入表格失败';
+        const notice = unwritten ? `${reason}，写入已暂停。`
+          : `${reason}，任务已暂停。\n已写入的作品已保留，恢复时会自动核对写入进度。`;
+        const paused = new Error(notice, { cause });
+        paused.stopPolling = true;
+        if (unwritten) paused.unwrittenBatchCount = items.length;
+        throw paused;
       });
     task.targetTableId = result?.tableId || task.targetTableId;
     task.pendingWrite = false;
@@ -758,23 +829,42 @@ const profileStreamTask = useIncrementalTask({
     if (Number(status.status) === 3 || status.cancel_requested || status.status_text === 'cancel_requested') isCancelling.value = true;
     showToast(isCancelling.value ? getStoppingText(task) : getStreamProgressText(status, task), true);
   },
-  onWriting: (items, task) => showToast(isCancelling.value ? getStoppingText(task) : `正在写入 ${items.length} 条作品`, true),
+  onWriting: (items, task) => showProfileFieldProgress(`正在写入 ${items.length} 条作品`, task),
   onFinish: (status, task) => {
     clearing.value = false;
     loading.value = false; isCancelling.value = false; activeProfileTaskId.value = ''; activeStreamTask = null;
     hasRecoverableTask.value = false; recoveryRequiresReopen.value = false;
-    latestProfileResult.value = buildProfileTaskResult(status, task);
+    const result = buildProfileTaskResult(status, task);
+    latestProfileResult.value = result;
+    const written = `已写入 ${task.writtenCount || 0} 条作品`;
     const stopped = Number(status.status) === 3;
-    const failed = Number(status.status) === 2;
-    showCompletionToast(stopped ? `任务已停止，已写入 ${task.writtenCount || 0} 条作品`
-      : failed ? (status.reason || '任务失败，已写入已有结果') : `处理完成，已写入 ${task.writtenCount || 0} 条作品`,
-      { stopped, type: failed ? 'error' : undefined, empty: !task.writtenCount });
+    const failed = ['failed', 'interrupted'].includes(result.status);
+    const partial = result.status === 'partial';
+    const incomplete = result.status === 'incomplete';
+    // 范围缩减或有输入未处理时，不能用“处理完成”掩盖未拿全的结果。
+    const scopeWarning = result.skippedCount > 0
+      ? result.scopeWarning.replace('部分作者未执行', `${result.skippedCount} 条输入未执行`)
+      : result.scopeWarning;
+    const incompleteReason = scopeWarning || result.reason || `${result.unprocessedCount} 条输入未完成`;
+    // 有失败时浮层不展示范围提醒原文，单独补上可确认的未执行条数。
+    const skipped = result.skippedCount > 0 ? `，${result.skippedCount} 条输入未执行` : '';
+    // 停止时先说明失败和未执行，再报告已写入数，与部分失败的顺序一致。
+    showCompletionToast(stopped ? `任务已停止${result.failed ? `，${result.failed} 条输入失败` : ''}${skipped}，${written}`
+      : partial ? `部分失败，${result.failed} 条输入失败${skipped}，${written}`
+      : incomplete ? `部分完成，${incompleteReason}，${written}`
+      : failed ? (result.reason || (Number(status.status) === 1 ? `${result.failed} 条输入失败${skipped}` : '任务中断')) : `处理完成，${written}`,
+      { stopped, failCount: stopped ? result.failed : 0, type: failed ? 'error' : partial || incomplete ? 'warning' : undefined, empty: !task.writtenCount });
   },
   onError: (error, task) => {
     clearing.value = false;
     loading.value = false; isCancelling.value = false; activeProfileTaskId.value = ''; activeStreamTask = null;
     hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
+    if (hasRecoverableTask.value) latestProfileResult.value = null;
+    else if (error.inputFailureResult) latestProfileResult.value = error.inputFailureResult;
+    if (error.cause?.requiresReopen) error = error.cause;
     recoveryRequiresReopen.value = !!error.requiresReopen;
+    pausedWriteCount.value = task?.taskId && !recoveryRequiresReopen.value
+      ? error.unwrittenBatchCount || error.cause?.unwrittenBatchCount || 0 : 0;
     feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: recoveryRequiresReopen.value });
   },
 });
@@ -783,6 +873,7 @@ const stopStreamTask = () => { profileStreamTask.stop(); activeStreamTask = null
 const resumeSavedStreamTask = async () => {
   if (componentUnmounted || isSubmitting.value || loading.value) return;
   if (recoveryRequiresReopen.value) return;
+  pausedWriteCount.value = 0;
   isSubmitting.value = true;
   loading.value = true;
   feedback.begin('正在检查未完成任务…');
@@ -811,9 +902,21 @@ const postProfileTask = async (targetTableId = '', urlText = '', taskConfig = {}
   await profileStreamTask.submit(async () => {
     const response = await feishuRequest({ url: buildFeishuApiPath('/v1/feishu/social/task'), method: 'post',
       headers: { authorization: `Bearer ${props.api_key}` },
-      data: { url: urlText, work_fetch_range: normalizeWorkFetchRange(formData.value.workFetchRange) } });
+      data: {
+        url: urlText,
+        work_fetch_range: normalizeWorkFetchRange(formData.value.workFetchRange),
+        selected_field_keys: selectedFields,
+      } });
+    if (response.data?.sta !== 0 && response.data?.data?.invalid_items?.length) {
+      const error = new Error(response.data.msg);
+      const data = response.data.data;
+      error.inputFailureResult = buildProfileTaskResult({
+        status: 1, ...data, input_count: data.invalid_url_count ?? data.invalid_items.length,
+      }, taskConfig);
+      throw error;
+    }
     const data = unwrapApiData(response.data);
-    return { taskId: data.task_id, targetTableId,
+    return { taskId: data.task_id, targetTableId, executionStartedAt: taskConfig.executionStartedAt,
       selectedFieldKeys: selectedFields, fieldMappings, writeMode, pendingWrite: false,
       apiBaseUrl: FEISHU_API_BASE_URL, apiPathPrefix: FEISHU_API_PATH_PREFIX };
   }, task => restoreProfileTask(task, '任务已创建，正在准备获取作者作品…'));
@@ -1155,7 +1258,7 @@ const buildTaskPayload = async (inputFilter, config = taskDialogForm.value) => {
   };
 };
 
-const submitProfileUrls = async (urlList, targetTableId = "") => {
+const submitProfileUrls = async (urlList, targetTableId, executionStartedAt) => {
   if (urlList.length === 0) {
     loading.value = false;
     showCompletionToast('没有可处理的作者主页链接', { empty: true });
@@ -1170,6 +1273,7 @@ const submitProfileUrls = async (urlList, targetTableId = "") => {
     await saveTableOutputConfig();
     showToast('正在提交作者作品获取任务...', true);
     await postProfileTask(targetTableId, urlText, {
+      executionStartedAt,
       fieldMappings: cloneFieldMappings(mappingDraft.value),
       writeMode: formData.value.writeMode,
     });
@@ -1185,6 +1289,7 @@ const handleImmediateSubmit = async () => {
     return;
   }
 
+  const executionStartedAt = Date.now();
   isSubmitting.value = true;
   try {
     if (!validateBaseForm({
@@ -1239,7 +1344,7 @@ const handleImmediateSubmit = async () => {
         onProgress: showProfileFieldProgress,
       });
       if (isValid) {
-        await submitProfileUrls(urlList, formData.value.targetTableId);
+        await submitProfileUrls(urlList, formData.value.targetTableId, executionStartedAt);
       } else {
         loading.value = false;
         showCompletionToast('目标字段校验未通过，任务未开始', { type: 'error' });
@@ -1247,7 +1352,7 @@ const handleImmediateSubmit = async () => {
       return;
     }
 
-    await submitProfileUrls(urlList, '');
+    await submitProfileUrls(urlList, '', executionStartedAt);
   } catch (error) {
     console.error('提交博主作品获取任务失败:', error);
     loading.value = false;
@@ -1522,6 +1627,7 @@ const openEditTaskDialog = async (task) => {
 
 const saveTask = async () => {
   if (taskDialogLoading.value) return;
+  syncMainFormToTaskForm();
   const taskId = editingTaskId.value;
   const form = taskDialogForm.value;
   const inDialog = taskDialogVisible.value;
@@ -1677,7 +1783,6 @@ onMounted(async () => {
     if (!componentUnmounted) {
       isSubmitting.value = false;
       await resumeSavedStreamTask();
-      if (!componentUnmounted && !profileStreamTask.getActiveTask()) await loadLatestProfileResult();
     }
   }
 });
@@ -2018,15 +2123,16 @@ watch(
 
       </div>
 
-      <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
+      <p v-if="taskNotice" class="sub-hint profile-task-notice">{{ taskNotice }}</p>
       <div v-if="formData.executionMode === 'immediate'" class="action-group">
+        <p v-if="taskActionState === 'recoverable' && pausedWriteCount && !recoveryRequiresReopen" class="sub-hint">本批还有 {{ pausedWriteCount }} 条作品待写入。</p>
         <el-button
           class="commit-btn"
           :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
           :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
           :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || recoveryRequiresReopen"
           @click="handleTaskAction"
-        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
+        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (pausedWriteCount ? '继续写入' : '恢复任务') : '立即执行' }}</el-button>
       </div>
 
       <div v-else class="schedule-inline-panel">
@@ -2139,7 +2245,7 @@ watch(
       </div>
     </div>
 
-    <div v-if="latestProfileResultLoading || latestProfileResult || latestProfileResultError" class="task-manager profile-result-manager">
+    <div v-if="latestProfileResult" class="task-manager profile-result-manager">
       <div
         class="task-manager-header"
         :class="{ expanded: latestProfileResultExpanded }"
@@ -2152,8 +2258,8 @@ watch(
             <rect x="4" y="5" width="16" height="16" rx="2"></rect>
             <path d="m8 13 2 2 5-5"></path>
           </svg>
-          <span>最近一次任务结果</span>
-          <span class="task-count profile-result-status" :class="latestProfileResult ? `is-${latestProfileResult.status}` : ''">{{ latestProfileResult ? profileResultStatusLabel(latestProfileResult) : latestProfileResultLoading ? '加载中' : '读取失败' }}</span>
+          <span>本次执行结果</span>
+          <span class="task-count profile-result-status" :class="`is-${profileResultTone(latestProfileResult)}`">{{ profileResultStatusLabel(latestProfileResult) }}</span>
         </div>
         <div class="expand-arrow">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -2164,18 +2270,44 @@ watch(
 
       <div class="task-list profile-result-list" :class="{ active: latestProfileResultExpanded }">
         <div>
-          <p v-if="latestProfileResultLoading" class="profile-result-loading" role="status">正在加载最近一次任务结果…</p>
-          <template v-else-if="latestProfileResult">
-            <div class="profile-result-grid" :class="`is-${latestProfileResult.status}`" aria-live="polite">
-              <div><span>作者主页处理</span><b>成功 {{ latestProfileResult.succeeded }} · 失败 {{ latestProfileResult.failed }}</b></div>
-              <div><span>获取作品</span><b>{{ latestProfileResult.fetchedCount }} 条</b></div>
-              <div><span>实际请求</span><b>{{ latestProfileResult.requestCount }} 次</b></div>
-              <div v-if="profileResultDuration(latestProfileResult)"><span>耗时</span><b>{{ profileResultDuration(latestProfileResult) }}</b></div>
-            </div>
-            <p v-if="latestProfileResult.finishedAt" class="profile-result-time">完成于 {{ formatProfileResultTime(latestProfileResult.finishedAt) }}</p>
-            <p v-if="latestProfileResult.reason" class="profile-result-reason">{{ latestProfileResult.reason }}</p>
-          </template>
-          <p v-if="latestProfileResultError" class="profile-result-error" role="status">{{ latestProfileResultError }}</p>
+          <div aria-live="polite">
+            <p class="profile-result-count">
+              <span class="profile-result-stat">成功 {{ latestProfileResult.succeeded }} 条</span>
+              <span class="profile-result-stat"> · <span :class="{ 'profile-result-failed-count': latestProfileResult.failed > 0 }">失败 {{ latestProfileResult.failed }} 条</span></span>
+              <span v-if="latestProfileResult.skippedCount > 0" class="profile-result-stat"> · 未执行 {{ latestProfileResult.skippedCount }} 条</span>
+              <span v-if="latestProfileResult.unprocessedCount > 0" class="profile-result-stat"> · 未完成 {{ latestProfileResult.unprocessedCount }} 条</span>
+            </p>
+            <p class="profile-result-info">已写入 {{ latestProfileResult.writtenCount }} 条作品</p>
+          </div>
+          <p v-if="latestProfileResult.reason" class="profile-result-reason" :class="`is-${profileResultTone(latestProfileResult)}`">{{ latestProfileResult.reason }}</p>
+          <p v-if="latestProfileResult.scopeWarning" class="profile-result-scope-warning">{{ latestProfileResult.scopeWarningText || latestProfileResult.scopeWarning }}</p>
+          <p v-if="latestProfileResult.rerunHint" class="profile-result-hint">{{ latestProfileResult.rerunHint }}</p>
+          <details v-if="latestProfileResult.failedItems.length" class="profile-result-failures" :open="profileFailuresOpen" @toggle="profileFailuresOpen = $event.target.open">
+            <summary>
+              <span>查看失败输入（{{ latestProfileResult.failedItems.length }}）</span>
+              <span class="expand-arrow">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+              </span>
+            </summary>
+            <p v-if="latestProfileResult.failedItems.length > 1" class="profile-result-reasons">失败原因：{{ profileFailureReasonSummary(latestProfileResult) }}</p>
+            <ul>
+              <li v-for="(item, index) in latestProfileResult.failedItems.slice(0, 5)" :key="index">
+                <span>{{ item.url }}</span>
+                <span class="profile-result-failure-reason">{{ item.reason }}</span>
+              </li>
+            </ul>
+            <p v-if="latestProfileResult.failedItems.length > 5">已返回 {{ latestProfileResult.failedItems.length }} 条失败明细，展示前 5 条</p>
+            <p v-else-if="latestProfileResult.failedItems.length < latestProfileResult.failed">已返回 {{ latestProfileResult.failedItems.length }} 条失败明细</p>
+            <el-button link type="primary" @click="copyFailedProfileLinks">复制{{ failedInputLabel(latestProfileResult) }}</el-button>
+            <label v-if="manualCopyLinks">请手动复制{{ failedInputLabel(latestProfileResult) }}<textarea readonly :value="manualCopyLinks" @focus="$event.target.select()" /></label>
+          </details>
+          <p v-else-if="latestProfileResult.failed" class="profile-result-time">本次任务未返回失败输入明细。</p>
+          <p v-if="latestProfileResult.finishedAt" class="profile-result-time profile-result-timing">
+            <span v-if="latestProfileResult.executionDurationSeconds != null">执行耗时 {{ profileResultDuration(latestProfileResult.executionDurationSeconds) }}</span>
+            <span>结束于 {{ formatProfileResultTime(latestProfileResult.finishedAt) }}</span>
+          </p>
         </div>
       </div>
     </div>
@@ -2572,7 +2704,7 @@ watch(
       </template>
     </el-dialog>
 
-    <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
+    <TaskFeedback class="profile-task-feedback" :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>
 
@@ -3252,7 +3384,8 @@ watch(
   transition: transform 0.2s ease;
 }
 
-.task-manager-header.expanded .expand-arrow {
+.task-manager-header.expanded .expand-arrow,
+.profile-result-failures[open] > summary .expand-arrow {
   transform: rotate(180deg);
 }
 
@@ -3400,6 +3533,10 @@ watch(
   color: #86909C;
 }
 
+.profile-task-notice {
+  white-space: pre-line;
+}
+
 .warning-text {
   color: #A8071A;
 }
@@ -3420,18 +3557,42 @@ watch(
   }
 }
 .sub-page { font-family: var(--app-font-family); }
-.profile-result-status.is-failed { color: #d4380d; }
-.profile-result-status.is-stopped { color: #d46b08; }
-.profile-result-status.is-running { color: #1754a1; }
 .profile-result-list > div { background: #fff; }
-.profile-result-loading { margin: 0; color: #86909c; font-size: 13px; line-height: 22px; }
-.profile-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin-top: 10px; }
-.profile-result-grid > div { display: flex; min-width: 0; justify-content: space-between; gap: 8px; font-size: 13px; line-height: 20px; }
-.profile-result-grid span { color: #86909c; }
-.profile-result-grid b { color: #1d2129; font-weight: 500; text-align: right; }
-.profile-result-time, .profile-result-reason, .profile-result-error { margin: 8px 0 0; color: #86909c; font-size: 12px; line-height: 18px; }
-.profile-result-reason, .profile-result-error { color: #d4380d; overflow-wrap: anywhere; }
-@media (max-width: 420px) { .profile-result-grid { grid-template-columns: 1fr; } }
+.profile-result-status { color: #646A73; }
+.profile-result-status.is-success { color: #087A32; }
+.profile-result-status.is-warning,
+.profile-result-reason.is-warning,
+.profile-result-failed-count { color: #A64B00; }
+.profile-result-status.is-error,
+.profile-result-reason.is-error { color: #B42327; }
+.profile-result-list.active { max-height: none; }
+.profile-result-failures { margin-top: 8px; font-size: var(--app-font-size-body); line-height: 20px; overflow-wrap: anywhere; }
+.profile-result-failures summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; }
+.profile-result-failures summary::-webkit-details-marker { display: none; }
+.profile-result-failures summary .expand-arrow { display: flex; flex-shrink: 0; }
+.profile-result-failures ul { margin: 8px 0; padding: 0; list-style-type: none; }
+.profile-result-failures li + li { margin-top: 8px; }
+.profile-result-failure-reason { display: block; }
+.profile-result-failure-reason, .profile-result-failures p { color: #646A73; font-size: var(--app-font-size-caption); line-height: 18px; }
+.profile-result-failures p { margin: 8px 0; }
+.profile-result-failures .profile-result-reasons { color: #1d2129; }
+.profile-result-failures label { display: block; margin-top: 8px; color: #646A73; font-size: var(--app-font-size-caption); line-height: 18px; }
+.profile-result-failures textarea {
+  display: block; box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 4px; padding: 8px 12px;
+  border: 1px solid #E5E6EB; border-radius: 6px; outline: none; background: #fff; color: #1d2129;
+  font: inherit; font-size: var(--app-font-size-caption); line-height: 18px; resize: vertical;
+}
+.profile-result-failures textarea:focus { border-color: #86909C; }
+.profile-result-count { margin: 0; color: #1d2129; font-size: var(--app-font-size-body); font-weight: var(--app-font-weight-regular); line-height: 20px; }
+.profile-result-stat { display: inline-block; white-space: pre; }
+.profile-result-failed-count { font-weight: var(--app-font-weight-semibold); }
+.profile-result-info { margin: 4px 0 0; font-size: 14px; line-height: 20px; }
+.profile-result-time, .profile-result-reason { margin: 8px 0 0; color: #646A73; font-size: 12px; line-height: 18px; }
+.profile-result-timing { display: flex; flex-direction: column; gap: 4px; }
+.profile-result-reason { overflow-wrap: anywhere; }
+.profile-result-scope-warning { margin: 8px 0 0; color: #A64B00; font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.profile-result-hint { margin: 4px 0 0; color: #646A73; font-size: 12px; line-height: 18px; }
+.profile-task-feedback :deep(.task-feedback-loading .task-feedback-text) { white-space: pre-line; }
 .section-heading { font-size: var(--app-font-size-section); font-weight: var(--app-font-weight-medium); line-height: 22px; }
 .group-label, .c-label { margin-bottom: 8px; font-size: var(--app-font-size-body); font-weight: var(--app-font-weight-medium); line-height: 20px; }
 .source-mode-radio, .radio-block { display: flex; flex-wrap: wrap; gap: 16px; }

@@ -35,7 +35,7 @@ function fixture(t, page, taskName, overrides = {}) {
     readRecordIds, readUniqueSourceLinks, feedback, ...feedback, toastLoading: ref(false), ref, nextTick, toastTimer: null,
     setTimeout, clearTimeout, console: { error() {}, log() {} },
     clearing: ref(false), loading: ref(false), isSubmitting: ref(false), isCancelling: ref(false), hasRecoverableTask: ref(false), recoveryRequiresReopen: ref(false),
-    latestProfileResult: ref(null), latestProfileResultLoading: ref(false), latestProfileResultError: ref(''),
+    pausedWriteCount: ref(0), latestProfileResult: ref(null), latestProfileResultLoading: ref(false), latestProfileResultError: ref(''),
     buildProfileTaskResult: (status, task) => ({ status: Number(status?.status) === 2 ? 'failed' : Number(status?.status) === 3 ? 'stopped' : 'completed', taskId: task?.taskId || '', fetchedCount: task?.writtenCount || 0, succeeded: Number(status?.succeeded) || 0, failed: Number(status?.failed) || 0, requestCount: Number(status?.request_count) || 0, startedAt: status?.start || '', finishedAt: status?.end || '', reason: status?.reason || '' }),
     activeProfileTaskId: ref('task-1'), activeCommentTaskId: ref('task-1'), activeSeriesTaskId: ref('task-1'),
     activeStreamTask: { taskId: 'task-1' }, activeSeriesTask: { taskId: 'task-1' }, componentUnmounted: false,
@@ -51,17 +51,22 @@ function fixture(t, page, taskName, overrides = {}) {
     showErrorMsg: message => notifications.push({ message, type: 'error' }),
     ...overrides,
   };
+  if (page === 'CommentFetch') {
+    bindings.formData.value.pages = 1;
+    bindings.commentPagesType = ref('pages');
+    bindings.replyPagesType = ref('none');
+  }
   bindings.feishuRequest = config => bindings.request(config);
   function handler(name) {
     const node = declarations.find(n => n.id.name === name)?.init;
     if (!node) return undefined;
     return new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
   }
-  for (const name of ['profileTaskApiPath', 'seriesTaskApiPath', 'commentTaskApiPath', 'unwrapApiData', 'hideToast', 'showToast', 'showCompletionToast', 'finishToast', 'getStoppingText', 'stoppedCommentProgress', 'getStreamProgressText', 'restoreProfileTask', 'restoreSeriesTask']) {
+  for (const name of ['profileTaskApiPath', 'seriesTaskApiPath', 'commentTaskApiPath', 'unwrapApiData', 'hideToast', 'showToast', 'showCompletionToast', 'finishToast', 'getStoppingText', 'stoppedCommentProgress', 'getStreamProgressText', 'showProfileFieldProgress', 'restoreProfileTask', 'restoreSeriesTask']) {
     const fn = handler(name); if (fn) bindings[name] = fn;
   }
   const callbacks = Object.fromEntries(declarations.find(n => n.id.name === taskName).init.arguments[0].properties
-    .filter(n => ['onProgress', 'onWriting', 'onFinish', 'onError'].includes(n.key.name))
+    .filter(n => ['onProgress', 'onWriting', 'onFinish', 'onError', 'writeBatch'].includes(n.key.name))
     .map(n => [n.key.name, new Function(...Object.keys(bindings), `return (${source.slice(n.value.start, n.value.end)});`)(...Object.values(bindings))]));
   return { feedback, bindings, notifications, handler, callbacks, app };
 }
@@ -344,6 +349,210 @@ for (const [page, taskName, , submitName] of pages) {
 }
 
 
+test('作者作品运行进度显示获取失败数、最近一次原因和积分范围说明', t => {
+  const { feedback, bindings, callbacks } = fixture(t, 'ProfileFetch', 'profileStreamTask');
+  const task = { taskId: 'task-1', writtenCount: 12, apiPathPrefix: bindings.FEISHU_API_PATH_PREFIX };
+  const status = { status: 0, processed: 2, total: 2, failed: 1, reason: '请求超时', scope_warning: '积分不足，部分作者未执行' };
+  callbacks.onProgress(status, task, 'collecting');
+  assert.equal(feedback.toastText.value, [
+    '作者处理进度 2/2 · 已写入 12 条作品',
+    '获取失败 1 条，最近一次原因：请求超时。',
+    '积分不足，部分作者未执行',
+    '请勿关闭插件，关闭将中断任务',
+  ].join('\n'));
+
+  callbacks.onProgress({ ...status, processed: 3, total: 3 }, { ...task, writtenCount: 18 }, 'written');
+  assert.match(feedback.toastText.value, /^作者处理进度 3\/3 · 已写入 18 条作品\n获取失败 1 条，最近一次原因：请求超时/);
+
+  callbacks.onProgress({ ...status, failed: 0 }, task, 'collecting');
+  assert.match(feedback.toastText.value, /获取失败 0 条/);
+  assert.doesNotMatch(feedback.toastText.value, /请求超时|最近一次/);
+});
+
+test('作者作品进度不把通用错误、旧任务原因或任务中断当作最近一次获取失败原因', t => {
+  const { feedback, bindings, callbacks } = fixture(t, 'ProfileFetch', 'profileStreamTask');
+  const task = { taskId: 'task-1', writtenCount: 12, apiPathPrefix: bindings.FEISHU_API_PATH_PREFIX };
+  const status = { status: 0, processed: 2, total: 3, input_count: 3, failed: 1 };
+
+  for (const reason of ['', '作品获取失败']) {
+    callbacks.onProgress({ ...status, reason }, task, 'collecting');
+    assert.match(feedback.toastText.value, /失败 1 条.*暂未返回具体原因/);
+    assert.doesNotMatch(feedback.toastText.value, /最近一次/);
+  }
+
+  callbacks.onProgress({ ...status, reason: '请求超时' }, { ...task, apiPathPrefix: undefined }, 'collecting');
+  assert.match(feedback.toastText.value, /获取失败 1 条.*暂未返回具体原因/);
+  assert.doesNotMatch(feedback.toastText.value, /请求超时/);
+
+  callbacks.onProgress({ ...status, status: 2, reason: '任务执行中断' }, task, 'collecting');
+  assert.doesNotMatch(feedback.toastText.value, /任务执行中断|最近一次|暂未返回具体原因/);
+
+  callbacks.onProgress({ ...status, cancel_requested: true, reason: '用户主动停止' }, task, 'collecting');
+  assert.equal(feedback.toastText.value, '正在停止获取数据，已写入 12 条作品。请勿关闭插件，关闭会中断数据写入');
+});
+
+test('作者作品进度说明解析失败，只减页时仍计入，跳过作者时优先使用接口的准确数量', t => {
+  const { feedback, bindings, callbacks } = fixture(t, 'ProfileFetch', 'profileStreamTask');
+  const task = { taskId: 'task-1', writtenCount: 12, apiPathPrefix: bindings.FEISHU_API_PATH_PREFIX };
+  const status = { status: 0, processed: 1, total: 2, input_count: 3, failed: 0 };
+  const skippedWarning = '积分不足，部分作者未执行，本次获取页数已减少';
+
+  callbacks.onProgress(status, task, 'collecting');
+  assert.match(feedback.toastText.value, /\n1 条输入未能识别。/);
+  assert.doesNotMatch(feedback.toastText.value, /获取失败|暂未返回具体原因/);
+
+  callbacks.onProgress({ ...status, failed: 1, reason: '请求超时',
+    scope_warning: '积分不足，本次获取页数已减少' }, task, 'collecting');
+  assert.match(feedback.toastText.value, /\n获取失败 1 条，最近一次原因：请求超时。另有 1 条输入未能识别。\n积分不足，本次获取页数已减少/);
+
+  const skipped = { ...status, input_count: 4, scope_warning: skippedWarning };
+  callbacks.onProgress(skipped, task, 'collecting');
+  assert.match(feedback.toastText.value, /获取失败 0 条。\n积分不足，部分作者未执行/);
+  assert.doesNotMatch(feedback.toastText.value, /未能识别/);
+
+  callbacks.onProgress({ ...skipped, status: 1, failed: 1, invalid_url_count: 1, reason: '请求超时' }, task, 'written');
+  assert.match(feedback.toastText.value, /获取失败 1 条。另有 1 条输入未能识别。/);
+  assert.doesNotMatch(feedback.toastText.value, /最近一次|请求超时/);
+
+  callbacks.onProgress({ ...skipped, status: 1, invalid_url_count: 0 }, task, 'written');
+  assert.match(feedback.toastText.value, /^作者处理进度 1\/2 · 已写入 12 条作品\n获取失败 0 条。/);
+  assert.doesNotMatch(feedback.toastText.value, /未能识别/);
+});
+
+test('作者作品写表等待及准备字段时保留原任务的失败摘要，停止后优先显示停止进度', async t => {
+  const pending = defer();
+  const savingProgress = defer();
+  let writeOptions;
+  const { feedback, bindings, callbacks } = fixture(t, 'ProfileFetch', 'profileStreamTask', {
+    createAndWriteData: async (_items, _mode, _taskId, _tableId, _fields, options) => {
+      writeOptions = options;
+      return pending.promise;
+    },
+  });
+  const latestStatus = { status: 0, processed: 1, total: 2, input_count: 3, failed: 1, reason: '请求超时' };
+  const task = { taskId: 'task-1', writtenCount: 12, apiPathPrefix: bindings.FEISHU_API_PATH_PREFIX, latestStatus };
+  const items = [{ id: 'post-1' }];
+  callbacks.onProgress(latestStatus, task, 'collecting');
+  callbacks.onWriting(items, task);
+  const failureSummary = '获取失败 1 条，最近一次原因：请求超时。另有 1 条输入未能识别。';
+  assert.equal(feedback.toastText.value.split('\n').slice(0, 2).join('\n'), `正在写入 1 条作品\n${failureSummary}`);
+  assert.equal(feedback.toastText.value.match(/请勿关闭插件/g).length, 1);
+
+  const writing = callbacks.writeBatch(items, task, { assertActive() {}, saveProgress: () => savingProgress.promise });
+  writeOptions.onProgress('正在检查目标表字段...');
+  assert.equal(feedback.toastText.value.split('\n').slice(0, 2).join('\n'), `正在检查目标表字段...\n${failureSummary}`);
+
+  const preparingWrite = writeOptions.onBeforeWrite();
+  assert.match(feedback.toastText.value, /^正在检查目标表字段/);
+  savingProgress.resolve();
+  await preparingWrite;
+  assert.equal(feedback.toastText.value.split('\n').slice(0, 2).join('\n'), `正在写入本批作品\n${failureSummary}`);
+
+  bindings.isCancelling.value = true;
+  writeOptions.onProgress('正在创建字段');
+  assert.equal(feedback.toastText.value, '正在停止获取数据，已写入 12 条作品。请勿关闭插件，关闭会中断数据写入');
+  pending.resolve({ tableId: 'target' });
+  await writing;
+
+  bindings.isCancelling.value = false;
+  callbacks.onWriting(items, { ...task, latestStatus: { ...latestStatus, status: 1, invalid_url_count: 1 } });
+  assert.equal(feedback.toastText.value.split('\n')[1], failureSummary);
+  callbacks.onWriting(items, { ...task, latestStatus: { ...latestStatus, status: 2, reason: '任务执行中断' } });
+  assert.equal(feedback.toastText.value.split('\n')[1], '获取失败 1 条。另有 1 条输入未能识别。');
+  assert.doesNotMatch(feedback.toastText.value, /最近一次|任务执行中断/);
+
+  callbacks.onWriting(items, { ...task, latestStatus: { ...latestStatus, input_count: 2, failed: 0 } });
+  assert.equal(feedback.toastText.value, '正在写入 1 条作品，请勿关闭插件，关闭将中断任务');
+  bindings.showProfileFieldProgress('正在检查目标表字段...');
+  assert.equal(feedback.toastText.value, '正在检查目标表字段...请勿关闭插件，关闭将中断任务');
+});
+
+test('作者作品整批解析失败时显示逐条明细，不进入任务恢复', async t => {
+  const { buildProfileTaskResult } = await import('../src/utils/profileTaskResult.mjs');
+  const invalid_items = [{ url: 'bad', reason: '未能从输入识别作者' }];
+  const { bindings, handler, callbacks } = fixture(t, 'ProfileFetch', 'profileStreamTask', {
+    buildProfileTaskResult, normalizeWorkFetchRange: value => value,
+    request: async () => ({ data: { sta: -1, msg: '未能解析输入', data: { invalid_url_count: 1, invalid_items } } }),
+    profileStreamTask: { submit: async create => { await assert.rejects(create, error => { callbacks.onError(error); return true; }); } },
+  });
+  await handler('postProfileTask')('', 'bad');
+  assert.equal(bindings.latestProfileResult.value.status, 'failed');
+  assert.equal(bindings.latestProfileResult.value.failed, 1);
+  assert.equal(bindings.latestProfileResult.value.inputCount, 1);
+  assert.deepEqual(bindings.latestProfileResult.value.failedItems, invalid_items);
+  assert.equal(bindings.hasRecoverableTask.value, false);
+});
+
+test('作者作品停止有失败、范围缩减或输入未完成时按警告终态提示，不显示处理完成', async t => {
+  const { buildProfileTaskResult } = await import('../src/utils/profileTaskResult.mjs');
+  for (const [status, text] of [
+    [{ status: 3, total: 3, processed: 2, succeeded: 1, failed: 1 }, '任务已停止，1 条输入失败，已写入 4 条作品'],
+    [{ status: 1, total: 2, processed: 2, succeeded: 2, failed: 0, scope_warning: '积分不足，本次获取范围已缩减' }, '部分完成，积分不足，本次获取范围已缩减，已写入 4 条作品'],
+    [{ status: 1, total: 3, processed: 2, succeeded: 2, failed: 0 }, '部分完成，1 条输入未完成，已写入 4 条作品'],
+  ]) {
+    const { feedback: f, callbacks, bindings: b } = fixture(t, 'ProfileFetch', 'profileStreamTask', { buildProfileTaskResult });
+    await callbacks.onFinish(status, { taskId: 'task-1', writtenCount: 4 });
+    assert.equal(f.toastType.value, 'warning');
+    assert.equal(f.toastText.value, text);
+    assert.equal(b.latestProfileResult.value.status, status.status === 3 ? 'stopped' : 'incomplete');
+  }
+});
+
+test('作者作品部分完成的浮层显示已知未执行条数并保留减页提醒', async t => {
+  const { buildProfileTaskResult } = await import('../src/utils/profileTaskResult.mjs');
+  for (const [input_count, scope_warning, reason] of [
+    [10, '积分不足，部分作者未执行', '积分不足，8 条输入未执行'],
+    [10, '积分不足，部分作者未执行，本次获取页数已减少', '积分不足，8 条输入未执行，本次获取页数已减少'],
+    [2, '积分不足，本次获取页数已减少', '积分不足，本次获取页数已减少'],
+    [undefined, '积分不足，部分作者未执行', '积分不足，部分作者未执行'],
+  ]) {
+    const { feedback: f, callbacks, bindings } = fixture(t, 'ProfileFetch', 'profileStreamTask', { buildProfileTaskResult });
+    await callbacks.onFinish(
+      { status: 1, total: 2, processed: 2, succeeded: 2, failed: 0, input_count, scope_warning },
+      { taskId: 'task-1', writtenCount: 24 },
+    );
+    assert.equal(f.toastType.value, 'warning');
+    assert.equal(f.toastText.value, `部分完成，${reason}，已写入 24 条作品`);
+    assert.equal(bindings.latestProfileResult.value.scopeWarning, scope_warning);
+  }
+});
+
+test('作者作品有失败或已停止时，浮层追加已知未执行条数', async t => {
+  const { buildProfileTaskResult } = await import('../src/utils/profileTaskResult.mjs');
+  const scope_warning = '积分不足，部分作者未执行';
+  for (const [status, type, text] of [
+    [{ status: 1, input_count: 10, total: 2, processed: 2, succeeded: 1, failed: 1, scope_warning }, 'warning', '部分失败，1 条输入失败，8 条输入未执行，已写入 4 条作品'],
+    [{ status: 1, input_count: 10, total: 2, processed: 2, succeeded: 0, failed: 2, scope_warning }, 'error', '2 条输入失败，8 条输入未执行'],
+    [{ status: 3, input_count: 10, total: 2, processed: 1, succeeded: 1, failed: 0, scope_warning }, 'info', '任务已停止，8 条输入未执行，已写入 4 条作品'],
+    [{ status: 3, input_count: 10, total: 2, processed: 2, succeeded: 1, failed: 1, scope_warning }, 'warning', '任务已停止，1 条输入失败，8 条输入未执行，已写入 4 条作品'],
+    [{ status: 1, total: 2, processed: 2, succeeded: 1, failed: 1, scope_warning }, 'warning', '部分失败，1 条输入失败，已写入 4 条作品'],
+  ]) {
+    const { feedback: f, callbacks } = fixture(t, 'ProfileFetch', 'profileStreamTask', { buildProfileTaskResult });
+    await callbacks.onFinish(status, { taskId: 'task-1', writtenCount: 4 });
+    assert.equal(f.toastType.value, type);
+    assert.equal(f.toastText.value, text);
+  }
+});
+
+test('作者作品从点击立即执行开始计时，准备和提交期间的等待计入原任务快照', async t => {
+  let now = Date.parse('2026-11-24T09:00:00Z');
+  const clickedAt = now;
+  t.mock.method(Date, 'now', () => now);
+  let snapshot;
+  const { bindings: b, handler } = fixture(t, 'ProfileFetch', 'profileStreamTask', {
+    validateConfiguredInputFilter: async () => { now += 3000; return null; },
+    saveTableOutputConfig: async () => { now += 5000; },
+    normalizeWorkFetchRange: value => value,
+    request: async () => { now += 2000; return { data: { sta: 0, data: { task_id: 'timed' } } }; },
+    profileStreamTask: { submit: async create => { snapshot = await create(); } },
+  });
+  b.postProfileTask = handler('postProfileTask');
+  b.submitProfileUrls = handler('submitProfileUrls');
+  await handler('handleImmediateSubmit')();
+  assert.equal(snapshot.executionStartedAt, clickedAt);
+  assert.equal(now - snapshot.executionStartedAt, 10000);
+});
+
 for (const [page, taskName, , submitName] of pages) {
   test(`${page}：真实提交HTTP未返回时保持反馈和互斥，重复点击不创建第二个请求`, async t => {
     const pending = defer(); let requests = 0;
@@ -378,9 +587,9 @@ for (const [page, taskName, , submitName] of pages) {
     await callbacks.onError(Object.assign(new Error('原始写入超时'), { requiresReopen: true }), { taskId: 'task-1' });
     const descriptor = parse(fs.readFileSync(new URL(`../src/components/${page}.vue`, import.meta.url), 'utf8')).descriptor;
     let button;
-    function visit(node) {
-      if (node.tag === 'el-button' && node.props?.some(p => p.type === 7 && p.name === 'on' && p.exp?.content === 'handleTaskAction')) button = node;
-      node.children?.forEach(visit);
+    function visit(node, parent) {
+      if (node.tag === 'el-button' && node.props?.some(p => p.type === 7 && p.name === 'on' && p.exp?.content === 'handleTaskAction')) button = page === 'ProfileFetch' ? parent : node;
+      node.children?.forEach(child => visit(child, node));
     }
     descriptor.template.ast.children.forEach(visit);
     assert.ok(button);
@@ -388,11 +597,20 @@ for (const [page, taskName, , submitName] of pages) {
     assert.deepEqual(compiled.errors, []);
     const body = compiled.code.replace(/import \{([^}]+)\} from "vue"/, (_, names) => `const {${names.replace(/ as /g, ': ')}} = Vue`).replace('export function render', 'function render');
     const render = new Function('Vue', `${body};return render`)(Vue);
-    const app = Vue.createSSRApp({ setup: () => ({ taskActionState: 'recoverable', recoveryRequiresReopen: b.recoveryRequiresReopen, handleTaskAction() {} }), render });
+    const app = Vue.createSSRApp({ setup: () => ({ formData: { executionMode: 'immediate' }, taskActionState: 'recoverable', pausedWriteCount: b.pausedWriteCount, recoveryRequiresReopen: b.recoveryRequiresReopen, handleTaskAction() {} }), render });
     app.component('el-button', { props: ['disabled'], setup: (props, { slots }) => () => Vue.h('button', { disabled: props.disabled }, slots.default?.()) });
     const html = await renderToString(app);
     assert.match(html, /<button[^>]*disabled/);
     assert.match(html, /请重新进入插件恢复/);
+    if (page === 'ProfileFetch') {
+      assert.doesNotMatch(html, /待写入|继续写入/);
+      await callbacks.onError(new Error('读取状态失败'), { taskId: 'task-1' });
+      assert.match(await renderToString(app), />恢复任务</);
+      await callbacks.onError(Object.assign(new Error('读取字段失败'), { unwrittenBatchCount: 2 }), { taskId: 'task-1' });
+      const paused = await renderToString(app);
+      assert.match(paused, /本批还有 2 条作品待写入.*>继续写入</s);
+      assert.doesNotMatch(paused, /<button[^>]*disabled/);
+    }
   });
 }
 

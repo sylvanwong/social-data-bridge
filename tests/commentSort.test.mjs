@@ -58,10 +58,10 @@ for (const targetTableId of ['', 'existing-table']) {
     const submit = load('getNoteData', scope);
     for (const selected of ['default', 'time_descending', 'like_count_descending', 'oldest']) {
       scope.formData.value.sortType = selected;
-      await submit(targetTableId, ['https://www.xiaohongshu.com/explore/note', 'https://tieba.baidu.com/p/123']);
+      await submit(targetTableId, ['https://www.xiaohongshu.com/explore/note', 'https://tieba.baidu.com/p/123'], { pages: 2, reply_pages: -1 });
       assert.deepEqual(requests.at(-1).data, {
         url: 'https://www.xiaohongshu.com/explore/note\nhttps://tieba.baidu.com/p/123',
-        pages: 2, reply_pages: -1, sort_type: selected,
+        pages: 2, reply_pages: -1, sort_type: selected, selected_field_keys: ['cid'],
       });
       assert.equal(saved.at(-1).targetTableId, targetTableId);
     }

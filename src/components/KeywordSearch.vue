@@ -575,19 +575,20 @@ const postSearchTask = async (targetTableId = "") => {
   showToast(`正在提交关键词搜索任务...${TASK_TOAST_SUFFIX}`, true);
   await keywordStreamTask.submit(async () => {
     const response = await feishuRequest({
-    url: buildFeishuApiPath('/v1/feishu/keyword/task'),
-    method: "post",
-    headers: { 'authorization': `Bearer ${props.api_key}` },
-    data: {
-      social_type: formData1.value.social_type,
-      keyword: formData1.value.keyword,
-      pages: formData1.value.workFetchRange.type === 'all'
-        ? 0
-        : Number(formData1.value.workFetchRange.pages),
-      work_fetch_range: normalizeWorkFetchRange(),
-      filter_config,
-    },
-  });
+      url: buildFeishuApiPath('/v1/feishu/keyword/task'),
+      method: "post",
+      headers: { 'authorization': `Bearer ${props.api_key}` },
+      data: {
+        social_type: formData1.value.social_type,
+        keyword: formData1.value.keyword,
+        pages: formData1.value.workFetchRange.type === 'all'
+          ? 0
+          : Number(formData1.value.workFetchRange.pages),
+        work_fetch_range: normalizeWorkFetchRange(),
+        filter_config,
+        selected_field_keys: outputSnapshot.selectedFieldKeys,
+      },
+    });
     const res = response.data;
     if (res?.sta !== 0 || !res.data?.task_id) throw new Error(res?.msg || '创建任务未返回任务ID');
     return {

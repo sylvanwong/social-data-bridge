@@ -3,20 +3,32 @@ import assert from 'node:assert/strict';
 import { FieldType, DateFormatter, NumberFormatter } from '@lark-base-open/js-sdk';
 import { createProductDetailFields, buildProductDetailRequest } from '../src/utils/productDetail.mjs';
 
-test('商品详情沿用独立捷径的13个输出字段，销量保留零和未知，时间按北京时间转换', () => {
+test('商品详情保留原列，并按商品搜索和平台价格口径补齐输出字段', () => {
   const fields = createProductDetailFields({ FieldType, DateFormatter, NumberFormatter });
   assert.deepEqual(fields.map(f => [f.key, f.name]), [
-    ['product_id', '商品ID'], ['title', '商品标题'], ['shop_id', '店铺ID'],
+    ['product_id', '商品ID'], ['title', '商品标题'], ['product_url', '商品链接'], ['social_type', '平台'],
+    ['shop_id', '店铺ID'],
     ['shop_name', '店铺名称'], ['seller_id', '卖家ID'], ['cover_url', '封面图'],
     ['main_image_urls', '商品图链接'], ['detail_image_urls', '详情图链接'],
-    ['sold_count', '销量'], ['positive_review_rate', '好评率'], ['assurances', '服务保障'],
-    ['sku_info', 'SKU信息'], ['extract_time', '提取时间'],
+    ['sold_count', '销量'], ['sales_text', '销量原文'], ['positive_review_rate', '好评率'], ['assurances', '服务保障'],
+    ['sku_info', 'SKU信息'],
+    ['sku_id', 'SKU ID'],
+    ['shop_avatar_url', '店铺头像'],
+    ['start_price', '起售价'], ['discount_start_price', '优惠后起售价'],
+    ['original_price', '原价'], ['coupon_price', '券后价'],
+    ['extract_time', '提取时间'],
   ]);
   const sales = fields.find(f => f.key === 'sold_count');
   assert.equal(sales.type, FieldType.Number);
   assert.equal(sales.getValue({ sold_count: 0 }), 0);
   assert.equal(sales.getValue({ sold_count: null }), null);
   assert.equal(sales.getValue({}), null);
+  const discount = fields.find(f => f.key === 'discount_start_price');
+  assert.equal(discount.type, FieldType.Number);
+  assert.equal(discount.hint, '仅抖音');
+  assert.equal(fields.find(f => f.key === 'coupon_price').hint, '仅小红书');
+  assert.equal(discount.getValue({ discount_start_price: 0 }), 0);
+  assert.equal(discount.getValue({}), null);
   const time = fields.find(f => f.key === 'extract_time');
   assert.equal(time.getValue({ extract_time: '2026-11-19 10:20:30' }), Date.UTC(2026, 10, 19, 2, 20, 30));
   assert.equal(time.getValue({ extract_time: '' }), null);

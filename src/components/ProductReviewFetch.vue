@@ -6,7 +6,7 @@ import { ElMessage } from 'element-plus';
 import { feishuRequest, buildFeishuApiPath } from '@/utils/request';
 import { createTableConfigSaver, parseTableConfigList } from '../utils/tableOutputConfig.mjs';
 import { readSourceRows } from '../utils/sourceTableRows.mjs';
-import { parseManualUrls, extractCellLink } from '../utils/sourceLinks.mjs';
+import { extractCellLink, extractHttpUrls } from '../utils/sourceLinks.mjs';
 import { useSocialData } from '../composables/useSocialData';
 import { useProductReviewTask } from '../composables/useProductReviewTask';
 import TaskFeedback from './TaskFeedback.vue';
@@ -184,6 +184,97 @@ const assertPreparing = value => {
   if (isCancelling.value) { const error = new Error('任务已停止'); error.cancelled = true; throw error; }
   return value;
 };
+// 与商品评价接口支持的商品链接域名一致。
+const productReviewHosts = new Set([
+  'haohuo.jinritemai.com', 'ecom.douyin.com', 'v.douyin.com',
+  'xiaohongshu.com', 'www.xiaohongshu.com', 'xhslink.com', 'www.xhslink.com',
+]);
+const bareXhsProductLink = /^\s*(?:www\.)?(?:xiaohongshu\.com|xhslink\.com)\//i;
+const productReviewLinkWrappers = {
+  '(': ')', '[': ']', '{': '}', '（': '）', '【': '】', '<': '>',
+  '《': '》', '「': '」', '『': '』', '"': '"', "'": "'", '“': '”', '‘': '’',
+};
+const hasBareXhsProductLink = line => {
+  if (bareXhsProductLink.test(line)) return true;
+  const text = line.trimStart();
+  const opening = text[0];
+  const closing = productReviewLinkWrappers[opening];
+  const afterOpening = text.slice(1);
+  if (!closing || !bareXhsProductLink.test(afterOpening)) return false;
+  if (opening !== '(' && opening !== '[') return afterOpening.includes(closing);
+
+  // 参数内成对的括号不能作为外层闭合符号。
+  let depth = 1;
+  for (const char of afterOpening) {
+    if (char === opening) depth++;
+    if (char === closing && --depth === 0) return true;
+  }
+  return false;
+};
+const parseManualProductReviewUrls = text => {
+  if (typeof text !== 'string') return [];
+  const tokens = /(?:^|([^a-z0-9@._:/-]))(?:https?:\/\/)?(?:www\.)?(?:xiaohongshu\.com|xhslink\.com)\/[^\s,，。！？；：、?#]*[?#]|([,，\r\n\u2028\u2029])/gi;
+  const urls = new Set();
+  let start = 0;
+  for (let match; (match = tokens.exec(text));) {
+    const separator = match[2] || match[1];
+    if (separator && /[,，\r\n\u2028\u2029]/.test(separator)) {
+      urls.add(text.slice(start, match.index).trim());
+      start = match.index + 1;
+    }
+    if (match[2]) continue;
+
+    // 跳过链接参数里的逗号，遇到链接外的闭合符号后恢复分隔。
+    const closingBrackets = [];
+    let end = match.index + (match[1]?.length ?? 0);
+    for (; end < text.length; end++) {
+      const char = text[end];
+      if (/[\s，。！？；：、}】）>》」』"'”’]/.test(char)) break;
+      if (char === ',' && /\s/.test(text[end + 1] ?? '')) break;
+      if (char === '(' || char === '[') closingBrackets.push(char === '(' ? ')' : ']');
+      else if ((char === ')' || char === ']') && char !== closingBrackets.pop()) break;
+    }
+    tokens.lastIndex = end;
+  }
+  urls.add(text.slice(start).trim());
+  urls.delete('');
+  return [...urls];
+};
+const hasProductReviewHost = url => {
+  try {
+    return productReviewHosts.has(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+};
+const extractProductReviewSegmentLink = segment => {
+  const link = extractCellLink(segment);
+  const label = segment?.text;
+  // 飞书带格式粘贴可能把整段【链接】当作地址，并自动加上 http://。
+  if (segment?.type !== 'url' || typeof label !== 'string' ||
+    !label.startsWith('【') || !label.endsWith('】') || link !== `http://${label}`) return link;
+
+  const bareLink = label.slice(1, -1);
+  return bareXhsProductLink.test(bareLink) ? `https://${bareLink}` : link;
+};
+const extractProductReviewLink = value => {
+  const isRichText = Array.isArray(value);
+  const text = isRichText
+    ? value.map(extractProductReviewSegmentLink).filter(Boolean).join('\n')
+    : extractCellLink(value);
+  if (!text) return null;
+  const lines = text.split(/\r\n|[\r\n\u2028\u2029]/);
+  let hasLink = false;
+  const keptLines = lines.filter(line => {
+    const httpUrls = extractHttpUrls(line);
+    const hasHttpLink = httpUrls.some(url => /^https?:\/\/[a-z0-9]/i.test(url) && (!isRichText || hasProductReviewHost(url)));
+    const hasBareXhsLink = hasBareXhsProductLink(line);
+    hasLink ||= hasHttpLink || hasBareXhsLink;
+    return hasHttpLink || hasBareXhsLink || httpUrls.length === 0;
+  });
+  if (!hasLink) return null;
+  return keptLines.length === lines.length ? text : keptLines.join('\n');
+};
 const handleSubmit = async () => {
   if (disposed || loading.value || !initialReady.value) return;
   if (hasRecoverableTask.value) return resumeTask();
@@ -192,11 +283,12 @@ const handleSubmit = async () => {
   const output = { selectedFieldKeys: [...selectedFieldKeys.value], fieldMappings: mappingDraft.value.map(row => ({ ...row })), writeMode: input.radio === 1 ? 'append' : input.writeMode, targetTableId: input.radio === 2 ? input.table_id : '', initializingTableId: '' };
   const pages = reviewPagesType.value === 'all' ? 0 : input.pages;
   const replies = replyPagesType.value === 'none' ? -1 : replyPagesType.value === 'all' ? 0 : input.replyPages;
+  let urls = input.mode === 'manual' ? parseManualProductReviewUrls(input.manualUrls) : [];
   try {
     if (!props.api_key) throw new Error('请先在首页配置 API Key');
     if (!Number.isInteger(pages) || pages < (reviewPagesType.value === 'all' ? 0 : 1) || pages > 50 || !Number.isInteger(replies) || replies < -1 || replies > 50 || (replyPagesType.value === 'pages' && replies < 1)) throw new Error('评价和回复页数须为1到50的整数');
     if (!['general', 'time_descending'].includes(input.sortType)) throw new Error('请选择评论排序');
-    if (input.mode === 'manual' && !parseManualUrls(input.manualUrls).length) throw new Error('请输入至少一个商品链接');
+    if (input.mode === 'manual' && !urls.length) throw new Error('请输入至少一个商品链接');
     if (input.radio === 2 && !input.table_id) throw new Error('请选择现有表格');
     if (output.fieldMappings.some(row => !row.source_key || !row.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
     if (input.mode === 'table' && (sourceFieldLoading.value || sourceFieldError.value || !input.productLinkFieldId || !source.tableId || !source.viewId)) throw new Error(sourceFieldError.value || '请选择商品链接字段');
@@ -204,8 +296,8 @@ const handleSubmit = async () => {
   } catch (error) { showError(error); return; }
   isCancelling.value = false;
   loading.value = true; feedback.begin('正在准备获取商品评价…');
+  let preparing = true;
   try {
-    let urls = parseManualUrls(input.manualUrls);
     if (input.mode === 'table') {
       const table = assertPreparing(await bitable.base.getTableById(source.tableId));
       const view = assertPreparing(await table.getViewById(source.viewId));
@@ -223,7 +315,10 @@ const handleSubmit = async () => {
         ids = ids.slice(0, limit);
       }
       if (!ids.length) throw new Error(input.scope === 'selected' ? '请先在表格中选择至少一行数据' : '未找到可读取的商品链接');
-      urls = [...new Set(assertPreparing(await readSourceRows(table, ids, input.productLinkFieldId, (_, value) => extractCellLink(value), assertPreparing)))];
+      const links = await readSourceRows(
+        table, ids, input.productLinkFieldId, (_, value) => extractProductReviewLink(value), assertPreparing, { throwOnEmptyWithReadError: true },
+      );
+      urls = [...new Set(assertPreparing(links))];
     }
     assertPreparing(); if (!urls.length) throw new Error('请输入至少一个商品链接');
     if (input.radio === 2) {
@@ -240,10 +335,25 @@ const handleSubmit = async () => {
       }
       assertPreparing();
       if (output.fieldMappings.some(row => !row.source_key || !row.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
-      await validateTableFields(input.table_id, output.selectedFieldKeys, { fieldMappings: output.fieldMappings, writeMode: output.writeMode, uniqueKey: 'review_id', preserveExistingFieldFormat: true, throwOnError: true, assertActive: assertPreparing, onProgress: feedback.progress }); assertPreparing();
+      await validateTableFields(input.table_id, output.selectedFieldKeys, { fieldMappings: output.fieldMappings, writeMode: output.writeMode, uniqueKey: 'review_id', formatFieldsOnCreate: true, throwOnError: true, assertActive: assertPreparing, onProgress: feedback.progress }); assertPreparing();
     }
-    await submitTask({ ...output, sourceSnapshot: { ...source, ...input }, requestSnapshot: { url: urls.join('\n'), pages, reply_pages: replies, sort_type: input.sortType } });
-  } catch (error) { if (!disposed) { loading.value = false; isCancelling.value = false; if (error.cancelled) feedback.finish('任务已停止，已写入 0 条商品评价', { stopped: true }); else feedback.fail(error); } }
+    preparing = false;
+    await submitTask({
+      ...output,
+      sourceSnapshot: { ...source, ...input },
+      requestSnapshot: {
+        url: urls.join('\n'), pages, reply_pages: replies, sort_type: input.sortType,
+        selected_field_keys: output.selectedFieldKeys,
+      },
+    });
+  } catch (error) {
+    if (disposed) return;
+    const stopped = error?.cancelled || (preparing && isCancelling.value);
+    loading.value = false;
+    isCancelling.value = false;
+    if (stopped) feedback.finish('任务已停止，已写入 0 条商品评价', { stopped: true });
+    else feedback.fail(error);
+  }
 };
 const handleCancel = async () => { try { await cancelTask(); } catch (error) { showError(error); } };
 watch([() => formData.value.writeMode, mappingDraft], rememberDraft, { deep: true, flush: 'sync' });
@@ -455,7 +565,7 @@ onUnmounted(() => {
         <el-form-item v-else>
           <div class="c-label">商品链接</div>
           <el-input v-model="formData.manualUrls" type="textarea" :rows="4" aria-label="商品链接"
-            placeholder="请输入商品链接，支持批量输入（多个链接请换行或用逗号分隔）" />
+            placeholder="请输入商品链接，多个链接请换行或用逗号加空格分隔" />
         </el-form-item>
 
         <el-form-item>

@@ -406,8 +406,12 @@ const normalizeCellValue = async (table, field, value, config, fieldType, extra 
   if ((fieldType === FieldType.Number || fieldType === FieldType.DateTime) && (nextValue == null || nextValue === '')) {
     return null;
   }
-  if (config.isTimestamp && nextValue) {
+  if (config.isTimestamp && nextValue != null && nextValue !== '') {
     nextValue = nextValue * 1000;
+    if (fieldType === FieldType.Text) {
+      const beijingTime = new Date(nextValue + 8 * 60 * 60 * 1000);
+      return Number.isNaN(beijingTime.getTime()) ? '' : beijingTime.toISOString().slice(0, 19).replace('T', ' ');
+    }
   }
 
   if ((config.allowedTypes?.includes(FieldType.SingleSelect) || config.key === 'nickname' || config.key === 'note_type' || config.key === 'social_type') && fieldType === FieldType.SingleSelect) {
@@ -614,14 +618,25 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
       try {
         options.onProgress?.(`正在创建字段 ${createdFieldCount + 1}/${missingFields.length}：${config.name}...`);
         options.assertActive?.();
-        await activeTable.addField({ type: config.type, name: config.name });
-        createdFieldCount++;
+        const newField = { type: config.type, name: config.name };
+        if (options.formatFieldsOnCreate) {
+          // 格式随列一起创建，建列响应丢失时重试也无需改动已有列。
+          if (config.type === FieldType.Number && config.formatter) {
+            newField.property = { formatter: config.formatter };
+          } else if (config.type === FieldType.DateTime && config.dateFormat) {
+            newField.property = { dateFormat: config.dateFormat };
+          }
+        }
+        await activeTable.addField(newField);
       } catch (error) {
+        options.assertActive?.();
         const message = `添加字段 "${config.name}" 失败`;
         if (options.throwOnError) throw new Error(`${message}${error?.message ? `：${error.message}` : ''}`);
         ElMessage({ message, type: 'error', plain: true, duration: 5000 });
         return false;
       }
+      options.assertActive?.();
+      createdFieldCount++;
     }
 
     if (missingFields.length > 0) {
@@ -631,26 +646,27 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
     }
 
     options.assertActive?.();
-    const refreshedFieldMetaList = await activeTable.getFieldMetaList();
-    options.assertActive?.();
-    const refreshedFieldMetaByName = new Map(refreshedFieldMetaList.map(meta => [meta.name, meta]));
-    const refreshedFieldMetaById = new Map(refreshedFieldMetaList.map(meta => [meta.id, meta]));
-    for (const config of activeFieldMapping) {
-      if (options.preserveExistingFieldFormat && !missingFields.includes(config)) continue;
-      const explicitMapping = explicitMappings.get(config.key);
-      const matchedField = explicitMapping?.target_field_id
-        ? { fieldMeta: refreshedFieldMetaById.get(explicitMapping.target_field_id) }
-        : resolveFieldMetaByConfig(refreshedFieldMetaByName, config);
-      const fieldId = matchedField?.fieldMeta?.id;
-      if (!fieldId) continue;
+    if (!options.formatFieldsOnCreate) {
+      const refreshedFieldMetaList = await activeTable.getFieldMetaList();
       options.assertActive?.();
-      const field = await activeTable.getFieldById(fieldId);
-      options.assertActive?.();
-      try {
-        await applyFieldDisplayConfig(field, config, options.assertActive);
-      } catch (error) {
-        if (error?.stopPolling || error?.cancelled) throw error;
-        console.error(`设置字段 ${config.name} 格式失败:`, error);
+      const refreshedFieldMetaByName = new Map(refreshedFieldMetaList.map(meta => [meta.name, meta]));
+      const refreshedFieldMetaById = new Map(refreshedFieldMetaList.map(meta => [meta.id, meta]));
+      for (const config of activeFieldMapping) {
+        const explicitMapping = explicitMappings.get(config.key);
+        const matchedField = explicitMapping?.target_field_id
+          ? { fieldMeta: refreshedFieldMetaById.get(explicitMapping.target_field_id) }
+          : resolveFieldMetaByConfig(refreshedFieldMetaByName, config);
+        const fieldId = matchedField?.fieldMeta?.id;
+        if (!fieldId) continue;
+        options.assertActive?.();
+        const field = await activeTable.getFieldById(fieldId);
+        options.assertActive?.();
+        try {
+          await applyFieldDisplayConfig(field, config, options.assertActive);
+        } catch (error) {
+          if (error?.stopPolling || error?.cancelled) throw error;
+          console.error(`设置字段 ${config.name} 格式失败:`, error);
+        }
       }
     }
 
@@ -663,6 +679,7 @@ export const validateTableFields = async (tableId, selectedFieldKeys = [], field
 
     return true;
   } catch (error) {
+    if (!error?.stopPolling && !error?.cancelled) options.assertActive?.();
     if (options.throwOnError) throw error;
     console.error("验证表格字段时出错:", error);
     showErrorMsg(error?.response?.data?.msg || error?.message || "验证表格字段失败，请稍后重试");
@@ -891,11 +908,6 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         return;
       }
 
-      if (initializingTable) {
-        options.assertActive?.();
-        await options.onTableInitialized?.();
-      }
-
       options.assertActive?.();
       await Promise.all(availableFieldList.map(async item => {
         item.extra = {};
@@ -910,6 +922,11 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
           }
         }
       }));
+
+      if (initializingTable) {
+        options.assertActive?.();
+        await options.onTableInitialized?.();
+      }
 
       const attachmentEntries = [];
       for (const fieldItem of availableFieldList) {
@@ -943,6 +960,8 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
 
       let records = [];
       let normalizedRecords = [];
+      const keepExistingValue = (config, value) =>
+        options.writeMode === 'upsert' && config.preserveOnEmpty && (value == null || value === '');
       if (options.parallelCellCreation) {
         const recordChunks = chunkRecords(list, options.cellCreationBatchSize || 50);
         for (const items of recordChunks) {
@@ -953,11 +972,11 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
               const value = await normalizeCellValue(activeTable, field, sourceValue, config, fieldType, extra, item, api_key);
               options.assertActive?.();
               const cell = await field.createCell(value);
-              return { cell, fieldId: field.id, value: await cell.getValue() };
+              return { cell, fieldId: field.id, value: await cell.getValue(), keepExisting: keepExistingValue(config, sourceValue) };
             }));
             return {
               record: cells.map(entry => entry.cell),
-              normalizedRecord: Object.fromEntries(cells.map(entry => [entry.fieldId, entry.value])),
+              normalizedRecord: Object.fromEntries(cells.filter(entry => !entry.keepExisting).map(entry => [entry.fieldId, entry.value])),
             };
           }));
           records.push(...prepared.map(item => item.record));
@@ -975,7 +994,9 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
             const cell = await field.createCell(value);
             record.push(cell);
             options.assertActive?.();
-            normalizedRecord[field.id] = await cell.getValue();
+            if (!keepExistingValue(config, sourceValue)) {
+              normalizedRecord[field.id] = await cell.getValue();
+            }
             options.assertActive?.();
           }
           records.push(record);
@@ -1153,6 +1174,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       if (options.appendState) throw error;
       if (options.stopAfterCurrentBatch) {
         const writeError = new Error(`${error?.message || '写入失败'}；已暂停写入，已写入的数据会保留，请点击「恢复任务」继续。`, { cause: error });
+        writeError.writePaused = true;
         writeError.stopPolling = true;
         throw writeError;
       }

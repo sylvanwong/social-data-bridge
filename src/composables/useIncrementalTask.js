@@ -71,6 +71,11 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
     const version = lifecycleVersion;
     const owner = activeTask;
     const snapshot = JSON.parse(JSON.stringify(task));
+    // 逐项明细由终态查询返回，恢复写入只需要状态、计数和游标。
+    if (snapshot.latestStatus) {
+      delete snapshot.latestStatus.failed_items;
+      delete snapshot.latestStatus.invalid_items;
+    }
     let saving = true;
     try {
       return await bounded(() => trackMutation(async () => {

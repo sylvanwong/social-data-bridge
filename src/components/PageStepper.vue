@@ -1,36 +1,66 @@
 <script setup>
+import { ref } from 'vue';
+
 const props = defineProps({
   modelValue: [Number, String],
   label: { type: String, required: true },
   disabled: Boolean,
+  max: { type: Number, default: 50 },
   roundToInteger: Boolean,
+  normalizeValue: Function,
 });
 const emit = defineEmits(['update:modelValue']);
+const isEmptyDraft = ref(false);
 
-function commitPages(pages) {
-  const value = props.roundToInteger ? Math.round(pages) : pages;
-  emit('update:modelValue', Math.max(1, Math.min(50, value)));
+function updateValue(value, input) {
+  const normalized = props.normalizeValue ? props.normalizeValue(value) : value;
+  if (props.normalizeValue && input && normalized !== value) input.value = String(normalized);
+  emit('update:modelValue', normalized);
+}
+
+function handleInput({ target }) {
+  const value = target.value === '' ? '' : target.valueAsNumber;
+  isEmptyDraft.value = !!props.normalizeValue && value === '';
+  updateValue(value, isEmptyDraft.value ? undefined : target);
+}
+
+function handleInputBlur({ target }) {
+  if (!isEmptyDraft.value) return;
+  isEmptyDraft.value = false;
+  updateValue('', target);
+}
+
+function commitValue(value) {
+  const rounded = props.roundToInteger ? Math.round(value) : value;
+  updateValue(Math.max(1, Math.min(props.max, rounded)));
 }
 
 function step(direction) {
-  const pages = Number(props.modelValue) || 0;
-  const next = pages >= 1 && pages <= 50 ? pages + direction : pages;
-  commitPages(next);
+  isEmptyDraft.value = false;
+  const value = Number(props.modelValue) || 0;
+  const next = value >= 1 && value <= props.max ? value + direction : value;
+  commitValue(next);
+}
+
+function handleInputKeydown(event) {
+  if (!isEmptyDraft.value || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+  event.preventDefault();
+  step(event.key === 'ArrowUp' ? 1 : -1);
 }
 
 function handleFocusOut(event) {
   if (props.roundToInteger && props.modelValue != null && props.modelValue !== '' && !event.currentTarget.contains(event.relatedTarget)) {
-    commitPages(Number(props.modelValue));
+    commitValue(Number(props.modelValue));
   }
 }
 </script>
 
 <template>
   <div class="page-stepper" :class="{ 'is-disabled': disabled }" @focusout="handleFocusOut">
-    <input :value="modelValue ?? ''" type="number" min="1" max="50" :aria-label="label" :disabled="disabled" @click.stop
-      @input="emit('update:modelValue', $event.target.value === '' ? '' : $event.target.valueAsNumber)" />
+    <input :value="isEmptyDraft ? '' : modelValue ?? ''" type="number" min="1" :max="max" :aria-label="label" :disabled="disabled" @click.stop
+      @input="handleInput" @blur="handleInputBlur" @keydown="handleInputKeydown" />
     <div class="stepper-buttons" @mousedown.prevent>
-      <button type="button" class="stepper-btn stepper-btn-up" :aria-label="'增加' + label" :disabled="disabled || modelValue >= 50"
+      <button type="button" class="stepper-btn stepper-btn-up" :aria-label="'增加' + label" :disabled="disabled || modelValue >= max"
         @click.stop="step(1)"></button>
       <button type="button" class="stepper-btn stepper-btn-down" :aria-label="'减少' + label" :disabled="disabled || modelValue === 1 || modelValue === '' || modelValue == null"
         @click.stop="step(-1)"></button>

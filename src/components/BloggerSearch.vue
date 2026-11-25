@@ -403,7 +403,18 @@ const submit = async () => {
     const filter_config = taskForm.social_type === 'douyin' ? { follower_count_range: taskForm.follower_count_range, user_type: taskForm.user_type } : {};
     if (componentUnmounted) return;
     await searchTask.submit(async () => {
-      const response = await feishuRequest({ url: buildFeishuApiPath('/v1/feishu/blogger/search/task'), method: 'post', headers: auth(), data: { social_type: taskForm.social_type, keyword: keywords, pages: taskForm.rangeType === 'all' ? 0 : Number(taskForm.pages), filter_config } });
+      const response = await feishuRequest({
+        url: buildFeishuApiPath('/v1/feishu/blogger/search/task'),
+        method: 'post',
+        headers: auth(),
+        data: {
+          social_type: taskForm.social_type,
+          keyword: keywords,
+          pages: taskForm.rangeType === 'all' ? 0 : Number(taskForm.pages),
+          filter_config,
+          selected_field_keys: outputSnapshot.selectedFieldKeys,
+        },
+      });
       if (response.data?.sta !== 0 || !response.data.data?.task_id) throw new Error(response.data?.msg || '创建任务未返回任务ID');
       const task = response.data.data;
       return { taskId: task.task_id, pendingWrite: false,

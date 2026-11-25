@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildProductSearchRequest, normalizeProductSearchItem, createProductSearchFields } from '../src/utils/productSearch.mjs';
-import { FieldType, NumberFormatter } from '@lark-base-open/js-sdk';
+import { FieldType, DateFormatter, NumberFormatter } from '@lark-base-open/js-sdk';
 
 test('商品搜索平台参数隔离，抖音价格为正整数且区间合法', () => {
   const form = { platform: 'xhs', keyword: ' 手机壳 ', sortType: 'price_ascending', minPrice: 10, only_live: true };
@@ -18,8 +18,11 @@ test('统一商品ID，小红书SKU和抖音商品ID不混用，未知值和真�
   assert.equal(xhs.sold_count, 0); assert.equal(xhs.stock_quantity, null); assert.equal(xhs.purchasable, '否');
   assert.equal(normalizeProductSearchItem('xhs', { sku_id: 'sku' }).purchasable, '');
   assert.equal(normalizeProductSearchItem('douyin', { product_id: 'p', sku_id: 's', card_type: 'live' }).product_id, 'p');
-  const fields = createProductSearchFields({ FieldType, NumberFormatter });
-  assert.equal(fields.length, 19);
+  const fields = createProductSearchFields({ FieldType, DateFormatter, NumberFormatter });
+  assert.equal(fields.length, 21);
+  assert.equal(fields.at(-1).name, '提取时间');
+  assert.equal(fields.at(-1).type, FieldType.DateTime);
   assert.ok(fields.every(f => f.defaultSelected));
-  assert.ok(!fields.some(f => f.key === 'product_url'));
+  assert.equal(fields.find(f => f.key === 'product_url').type, FieldType.Url);
+  assert.equal(fields.find(f => f.key === 'image_url').type, FieldType.Url);
 });

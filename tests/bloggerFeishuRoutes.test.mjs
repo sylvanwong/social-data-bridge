@@ -58,7 +58,8 @@ for (const [label, env, base] of [
     assert.equal(f.calls[0].baseURL, base);
     assert.equal(f.calls[0].url, '/socialdatax/api/v1/feishu/blogger/search/task');
     assert.deepEqual(f.calls[0].data, { social_type: 'douyin', keyword: ['露营', '徒步'], pages: 2,
-      filter_config: { follower_count_range: '10000_100000', user_type: 'personal' }, version: 'test-version' });
+      filter_config: { follower_count_range: '10000_100000', user_type: 'personal' },
+      selected_field_keys: ['user_id', 'nickname'], version: 'test-version' });
     assert.equal(f.calls[0].headers.authorization, 'Bearer test-only');
     assert.deepEqual(f.submitted(), { taskId: 'new-task', pendingWrite: false,
       apiBaseUrl: base, apiPathPrefix: '/socialdatax/api', targetTableId: 'target-table',
