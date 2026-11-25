@@ -33,7 +33,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
     'submitting', 'isSubmitting', 'cancelling', 'isCancelling', 'clearing', 'taskId',
     'activeKeywordTaskId', 'activeProfileTaskId', 'activeCommentTaskId', 'activeSeriesTaskId',
     'hasRecoverableTask', 'requiresReopen', 'recoveryRequiresReopen', 'componentUnmounted',
-    'activeStreamTask', 'activeSeriesTask', 'feedback', 'latestProfileResult', 'storageKey', 'STREAM_TASK_STORAGE_KEY',
+    'pausedWriteCount', 'activeStreamTask', 'activeSeriesTask', 'feedback', 'latestProfileResult', 'storageKey', 'STREAM_TASK_STORAGE_KEY',
     'TASK_TOAST_SUFFIX', 'STREAM_RESULT_LIMIT', 'listPageSize', 'normalizeCommentId',
     'showToast', 'hideToast', 'showCompletionToast', 'finishToast', 'showErrorMsg',
     'showFieldProgress', 'showProfileFieldProgress', 'getStreamProgressText',
@@ -46,7 +46,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
     .filter(node => node.type === 'VariableDeclaration')
     .flatMap(node => node.declarations.filter(decl => names.has(decl.id.name))
       .map(decl => `${node.kind} ${source.slice(decl.start, decl.end)};`)).join('\n');
-  let saved = { taskId: 'same-task', baseId: 'base', targetTableId: 'target', cursor: '', writtenCount: 0, ...(options.latestStatus ? { latestStatus: options.latestStatus } : {}) };
+  let saved = { taskId: 'same-task', baseId: 'base', targetTableId: 'target', cursor: '', writtenCount: 0, ...(options.saved || {}), ...(options.latestStatus ? { latestStatus: options.latestStatus } : {}) };
   let phase = 'initial', timerId = 0;
   let status = { status: 0, processed: 1, total: 10 };
   const timers = new Map(), stops = [], notices = [];
@@ -81,6 +81,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
       } } };
     },
     createAndWriteData: async (...args) => {
+      if (phase === 'prepare-fail') throw new Error('暂时无法读取作品列');
       await args.at(-1).onBeforeWrite?.();
       if (phase === 'fail') throw new Error('本地写入失败');
       if (phase === 'pending') { writeStarted.resolve(); await writePending.promise; }
@@ -92,7 +93,8 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
   if (statements.includes('const showErrorMsg =')) delete dependencies.showErrorMsg;
   const create = new Function(...Object.keys(dependencies), `${statements}
     if (typeof isSubmitting !== 'undefined') isSubmitting.value = false;
-    return { feedback, loading, engine: ${engineName}, cancel: ${cancelName}, resume: ${resumeName}, taskActionState, action: handleTaskAction,
+    return { latestProfileResult: typeof latestProfileResult === 'undefined' ? null : latestProfileResult,
+      pausedWriteCount: typeof pausedWriteCount === 'undefined' ? null : pausedWriteCount, feedback, loading, engine: ${engineName}, cancel: ${cancelName}, resume: ${resumeName}, taskActionState, action: handleTaskAction,
       stopping: typeof cancelling !== 'undefined' ? cancelling : isCancelling, hasRecoverableTask,
       requiresReopen: typeof requiresReopen !== 'undefined' ? requiresReopen : recoveryRequiresReopen };`);
   let state;
@@ -127,7 +129,9 @@ for (const page of pages) {
       } finally { gate.resolve(); for (const stop of stops) stop.resolve({ data: { sta: 0 } }); await pending; }
       assert.equal(s.taskActionState.value, 'idle');
       assert.equal(s.loading.value, false);
-      assert.equal(s.feedback.toastType.value, status === 2 ? 'error' : 'info');
+      // 夹具终态只处理了 1/10 个输入；作者作品据此判定为部分完成，按警告提示。
+      const incompleteProfile = page[0] === 'ProfileFetch' && status === 1;
+      assert.equal(s.feedback.toastType.value, status === 2 ? 'error' : incompleteProfile ? 'warning' : 'info');
     });
   }
 
@@ -424,3 +428,38 @@ for (const page of pages) {
     });
   }
 }
+
+test('作者作品只有本批确认未落笔时可继续写入，使用原游标恢复一次', async t => {
+  const executionStartedAt = Date.now() - 138000;
+  const { state, setPhase, setStatus, bitable, poll } = mountTask(t, pages.find(([page]) => page === 'ProfileFetch'),
+    { saved: { pendingWrite: false, executionStartedAt } });
+  setStatus({ status: 1, succeeded: 1, fetched_count: 70 });
+  setPhase('prepare-fail');
+  await state.resume();
+  assert.equal(state.taskActionState.value, 'recoverable');
+  assert.equal(state.pausedWriteCount.value, 1);
+  assert.equal(state.feedback.taskNotice.value, '暂时无法读取作品列，写入已暂停。');
+  assert.equal((await bitable.bridge.getData()).cursor, '');
+  setPhase('success');
+  await state.action();
+  const saved = await bitable.bridge.getData();
+  assert.equal(saved.taskId, 'same-task');
+  assert.equal(saved.executionStartedAt, executionStartedAt);
+  assert.equal(saved.writtenCount, 1);
+  assert.equal(state.pausedWriteCount.value, 0);
+  await poll();
+  assert.equal(state.taskActionState.value, 'idle');
+  const result = state.latestProfileResult.value;
+  assert.equal(result.executionDurationSeconds, Math.floor((Date.parse(result.finishedAt) - executionStartedAt) / 1000));
+});
+
+test('作者作品写入请求发出后失败，待核对数量未知，只提供原任务恢复', async t => {
+  const { state, setPhase, setStatus } = mountTask(t, pages.find(([page]) => page === 'ProfileFetch'),
+    { saved: { pendingWrite: false } });
+  setStatus({ status: 1, fetched_count: 70 });
+  setPhase('fail');
+  await state.resume();
+  assert.equal(state.taskActionState.value, 'recoverable');
+  assert.equal(state.pausedWriteCount.value, 0);
+  assert.equal(state.feedback.taskNotice.value, '本地写入失败，任务已暂停。\n已写入的作品已保留，恢复时会自动核对写入进度。');
+});

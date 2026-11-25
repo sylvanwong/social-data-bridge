@@ -53,13 +53,14 @@ for (const [label, env, base] of [
     const f = fixture(undefined, env);
     const urls = 'https://www.xiaohongshu.com/explore/note\nhttps://tieba.baidu.com/p/123';
     for (const sort_type of ['default', 'time_descending', 'like_count_descending', 'oldest']) {
-      await f.create('target-table', urls, { sort_type });
+      await f.create('target-table', urls, { pages: 2, reply_pages: -1, sort_type });
       const call = f.calls.at(-1);
       assert.equal(call.baseURL, base);
       assert.equal(call.url, '/socialdatax/api/v1/feishu/comment/task');
       assert.equal(call.method, 'post');
       assert.equal(call.headers.authorization, 'Bearer test-only');
-      assert.deepEqual(call.data, { url: urls, pages: 2, reply_pages: -1, sort_type, version: 'test-version' });
+      assert.deepEqual(call.data, { url: urls, pages: 2, reply_pages: -1, sort_type,
+        selected_field_keys: ['cid', 'text'], version: 'test-version' });
       assert.deepEqual(f.submitted(), { taskId: 'new-task', targetTableId: 'target-table', pendingCommentWrite: false,
         selectedFieldKeys: ['cid', 'text'], writeMode: 'append', fieldMappings: [{ source_key: 'text', target_field_id: 'body-field' }],
         apiBaseUrl: base, apiPathPrefix: '/socialdatax/api' });

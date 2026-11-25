@@ -111,7 +111,7 @@
 | --- | --- | --- | --- |
 | 作品详情 | `正在处理 2/3 条...请勿关闭插件，关闭将中断任务` | `处理完成：成功 3 条，失败 0 条` | [VideoDataFetch.vue:1424](../../social-data-bridge/src/components/VideoDataFetch.vue#L1424)、[VideoDataFetch.vue:2244](../../social-data-bridge/src/components/VideoDataFetch.vue#L2244) |
 | 作者信息 | `正在处理第 2/3 条...请勿关闭插件，关闭将中断任务` | `处理完成：成功 3 条，失败 0 条` | [BloggerInfoFetch.vue:1032](../../social-data-bridge/src/components/BloggerInfoFetch.vue#L1032)、[BloggerInfoFetch.vue:1842](../../social-data-bridge/src/components/BloggerInfoFetch.vue#L1842) |
-| 作者作品 | `已处理 2/3 个主页，已写入 200 条作品，请勿关闭插件，关闭将中断任务` | `处理完成，已写入 200 条作品` | [ProfileFetch.vue:616](../../social-data-bridge/src/components/ProfileFetch.vue#L616)、[ProfileFetch.vue:698](../../social-data-bridge/src/components/ProfileFetch.vue#L698) |
+| 作者作品 | `作者处理进度 2/3 · 已写入 200 条作品`<br>`获取失败 1 条，最近一次原因：请求超时。另有 1 条输入未能识别。`<br>`请勿关闭插件，关闭将中断任务` | `处理完成，已写入 200 条作品` | [ProfileFetch.vue](../src/components/ProfileFetch.vue#L677) |
 | 关键词搜索 | `已处理 2/3 个搜索页，已写入 200 条作品，请勿关闭插件，关闭将中断任务` | `处理完成，已写入 200 条作品` | [KeywordSearch.vue:424](../../social-data-bridge/src/components/KeywordSearch.vue#L424)、[KeywordSearch.vue:442](../../social-data-bridge/src/components/KeywordSearch.vue#L442) |
 | 作者搜索 | `正在获取作者，已处理 2/3 页，已写入 200 条，请勿关闭插件，关闭将中断任务` | `处理完成，已写入 200 条作者` | [BloggerSearch.vue:143](../../social-data-bridge/src/components/BloggerSearch.vue#L143)、[BloggerSearch.vue:160](../../social-data-bridge/src/components/BloggerSearch.vue#L160) |
 | 搜索推荐词 | `正在获取「露营」（1/2）…请勿关闭插件，关闭将中断任务` | `处理完成，已写入 200 条` | [SearchSuggestions.vue:230](../../social-data-bridge/src/components/SearchSuggestions.vue#L230)、[SearchSuggestions.vue:278](../../social-data-bridge/src/components/SearchSuggestions.vue#L278) |
@@ -123,6 +123,8 @@
 | 链接转附件 | `正在处理第 2/3 条...请勿关闭插件，关闭将中断任务` | `处理完成：成功 3 条，失败 0 条` | [UrlToAttachment.vue:468](../../social-data-bridge/src/components/UrlToAttachment.vue#L468)、[UrlToAttachment.vue:630](../../social-data-bridge/src/components/UrlToAttachment.vue#L630) |
 
 评论的排序说明、推荐词的无结果及失败摘要继续按原条件附加。总量未知时只显示实际已处理数；不要固定显示演示总量。
+
+作者作品的进度先显示作者处理进度和已写入作品数，另起一行显示获取失败数、最近一次已知原因和未能识别的输入数。写表前完成字段准备并保存进度后，首行切换为「正在写入本批作品」。有失败时保留同一份摘要，停止时优先显示停止进度。
 
 ## 结果、停止与恢复
 
@@ -158,6 +160,8 @@
 商品评价恢复记录或轮询已返回 `cancel_requested`／`status=3` 时，停止按钮同样保持禁用、加载的“正在停止…”，不重复请求停止，继续写入已获取结果。旧停止请求迟到失败不能撤销已确认的停止状态或覆盖原任务的完成反馈；结果排空并完成清理后再解锁配置和执行按钮。
 
 增量任务及共用批次写入的普通 SDK 写入失败，保留原错误并提示“已暂停写入，已写入的数据会保留，请点击「恢复任务」继续。”；不要求用户先手动核对表格。恢复继续使用原任务、游标和已保存批次的核对逻辑，不能把响应失败当作未落表直接重写。目标字段变化、核对存在歧义及尚未结束的在途写入仍保留各自具体保护，不因调整文案放开执行。
+
+作者作品获取按写入阶段展示暂停原因。确认本批尚未写入时，显示原错误、“写入已暂停”、待写作品数和“继续写入”。写入请求已发出、结果未确认时，显示原错误、“任务已暂停”和“已写入的作品已保留，恢复时会自动核对写入进度。”，操作为“恢复任务”。
 
 | 场景 | 最终文案示例 | 展示与操作 | 来源 |
 | --- | --- | --- | --- |

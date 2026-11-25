@@ -246,11 +246,11 @@ const getMappingTargetFields = index => {
   return tableFieldOptions.value.map(field => ({ ...field, disabled: usedIds.has(field.id) }));
 };
 
-const fetchSuggestions = async keyword => {
+const fetchSuggestions = async (keyword, fields) => {
   const response = await feishuRequest({
     url: buildFeishuApiPath('/v1/feishu/search/suggestions'),
     method: 'post',
-    data: { social_type: form.value.social_type, keyword },
+    data: { social_type: form.value.social_type, keyword, selected_field_keys: fields },
     timeout: 60000, headers: { authorization: `Bearer ${props.api_key}` },
   });
   const result = response.data;
@@ -268,6 +268,7 @@ const execute = async keywords => {
   stopRequested.value = false;
   try {
     if (!pendingWrite.value) {
+      const fields = [...selectedFieldKeys.value];
       const rows = [];
       const emptyKeywords = [];
       const failedKeywords = [];
@@ -279,7 +280,7 @@ const execute = async keywords => {
         const keyword = keywords[index];
         showToast(`正在获取「${keyword}」（${index + 1}/${keywords.length}）…`);
         try {
-          const items = await fetchSuggestions(keyword);
+          const items = await fetchSuggestions(keyword, fields);
           if (disposed) return;
           if (!items.length) {
             emptyKeywords.push(keyword);
@@ -323,7 +324,7 @@ const execute = async keywords => {
         rows, emptyKeywords, failedKeywords, authFailureReason, stopped: stopRequested.value, writtenCount: 0, appendState: {},
         targetTableId: form.value.outputType === 2 ? form.value.table_id : '',
         newTable: form.value.outputType !== 2,
-        selectedFieldKeys: [...selectedFieldKeys.value],
+        selectedFieldKeys: fields,
         fieldMappings: form.value.outputType === 2 ? mappingDraft.value.filter(item => item.source_key && item.target_field_id).map(item => ({ ...item })) : [],
       };
     }

@@ -853,3 +853,20 @@ test('旧恢复信息未确认停止时，不使用残留的结果总数', async
   await h.tick();
   assert.deepEqual(h.finished,[1]);
 });
+
+test('终态作者失败名单只用于结果展示，恢复快照保留状态和游标', async () => {
+  const failed_items = [{ url: 'author-2', reason: '作者主页不可访问' }];
+  const invalid_items = [{ url: 'bad', reason: '未能从输入识别作者' }];
+  let result;
+  const h = harness({
+    getStatus: async () => ({ status: 3, failed: 1, failed_items, invalid_items }),
+    onFinish: (status, task) => { result = { status, writtenCount: task.writtenCount }; },
+  });
+  await h.task.start({ taskId: 'profile' });
+  assert.deepEqual(h.saved().latestStatus, { status: 3, failed: 1 });
+  assert.equal(h.saved().cursor, 'cursor-1');
+  h.task.stop();
+  await h.task.resume();
+  assert.deepEqual(result, { status: { status: 3, failed: 1, failed_items, invalid_items }, writtenCount: 1 });
+  assert.deepEqual(h.calls, ['write']);
+});

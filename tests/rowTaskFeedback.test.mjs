@@ -431,6 +431,24 @@ for (const page of pages) {
   });
 }
 
+test('小红书下载逐行提交本次勾选的输出字段', async t => {
+  const api = loadRequestModule();
+  const sent = [];
+  api.service.defaults.adapter = async config => {
+    sent.push(JSON.parse(config.data));
+    return { config, status: 200, data: { sta: 0, data: { social_type: 'xhs' } } };
+  };
+  const { handler } = setup(t, 'XhsDownload', { feishuRequest: api.feishuRequest });
+  const links = ['https://www.xiaohongshu.com/explore/a', 'https://www.xiaohongshu.com/explore/b'];
+  const result = await handler('fetchXhsByRows')(links.map(url => ({ url })), {
+    activeFieldConfigs: [{ key: 'origin_cover_text' }, { key: 'download_addr_attachment' }],
+  });
+  assert.equal(result.successCount, 2);
+  assert.deepEqual(sent, links.map(url => ({
+    url, selected_field_keys: ['origin_cover_text', 'download_addr_attachment'], version: 'test-version',
+  })));
+});
+
 test('作品详情写入失败只显示一次行号，保留原因并继续下一条', async t => {
   const { f, handler } = setup(t, 'VideoDataFetch', {
     request: async () => ({ data: { sta: 0, data: {} } }),

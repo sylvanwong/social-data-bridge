@@ -139,7 +139,7 @@ const getCurrentTime = () => {
 };
 
 const getAllowedFieldTypes = (config) => {
-  if (config.key === 'note_url' || config.key === 'profile_url' || config.key === 'cover_url') {
+  if (config.key === 'note_url' || config.key === 'profile_url' || config.key === 'cover_url' || config.key === 'product_url') {
     return [FieldType.Url, FieldType.Text];
   }
   if (config.type === FieldType.Number) {
@@ -834,6 +834,10 @@ const getFieldListByType = async ({ silent = false, selection = null, matchName 
       } else if (!fieldOptions.value.some(field => field.id === config.videoLinkFieldId)) {
         config.videoLinkFieldId = '';
       }
+      if (typeof props !== 'undefined' && props.productDetail && !config.videoLinkFieldId) {
+        const productLinks = fieldOptions.value.filter(field => field.name === '商品链接');
+        if (productLinks.length === 1) config.videoLinkFieldId = productLinks[0].id;
+      }
       linkFieldContext.tableId = table.id;
       linkFieldContext.viewId = view.id || viewId || '';
       linkFieldContext.fieldName = fieldOptions.value.find(field => field.id === config.videoLinkFieldId)?.name || '';
@@ -1203,7 +1207,7 @@ const setupNewTableFields = async (tableId, activeFieldConfigs, onProgress = nul
   }
 };
 
-const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFieldConfigs) => {
+const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFieldConfigs, sourceLinkFieldId) => {
   try {
     console.log(`开始写入记录 ${recordId}`);
     const fields = {};
@@ -1213,6 +1217,7 @@ const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFie
       if (!fieldId) {
         throw new Error(`未找到输出字段「${config.name}」`);
       }
+      if (config.key === 'product_url' && fieldId === sourceLinkFieldId) continue;
 
       try {
         const { field, fieldType } = await resolveWritableField(table, await table.getFieldById(fieldId));
@@ -1233,7 +1238,9 @@ const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFie
           continue;
         }
 
-        const value = normalizeFieldValue(config.getValue(item), config, fieldType);
+        const rawValue = config.getValue(item);
+        if (config.preserveOnEmpty && (rawValue == null || rawValue === '')) continue;
+        const value = normalizeFieldValue(rawValue, config, fieldType);
         console.log(`写入字段 ${config.name} (${fieldId}):`, value);
         const cell = await field.createCell(value);
         fields[fieldId] = await cell.getValue();
@@ -1243,7 +1250,10 @@ const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFie
       }
     }
 
-    if (!Object.keys(fields).length) throw new Error('没有可写入的字段');
+    if (!Object.keys(fields).length) {
+      if (typeof props !== 'undefined' && props.productDetail && activeFieldConfigs.length) return;
+      throw new Error('没有可写入的字段');
+    }
     await table.setRecord(recordId, { fields });
     console.log(`记录 ${recordId} 已一次写入 ${Object.keys(fields).length} 个字段`);
   } catch (error) {
@@ -1270,7 +1280,7 @@ const writeErrorMessageToFirstField = async (table, recordId, message, fieldName
   }
 };
 
-const createCellValue = async (table, fieldId, item, config) => {
+const createCellValue = async (table, fieldId, item, config, rawValue = config.type === FieldType.Attachment ? undefined : config.getValue(item)) => {
   const { field, fieldType } = await resolveWritableField(table, await table.getFieldById(fieldId));
   if (!isFieldTypeCompatible(fieldType, config)) {
     throw new Error(`字段类型不匹配:字段"${config.name}"，仅支持${getExpectedFieldTypeName(config)}`);
@@ -1291,7 +1301,7 @@ const createCellValue = async (table, fieldId, item, config) => {
     }
   }
 
-  const value = normalizeFieldValue(config.getValue(item), config, fieldType);
+  const value = normalizeFieldValue(rawValue, config, fieldType);
   return await field.createCell(value);
 };
 
@@ -1317,10 +1327,13 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
         continue;
       }
       try {
-        const cell = await createCellValue(table, fieldId, item, config);
+        const rawValue = config.type === FieldType.Attachment ? undefined : config.getValue(item);
+        const cell = await createCellValue(table, fieldId, item, config, rawValue);
         if (cell !== null && cell !== undefined) {
           cells.push(cell);
-          fields[fieldId] = await cell.getValue();
+          if (!config.preserveOnEmpty || (rawValue != null && rawValue !== '')) {
+            fields[fieldId] = await cell.getValue();
+          }
         }
       } catch (error) {
         console.error(`创建字段 ${config.name} 单元格失败:`, error);
@@ -1397,6 +1410,7 @@ const fetchVideoDataByRows = async (rowList, {
   writeFailureToCurrent = false,
   fieldNameToId = null,
   activeFieldConfigs = [],
+  selectedFieldKeys = activeFieldConfigs.map(field => field.key),
   onSuccess = null,
 } = {}) => {
   let successCount = 0;
@@ -1416,16 +1430,15 @@ const fetchVideoDataByRows = async (rowList, {
       showToast(`正在处理 ${Math.min(index + 1, rowList.length)}/${rowList.length} 条...`, true);
       console.log(`正在处理第 ${index + 1}/${rowList.length} 条:`, { url, rawValue });
 
+      const productRequest = props.productDetail ? buildProductDetailRequest(url) : null;
       const response = await feishuRequest({
         url: buildFeishuApiPath(props.productDetail ? '/v1/feishu/product/detail' : '/v1/feishu/social_info'),
         method: 'post',
         skipPluginVersion: props.productDetail,
         headers: { 'authorization': `Bearer ${props.api_key}` },
-        data: props.productDetail ? buildProductDetailRequest(url) : {
-          url,
-          raw_value: rawValue,
-          source: 'feishu_bitable_video_fetch',
-          selected_field_keys: activeFieldConfigs.map(field => field.key),
+        data: {
+          ...(productRequest || { url, raw_value: rawValue, source: 'feishu_bitable_video_fetch' }),
+          selected_field_keys: selectedFieldKeys,
         }
       });
 
@@ -1438,6 +1451,12 @@ const fetchVideoDataByRows = async (rowList, {
         }
         dataFetched = true;
         const item = { ...res.data, __recordId: recordId };
+        if (productRequest) {
+          const isXhs = productRequest.social_type === 'xhs';
+          item.product_url = productRequest.url;
+          item.social_type = isXhs ? '小红书' : '抖音';
+          item.sku_id = isXhs ? item.product_id : '';
+        }
         if (onSuccess) {
           await onSuccess(item, index);
         }
@@ -1448,7 +1467,7 @@ const fetchVideoDataByRows = async (rowList, {
 
       const errorMessage = res?.msg || res?.message || (props.productDetail ? '获取商品详情失败' : '获取音视频数据失败');
       console.error(`接口返回错误:`, errorMessage);
-      if (writeFailureToCurrent && recordId && fieldNameToId) {
+      if (!props.productDetail && writeFailureToCurrent && recordId && fieldNameToId) {
         await writeErrorMessageToFirstField(sourceTable, recordId, errorMessage, fieldNameToId, activeFieldConfigs);
       }
       taskFeedback.recordFailure(errorMessage, { index: index + 1 });
@@ -1461,7 +1480,7 @@ const fetchVideoDataByRows = async (rowList, {
       }
       if (dataFetched) {
         taskFeedback.recordFailure(`数据写入失败：${errorMessage}`, { index: index + 1 });
-      } else if (writeFailureToCurrent && recordId && fieldNameToId) {
+      } else if (!props.productDetail && writeFailureToCurrent && recordId && fieldNameToId) {
         await writeErrorMessageToFirstField(sourceTable, recordId, errorMessage, fieldNameToId, activeFieldConfigs);
       }
       if (!dataFetched) taskFeedback.recordFailure(errorMessage, { index: index + 1 });
@@ -2124,15 +2143,17 @@ const handleTableModeSubmit = async () => {
   console.log('选中的字段ID:', formData.value.videoLinkFieldId);
   console.log('行数:', formData.value.rowCount);
 
+  const executionSelectedFieldKeys = [...selectedFieldKeys.value];
   if (!validateBaseForm({
     ...formData.value,
-    selectedFieldKeys: selectedFieldKeys.value,
+    selectedFieldKeys: executionSelectedFieldKeys,
   })) {
     return;
   }
 
   let executionMappings = cloneFieldMappings(mappingDraft.value);
   let executionWriteMode = formData.value.writeMode;
+  const sourceLinkFieldId = formData.value.videoLinkFieldId;
   stopRequested.value = false;
   loading.value = true;
   showToast('正在启动作品详情获取...', true, { begin: true });
@@ -2146,7 +2167,7 @@ const handleTableModeSubmit = async () => {
       executionWriteMode = formData.value.writeMode;
     }
     const inputFilter = await validateConfiguredInputFilter(formData.value, sourceTable);
-    const activeFieldConfigs = getActiveFieldConfigs();
+    const activeFieldConfigs = getActiveFieldConfigs(executionSelectedFieldKeys);
     showToast('正在读取待处理记录...');
     let recordIdList = await getRecordIdListByScope(
       sourceTable,
@@ -2175,7 +2196,7 @@ const handleTableModeSubmit = async () => {
     }
 
     showToast('正在读取作品链接...');
-    const rowList = await getCellValuesByFieldId(sourceTable, recordIdList, formData.value.videoLinkFieldId);
+    const rowList = await getCellValuesByFieldId(sourceTable, recordIdList, sourceLinkFieldId);
     if (stopRequested.value) {
       finishToast('任务已停止', { stopped: true, successCount: 0, failCount: 0 });
       return;
@@ -2203,7 +2224,8 @@ const handleTableModeSubmit = async () => {
         writeFailureToCurrent: true,
         fieldNameToId,
         activeFieldConfigs,
-        onSuccess: (item) => writeDataToRecord(sourceTable, item.__recordId, item, fieldNameToId, activeFieldConfigs),
+        selectedFieldKeys: executionSelectedFieldKeys,
+        onSuccess: (item) => writeDataToRecord(sourceTable, item.__recordId, item, fieldNameToId, activeFieldConfigs, sourceLinkFieldId),
       });
 
       finishToast(
@@ -2228,6 +2250,7 @@ const handleTableModeSubmit = async () => {
 
     const { successCount, failCount, stopped } = await fetchVideoDataByRows(rowList, {
       activeFieldConfigs,
+      selectedFieldKeys: executionSelectedFieldKeys,
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, { fieldMappings: executionMappings, writeMode: executionWriteMode }),
     });
 
@@ -2250,9 +2273,10 @@ const handleTableModeSubmit = async () => {
 
 const handleManualModeSubmit = async () => {
   if (loading.value) return;
+  const executionSelectedFieldKeys = [...selectedFieldKeys.value];
   if (!validateBaseForm({
     ...formData.value,
-    selectedFieldKeys: selectedFieldKeys.value,
+    selectedFieldKeys: executionSelectedFieldKeys,
   })) {
     return;
   }
@@ -2271,7 +2295,7 @@ const handleManualModeSubmit = async () => {
     }
     showToast('正在整理作品链接...');
     const urls = parseManualUrls(formData.value.manualUrls);
-    const activeFieldConfigs = getWriteFieldConfigs();
+    const activeFieldConfigs = getWriteFieldConfigs(executionSelectedFieldKeys);
     const rowList = urls.map(url => ({ url, rawValue: url }));
     const targetTableId = await resolveTargetTableId(
       formData.value.targetType,
@@ -2286,6 +2310,7 @@ const handleManualModeSubmit = async () => {
 
     const { successCount, failCount, stopped } = await fetchVideoDataByRows(rowList, {
       activeFieldConfigs,
+      selectedFieldKeys: executionSelectedFieldKeys,
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, { fieldMappings: executionMappings, writeMode: executionWriteMode }),
     });
 

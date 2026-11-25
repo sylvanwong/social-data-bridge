@@ -27,7 +27,7 @@ function fixture(task = { taskId: 'old-task' }) {
     restoreProfileTask() {},
     profileStreamTask: { getActiveTask: () => task, submit: async create => { submitted = await create(); } },
   };
-  const names = ['STREAM_RESULT_LIMIT', 'PROFILE_TASK_LATEST_PATH', 'profileTaskApiPath', 'unwrapApiData', 'getLatestProfileTaskStatus', 'getProfileTaskStatus', 'readAvailablePosts', 'postProfileTask', 'cancelProfileTask'];
+  const names = ['STREAM_RESULT_LIMIT', 'profileTaskApiPath', 'unwrapApiData', 'getProfileTaskStatus', 'readAvailablePosts', 'postProfileTask', 'cancelProfileTask'];
   const helpers = names.map(name => {
     const node = declarations.find(item => item.id.name === name);
     assert.ok(node, `${name} 应使用任务保存的请求来源`);
@@ -37,28 +37,28 @@ function fixture(task = { taskId: 'old-task' }) {
   return { ...handlers, calls, submitted: () => submitted };
 }
 
-test('最近一次任务结果使用定时任务管理同款面板并默认展开', () => {
+test('本次执行结果使用现有面板并默认展开', () => {
   const template = parse(fs.readFileSync(new URL('../src/components/ProfileFetch.vue', import.meta.url), 'utf8')).descriptor.template.content;
   assert.match(template, /class="task-manager profile-result-manager"/);
   assert.match(template, /latestProfileResultExpanded/);
   assert.match(template, /class="task-list profile-result-list"/);
-  assert.match(template, /最近一次任务结果/);
+  assert.match(template, /本次执行结果/);
   const script = parse(fs.readFileSync(new URL('../src/components/ProfileFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
   assert.match(script, /const latestProfileResultExpanded = ref\(true\)/);
 });
 
-test('作者作品页面首次进入通过 latest 接口读取最近任务结果', async () => {
-  const f = fixture();
-  const status = await f.getLatestProfileTaskStatus();
-  assert.equal(f.calls[0].baseURL, 'https://api.socialdatax.com');
-  assert.equal(f.calls[0].url, '/socialdatax/api/v1/feishu/social/task/latest');
-  assert.equal(f.calls[0].method, 'get');
-  assert.equal(status.task_id, 'new-task');
+test('作者作品页面进入时只检查未完成任务，不读取账号最近结果', () => {
+  const source = fs.readFileSync(new URL('../src/components/ProfileFetch.vue', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /social\/task\/latest/);
+  assert.match(source, /await resumeSavedStreamTask\(\)/);
 });
 
 test('作品新任务创建使用新域名及规范路径，并保存任务来源', async () => {
   const f = fixture();
-  await f.postProfileTask('target-table', 'https://www.douyin.com/user/example');
+  const selectedFieldKeys = ['aweme_id', 'cover_attachment'];
+  await f.postProfileTask('target-table', 'https://www.douyin.com/user/example', { selectedFieldKeys });
+  assert.deepEqual(f.calls[0].data.selected_field_keys, selectedFieldKeys);
+  assert.deepEqual(f.submitted().selectedFieldKeys, selectedFieldKeys);
   assert.equal(f.calls[0].baseURL, 'https://api.socialdatax.com');
   assert.equal(f.calls[0].url, '/socialdatax/api/v1/feishu/social/task');
   assert.equal(f.calls[0].data.version, 'test-version');

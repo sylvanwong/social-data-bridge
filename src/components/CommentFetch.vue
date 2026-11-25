@@ -10,6 +10,7 @@ import { readRecordIds, readUniqueSourceLinks } from '../utils/sourceTableRows.m
 import { resolveWritableField } from "../utils/tableFields.js";
 import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import TaskFeedback from './TaskFeedback.vue';
+import PageStepper from './PageStepper.vue';
 import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
 import { getTaskStoppingText } from '@/utils/taskStopText';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
@@ -35,14 +36,13 @@ const formData = ref({
   scope: 'n',
   rowCount: 5,
   pages: 1,
-  reply_pages: -1,
   sortType: 'default',
   writeMode: 'upsert',
   table_id: "",
 });
-const commentPagesType = ref(formData.value.pages === 0 ? 'all' : 'pages');
-const replyPagesType = ref(formData.value.reply_pages === -1 ? 'none' : (formData.value.reply_pages === 0 ? 'all' : 'pages'));
-const replyPageCount = ref(Number(formData.value.reply_pages) > 0 ? Number(formData.value.reply_pages) : 1);
+const commentPagesType = ref('pages');
+const replyPagesType = ref('none');
+const replyPageCount = ref(1);
 const table_options = ref([]);
 const fieldOptions = ref([]);
 const tableFieldOptions = ref([]);
@@ -210,30 +210,6 @@ const writeModeOptions = [
   { value: 'upsert', label: '更新或新增' },
   { value: 'append', label: '始终新增' },
 ];
-
-watch(commentPagesType, (type) => {
-  if (type === 'all') {
-    formData.value.pages = 0;
-  } else if (Number(formData.value.pages) === 0) {
-    formData.value.pages = 1;
-  }
-});
-
-watch(replyPagesType, (type) => {
-  if (type === 'none') {
-    formData.value.reply_pages = -1;
-  } else if (type === 'all') {
-    formData.value.reply_pages = 0;
-  } else if (Number(formData.value.reply_pages) <= 0) {
-    formData.value.reply_pages = replyPageCount.value;
-  }
-});
-
-watch(replyPageCount, (count) => {
-  if (replyPagesType.value === 'pages') {
-    formData.value.reply_pages = Math.max(1, Math.min(50, Number(count) || 1));
-  }
-});
 
 const scopeOptions = [
   { value: 'all', label: '所有行' },
@@ -1036,9 +1012,8 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
       headers: { 'authorization': `Bearer ${props.api_key}` },
       data: {
         url: urlText,
-        pages: Number(formData.value.pages),
-        reply_pages: Number(formData.value.reply_pages),
         ...extraPayload,
+        selected_field_keys: fields,
       },
     });
     const res = response.data;
@@ -1096,7 +1071,7 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
   }
 };
 
-const getNoteData = async (targetTableId = "", urlList = []) => {
+const getNoteData = async (targetTableId, urlList, pageParams) => {
   if (urlList.length === 0) {
     loading.value = false;
     showCompletionToast('没有可处理的作品链接', { empty: true });
@@ -1104,7 +1079,7 @@ const getNoteData = async (targetTableId = "", urlList = []) => {
   }
 
   loading.value = true;
-  await postNoteTask(targetTableId, urlList.join('\n'), { sort_type: formData.value.sortType });
+  await postNoteTask(targetTableId, urlList.join('\n'), { ...pageParams, sort_type: formData.value.sortType });
 };
 
 const validateTableFields = async (tableId, options = {}) => {
@@ -1145,6 +1120,17 @@ const commit = async () => {
   try {
     if (!props.api_key) { showErrorMsg("请输入 API Key"); return; }
     const { radio, table_id, mode, manualUrls, noteLinkFieldId, scope, rowCount } = formData.value;
+    const pages = commentPagesType.value === 'all' ? 0 : formData.value.pages;
+    const replyPages = replyPagesType.value === 'none' ? -1 : replyPagesType.value === 'all' ? 0 : replyPageCount.value;
+    if (commentPagesType.value === 'pages' && (!Number.isInteger(pages) || pages < 1 || pages > 50)) {
+      showErrorMsg('主评论页数须为1到50的整数');
+      return;
+    }
+    if (replyPagesType.value === 'pages' && (!Number.isInteger(replyPages) || replyPages < 1 || replyPages > 50)) {
+      showErrorMsg('子评论页数须为1到50的整数');
+      return;
+    }
+    const pageParams = { pages, reply_pages: replyPages };
     if (radio === 2 && !table_id) { showErrorMsg("请选择现有表格"); return; }
     if (mode === 'manual' && !String(manualUrls || '').trim()) { showErrorMsg("请输入作品链接"); return; }
     if (mode !== 'manual' && !noteLinkFieldId) { showErrorMsg("请选择作品链接字段"); return; }
@@ -1180,11 +1166,11 @@ const commit = async () => {
     if (radio === 2) {
       showToast('正在检查目标表字段...请勿关闭插件，关闭将中断任务', true);
       const isValid = await validateTableFields(table_id, { throwOnError: true });
-      if (isValid) await getNoteData(table_id, urlList);
+      if (isValid) await getNoteData(table_id, urlList, pageParams);
       else { loading.value = false; showCompletionToast('目标字段校验未通过，任务未开始', { type: 'error' }); }
       return;
     }
-    await getNoteData("", urlList);
+    await getNoteData("", urlList, pageParams);
   } catch (error) {
     console.error('提交评论列表获取任务失败:', error);
     loading.value = false;
@@ -1348,30 +1334,7 @@ watch(selectedFieldKeys, (keys) => {
             </el-radio>
             <el-radio value="pages" class="custom-radio-item">
               <span class="radio-label-text">前</span>
-              <div class="custom-stepper-input range-stepper">
-                <input
-                  v-model.number="formData.pages"
-                  type="number"
-                  min="1"
-                  max="50"
-                  :disabled="commentPagesType !== 'pages'"
-                  @click.stop
-                />
-                <div class="stepper-buttons">
-                  <button
-                    type="button"
-                    class="stepper-btn stepper-btn-up"
-                    :disabled="commentPagesType !== 'pages'"
-                    @click.stop="formData.pages = Math.min(50, (formData.pages || 1) + 1)"
-                  ></button>
-                  <button
-                    type="button"
-                    class="stepper-btn stepper-btn-down"
-                    :disabled="commentPagesType !== 'pages'"
-                    @click.stop="formData.pages = Math.max(1, (formData.pages || 1) - 1)"
-                  ></button>
-                </div>
-              </div>
+              <PageStepper v-model="formData.pages" label="主评论页数" :disabled="loading || isSubmitting || commentPagesType !== 'pages'" />
               <span class="range-unit">页</span>
             </el-radio>
           </el-radio-group>
@@ -1387,30 +1350,7 @@ watch(selectedFieldKeys, (keys) => {
             </el-radio>
             <el-radio value="pages" class="custom-radio-item">
               <span class="radio-label-text">前</span>
-              <div class="custom-stepper-input range-stepper">
-                <input
-                  v-model.number="replyPageCount"
-                  type="number"
-                  min="1"
-                  max="50"
-                  :disabled="replyPagesType !== 'pages'"
-                  @click.stop
-                />
-                <div class="stepper-buttons">
-                  <button
-                    type="button"
-                    class="stepper-btn stepper-btn-up"
-                    :disabled="replyPagesType !== 'pages'"
-                    @click.stop="replyPageCount = Math.min(50, (replyPageCount || 1) + 1)"
-                  ></button>
-                  <button
-                    type="button"
-                    class="stepper-btn stepper-btn-down"
-                    :disabled="replyPagesType !== 'pages'"
-                    @click.stop="replyPageCount = Math.max(1, (replyPageCount || 1) - 1)"
-                  ></button>
-                </div>
-              </div>
+              <PageStepper v-model="replyPageCount" label="子评论页数" :disabled="loading || isSubmitting || replyPagesType !== 'pages'" />
               <span class="range-unit">页</span>
             </el-radio>
           </el-radio-group>
@@ -1721,8 +1661,7 @@ watch(selectedFieldKeys, (keys) => {
   flex-shrink: 0;
 }
 
-.custom-radio-group .custom-stepper-input,
-.custom-radio-group .range-stepper {
+.custom-radio-group .custom-stepper-input {
   margin-left: 8px;
 }
 
@@ -1737,10 +1676,6 @@ watch(selectedFieldKeys, (keys) => {
   border-radius: 6px;
   overflow: hidden;
   transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.range-stepper {
-  margin-left: auto;
 }
 
 .range-unit {

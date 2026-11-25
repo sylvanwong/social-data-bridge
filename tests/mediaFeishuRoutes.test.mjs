@@ -103,6 +103,7 @@ test('媒体创建对象序列化后仍使用原来源，不切到当前新后�
 test('逐行媒体处理将每次创建的完整来源交给轮询，再写原记录摘要和转写', async () => {
   const f = fixture();
   const result = await f.fetchRows([{ url: 'https://example.test/a', recordId: 'r1' }, { url: 'https://example.test/b', recordId: 'r2' }], {
+    activeFieldConfigs: [{ key: 'summary' }, { key: 'copywriting' }],
     onSuccess: async item => f.writes.push({ recordId: item.__recordId, summary: f.getSummary(item), copywriting: f.getVideoCopy(item), platform: item.platform }),
   });
   assert.deepEqual(result, { successCount: 2, failCount: 0, stopped: false });
@@ -112,7 +113,15 @@ test('逐行媒体处理将每次创建的完整来源交给轮询，再写原�
     '/socialdatax/api/v1/feishu/media/task', '/socialdatax/api/v1/feishu/media/task/get',
     '/socialdatax/api/v1/feishu/media/task', '/socialdatax/api/v1/feishu/media/task/get',
   ]);
-  assert.deepEqual(f.calls.filter(call => call.url.endsWith('/get')).map(call => call.data.task_id), ['task-1', 'task-3']);
+  assert.deepEqual(f.calls[0].data, {
+    url: 'https://example.test/a', force_refresh: false, selected_field_keys: ['summary', 'copywriting'], version: 'test-version',
+  });
+  assert.deepEqual(f.calls[2].data, {
+    url: 'https://example.test/b', force_refresh: false, selected_field_keys: ['summary', 'copywriting'], version: 'test-version',
+  });
+  assert.deepEqual([f.calls[1].data, f.calls[3].data], [
+    { task_id: 'task-1', version: 'test-version' }, { task_id: 'task-3', version: 'test-version' },
+  ]);
 });
 
 for (const [label, response, message] of [

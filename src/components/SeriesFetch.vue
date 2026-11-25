@@ -506,7 +506,7 @@ const postSeriesTask = async (targetTableId = '', profileUrlText = '') => {
   await seriesStreamTask.submit(async () => {
     const response = await feishuRequest({ url: buildFeishuApiPath('/v1/feishu/series/list'), method: 'post',
       headers: { authorization: `Bearer ${props.api_key}` },
-      data: { profile_url: profileUrlText, pages: Number(formData.value.pages) } });
+      data: { profile_url: profileUrlText, pages: Number(formData.value.pages), selected_field_keys: fields } });
     const res = response.data || {};
     if (Number(res.sta) !== 0) throw new Error(res.msg || '创建短剧任务失败');
     const data = res.data?.data || res.data || res;
