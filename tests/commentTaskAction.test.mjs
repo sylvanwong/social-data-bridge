@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import { nextTick } from 'vue';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,7 +25,7 @@ function load(name, scope) {
 }
 function fixture() {
   const messages = []; let created = 0, resumed = 0, cancelled = 0;
-  const scope = { commentSubmission: { pending: null }, componentUnmounted: false,
+  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, commentSubmission: { pending: null }, componentUnmounted: false,
     clearing: { value: false }, loading: { value: true }, isSubmitting: { value: false }, isCancelling: { value: false },
     activeCommentTaskId: { value: 'old-task' }, hasRecoverableTask: { value: false }, recoveryRequiresReopen: { value: false },
     props: { api_key: '' }, selectedFieldKeys: { value: ['cid'] },
@@ -174,7 +176,7 @@ test('页面初始化等待期间卸载，晚返回不会再发起任务恢复',
     && node.expression.type === 'CallExpression' && node.expression.callee.name === name).expression.arguments[0];
   const mounted = callback('onMounted'), unmounted = callback('onUnmounted');
   let release, resumes = 0, stops = 0;
-  const scope = { loadFieldOptions: () => new Promise(resolve => { release = resolve; }),
+  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, loadFieldOptions: () => new Promise(resolve => { release = resolve; }),
     loadSelectedFieldKeys: async () => {}, loadTableOutputConfigs: async () => {},
     fieldSelectionReady: { value: false }, isSubmitting: { value: true },
     commentSubmission: { pending: null }, resumeCommentTask: async () => { resumes++; }, commentStreamTask: { stop: () => { stops++; }, resume: async () => { resumes++; } },
@@ -194,7 +196,7 @@ test('提交接口在页面卸载后返回，保存任务但不在旧页面启�
     && node.expression.type === 'CallExpression' && node.expression.callee.name === 'onUnmounted').expression.arguments[0];
   const submit = declarations.find(node => node.id.name === 'postNoteTask').init;
   let release, releaseSave, starts = 0, saved;
-  const scope = { ...loadRequestModule(), request: () => new Promise(resolve => { release = resolve; }), showToast() {},
+  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, ...loadRequestModule(), request: () => new Promise(resolve => { release = resolve; }), showToast() {},
     props: { api_key: 'test' }, formData: { value: { pages: 1, reply_pages: -1 } },
     selectedFieldKeys: { value: ['cid'] }, mappingDraft: { value: [] }, activeCommentTaskId: { value: '' },
     commentSubmission: { pending: null },
@@ -232,7 +234,7 @@ test('重新进入页面先等待旧提交保存，再恢复同一任务，等�
   const mounted = ast.find(node => node.type === 'ExpressionStatement'
     && node.expression.type === 'CallExpression' && node.expression.callee.name === 'onMounted').expression.arguments[0];
   let release, resumes = 0;
-  const scope = { componentUnmounted: false,
+  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, componentUnmounted: false,
     commentSubmission: { pending: new Promise(resolve => { release = resolve; }) },
     loadFieldOptions: async () => {}, loadSelectedFieldKeys: async () => {}, loadTableOutputConfigs: async () => {},
     fieldSelectionReady: { value: false }, isSubmitting: { value: true },

@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import { extractHttpUrls, parseManualUrls as parseDelimitedUrls } from '../src/utils/sourceLinks.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,6 +12,7 @@ function handler(page, name, bindings) {
   const source = parse(fs.readFileSync(new URL(`../src/components/${page}.vue`, import.meta.url), 'utf8')).descriptor.scriptSetup.content;
   const node = parseJS(source, { sourceType: 'module' }).program.body.filter(n => n.type === 'VariableDeclaration')
     .flatMap(n => n.declarations).find(n => n.id.name === name).init;
+  bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, ...bindings };
   return new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
 }
 

@@ -1,3 +1,4 @@
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -20,7 +21,7 @@ function fixture(t, page, taskName, overrides = {}) {
   const declarations = parseJS(source, { sourceType: 'module' }).program.body.filter(n => n.type === 'VariableDeclaration').flatMap(n => n.declarations);
   const notifications = [];
   const form = ref({ social_type: 'xhs', keyword: '露营', radio: 2, table_id: 'table-1', writeMode: 'upsert', rangeType: 'pages', pages: 1, workFetchRange: { type: 'pages', pages: 1 } });
-  const bindings = {
+  const bindings = { latestExecutionResult: ref(null), buildTaskExecutionResult,
     ...loadRequestModule(),
     feedback, ...feedback, toastLoading: ref(false), nextTick, setTimeout, clearTimeout, toastTimer: null,
     clearing: ref(false), loading: ref(false), submitting: ref(false), isSubmitting: ref(false), cancelling: ref(false), isCancelling: ref(false),

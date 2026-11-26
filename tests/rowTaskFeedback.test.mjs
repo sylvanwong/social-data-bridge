@@ -1,3 +1,4 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
 import { extractHttpUrls } from '../src/utils/sourceLinks.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -47,7 +48,7 @@ function feedback(t) {
 }
 function extract(page, name, bindings) {
   // 行反馈单测使用已挂载前提；卸载边界由完整 SFC 生命周期回归验证。
-  bindings = { assertMounted: value => value, isUnmounted: false, componentUnmounted: false, tableConfigSaveSequence: 0, tableConfigSaveRevisions: new Map(), tableConfigSaves: new Map(), ensureOutputConfigReady: async () => true, ...bindings };
+  bindings = { executionResult: useTaskExecutionResult(), assertMounted: value => value, isUnmounted: false, componentUnmounted: false, tableConfigSaveSequence: 0, tableConfigSaveRevisions: new Map(), tableConfigSaves: new Map(), ensureOutputConfigReady: async () => true, ...bindings };
   bindings.buildFeishuApiPath ??= buildFeishuApiPath;
   bindings.feishuRequest ??= config => bindings.request(config);
   const source = parse(fs.readFileSync(new URL(`../src/components/${page}.vue`, import.meta.url), 'utf8')).descriptor.scriptSetup.content;

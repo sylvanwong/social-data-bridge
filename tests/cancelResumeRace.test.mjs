@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -59,7 +61,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
     .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
   const useIncrementalTask = new Function('bitable', 'setTimeout', 'clearTimeout', `${engineSource}; return useIncrementalTask;`)(
     bitable, (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; }, id => timers.delete(id));
-  const dependencies = {
+  const dependencies = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult,
     ...loadRequestModule(),
     computed, ref, nextTick, useTaskFeedback, useIncrementalTask, getTaskStoppingText, getPendingWriteLimit, buildProfileTaskResult,
     loading: ref(false), props: { api_key: 'test-key' }, commentSubmission: { pending: null },

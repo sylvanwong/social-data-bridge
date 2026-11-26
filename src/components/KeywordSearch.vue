@@ -1,4 +1,6 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { buildTaskExecutionResult } from '../utils/taskExecutionResult.mjs';
 import { getPendingWriteLimit } from '../utils/taskWriteState.mjs';
 import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import { getTaskStoppingText } from '@/utils/taskStopText';
@@ -10,6 +12,8 @@ import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
 import request, { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, buildFeishuApiPath, feishuRequest } from '@/utils/request'
 import { useSocialData, showErrorMsg, KEYWORD_SEARCH_FIELD_MAPPING, getDefaultSelectedFieldKeys } from '@/composables/useSocialData'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
+
+const latestExecutionResult = ref(null);
 
 const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
 
@@ -373,6 +377,7 @@ const restoreTask = async (task, progressText = '正在恢复未完成的数据�
 const resumeSavedTask = async () => {
   if (requiresReopen.value || componentUnmounted || loading.value) return;
   loading.value = true;
+  latestExecutionResult.value = null;
   feedback.begin('正在检查未完成任务…');
   try {
     await nextTick();
@@ -468,6 +473,7 @@ const keywordStreamTask = useIncrementalTask({
     ? getStoppingText(task)
     : `正在写入 ${items.length} 条作品，已写入 ${task.writtenCount || 0} 条作品，${TASK_TOAST_SUFFIX}`, true),
   onFinish: async (status, task) => {
+    latestExecutionResult.value = buildTaskExecutionResult(status, task, { kind: 'keyword' });
     clearing.value = false;
     hasRecoverableTask.value = false;
     loading.value = false;
@@ -481,6 +487,7 @@ const keywordStreamTask = useIncrementalTask({
     else showCompletionToast(`处理完成，已写入 ${task.writtenCount || 0} 条作品`, { empty: !task.writtenCount });
   },
   onError: async (error, task) => {
+    latestExecutionResult.value = { ...buildTaskExecutionResult(task?.latestStatus, task || {}, { kind: 'keyword' }), status: task?.taskId || error.taskCreated || error.requiresReopen ? 'paused' : 'interrupted', reason: error?.response?.data?.msg || error.message || '任务已暂停' };
     clearing.value = false;
     hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
     requiresReopen.value = !!error.requiresReopen;
@@ -842,6 +849,7 @@ const commit = async () => {
     }
     if (radio === 2 && !tableConfigsLoaded.value) {
       loading.value = true;
+      latestExecutionResult.value = null;
       feedback.begin('正在读取输出表配置…');
       const loaded = await loadTableOutputConfigs();
       if (componentUnmounted) return;
@@ -858,6 +866,7 @@ const commit = async () => {
     }
 
     loading.value = true;
+    latestExecutionResult.value = null;
     feedback.begin('正在启动关键词搜索...');
     await nextTick();
     if (radio === 2) {
@@ -1279,6 +1288,8 @@ watch(selectedFieldKeys, (keys) => {
         @click="handleTaskAction"
       >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
     </div>
+
+    <TaskExecutionResult :result="latestExecutionResult" />
 
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>

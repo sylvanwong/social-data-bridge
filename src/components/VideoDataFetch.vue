@@ -1,4 +1,6 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { useTaskExecutionResult } from '../composables/useTaskExecutionResult.mjs';
 import { extractHttpUrls, parseManualUrls as parseDelimitedUrls } from '../utils/sourceLinks.mjs';
 import { createProductDetailFields, buildProductDetailRequest } from '../utils/productDetail.mjs';
 import { nextTableName } from '../utils/tableNames.mjs';
@@ -433,6 +435,8 @@ let unsubscribeSelectionChange = null;
 const loading = ref(false);
 const stopRequested = ref(false);
 const taskFeedback = useTaskFeedback();
+const executionResult = useTaskExecutionResult({ inputUnit: '条', outputUnit: props.productDetail ? '商品' : '作品' });
+const latestExecutionResult = executionResult.result;
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
@@ -1251,11 +1255,13 @@ const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFie
     }
 
     if (!Object.keys(fields).length) {
-      if (typeof props !== 'undefined' && props.productDetail && activeFieldConfigs.length) return;
+      if (typeof props !== 'undefined' && props.productDetail && activeFieldConfigs.length) return 0;
       throw new Error('没有可写入的字段');
     }
-    await table.setRecord(recordId, { fields });
+    try { await table.setRecord(recordId, { fields }); }
+    catch (error) { error.writeUncertain = true; throw error; }
     console.log(`记录 ${recordId} 已一次写入 ${Object.keys(fields).length} 个字段`);
+    return 1;
   } catch (error) {
     console.error('写入记录失败:', error);
     throw error;
@@ -1346,8 +1352,11 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
     }
   }
 
-  if (records.length === 0) return;
-  if (options.writeMode !== 'upsert') { await table.addRecords(records); return; }
+  if (records.length === 0) return 0;
+  if (options.writeMode !== 'upsert') {
+    try { await table.addRecords(records); } catch (error) { error.writeUncertain = true; throw error; }
+    return records.length;
+  }
 
   const getFieldId = (key) => options.fieldMappings?.find(item => item.source_key === key && item.target_field_id)?.target_field_id
     || fieldMetaMap.get(FIELD_CONFIG.find(field => field.key === key)?.name);
@@ -1371,9 +1380,13 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
       if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
       else creates.push(records[index]);
     });
-    if (updates.length) await table.setRecords(updates);
-    if (creates.length) await table.addRecords(creates);
-    return;
+    if (updates.length) {
+      try { await table.setRecords(updates); } catch (error) { error.writeUncertain = true; throw error; }
+    }
+    if (creates.length) {
+      try { await table.addRecords(creates); } catch (error) { error.writeUncertain = true; throw error; }
+    }
+    return records.length;
   }
   const platformFieldId = getFieldId('social_type');
   const videoIdFieldId = getFieldId('social_id');
@@ -1401,8 +1414,13 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
     if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
     else creates.push(records[index]);
   });
-  if (updates.length) await table.setRecords(updates);
-  if (creates.length) await table.addRecords(creates);
+  if (updates.length) {
+    try { await table.setRecords(updates); } catch (error) { error.writeUncertain = true; throw error; }
+  }
+  if (creates.length) {
+    try { await table.addRecords(creates); } catch (error) { error.writeUncertain = true; throw error; }
+  }
+  return records.length;
 };
 
 const fetchVideoDataByRows = async (rowList, {
@@ -1413,6 +1431,7 @@ const fetchVideoDataByRows = async (rowList, {
   selectedFieldKeys = activeFieldConfigs.map(field => field.key),
   onSuccess = null,
 } = {}) => {
+  executionResult.setTotal(rowList.length);
   let successCount = 0;
   let failCount = 0;
 
@@ -1458,10 +1477,11 @@ const fetchVideoDataByRows = async (rowList, {
           item.sku_id = isXhs ? item.product_id : '';
         }
         if (onSuccess) {
-          await onSuccess(item, index);
+          executionResult.written(await onSuccess(item, index));
         }
         console.log(`第 ${index + 1} 条处理并写入成功`);
         successCount++;
+        executionResult.success();
         continue;
       }
 
@@ -1470,11 +1490,13 @@ const fetchVideoDataByRows = async (rowList, {
       if (!props.productDetail && writeFailureToCurrent && recordId && fieldNameToId) {
         await writeErrorMessageToFirstField(sourceTable, recordId, errorMessage, fieldNameToId, activeFieldConfigs);
       }
+      executionResult.failure(url, errorMessage);
       taskFeedback.recordFailure(errorMessage, { index: index + 1 });
       failCount++;
     } catch (error) {
       const errorMessage = error?.response?.data?.msg || error?.message || '请求失败';
       console.error(`处理第 ${index + 1} 条失败:`, errorMessage);
+      executionResult.failure(url, error, { writeUncertain: !!error?.writeUncertain });
       if (error?.code === 'INVALID_API_KEY') {
         throw error;
       }
@@ -2264,6 +2286,7 @@ const handleTableModeSubmit = async () => {
   } catch (error) {
     console.error('获取数据失败:', error);
     const errorMessage = error?.response?.data?.msg || error?.message || (props.productDetail ? '获取商品详情失败' : '获取音视频数据失败');
+    executionResult.fail(error, { paused: !!(error?.writeUncertain || error?.requiresReopen || error?.stopPolling) });
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -2323,6 +2346,7 @@ const handleManualModeSubmit = async () => {
   } catch (error) {
     console.error('获取数据失败:', error);
     const errorMessage = error?.response?.data?.msg || error?.message || (props.productDetail ? '获取商品详情失败' : '获取音视频数据失败');
+    executionResult.fail(error, { paused: !!(error?.writeUncertain || error?.requiresReopen || error?.stopPolling) });
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -2372,7 +2396,7 @@ const showToast = (text, isLoading = true, options = {}) => {
   if (props.productDetail) text = text.replace(/作品|音视频/g, '商品');
   if (isLoading) {
     const progressOptions = { stopping: stopRequested.value, ...options };
-    if (options.begin) taskFeedback.begin(text, progressOptions);
+    if (options.begin) { executionResult.begin(); taskFeedback.begin(text, progressOptions); }
     else taskFeedback.progress(text, progressOptions);
   } else {
     taskFeedback.finish(text, options);
@@ -2386,6 +2410,7 @@ const showExecutionProgress = (message) => {
 };
 
 const finishToast = (text, options = {}) => {
+  if (options.successCount != null || options.empty) executionResult.finish({ stopped: options.stopped, reason: options.successCount == null ? text : '' });
   showToast(text, false, options);
 };
 
@@ -2841,6 +2866,8 @@ watch(
         </div>
       </div>
     </div>
+
+    <TaskExecutionResult :result="latestExecutionResult" />
 
     <div v-if="!productDetail" class="task-manager">
       <div

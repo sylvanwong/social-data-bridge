@@ -1,3 +1,4 @@
+import { buildTaskExecutionResult } from '../utils/taskExecutionResult.mjs';
 import { onUnmounted, ref } from 'vue';
 import { bitable } from '@lark-base-open/js-sdk';
 import { feishuRequest, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, buildFeishuApiPath } from '@/utils/request';
@@ -16,6 +17,7 @@ export const unwrapProductResponse = response => {
 export function useProductReviewTask({ props, fields, onIdle, onRestore, onCancelError }) {
   const loading = ref(false), hasRecoverableTask = ref(false), isCancelling = ref(false), clearing = ref(false);
   const feedback = useTaskFeedback();
+  const latestExecutionResult = ref(null);
   const { createAndWriteData } = useSocialData(() => '商品评价', '', fields);
   let disposed = false;
   const assertMounted = value => { if (disposed) { const error = new Error('页面已离开'); error.stopPolling = true; throw error; } return value; };
@@ -97,17 +99,19 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
     onWriting: (items, task) => { if (!disposed) feedback.progress(isCancelling.value || Number(task.latestStatus?.status) === 3 ? getTaskStoppingText(task, '商品评价') : `正在写入 ${items.length} 条商品评价，已写入 ${task.writtenCount || 0} 条`, { stopping: isCancelling.value || Number(task.latestStatus?.status) === 3 }); },
     onFinish: (status, task) => {
       if (disposed) return;
+      latestExecutionResult.value = buildTaskExecutionResult(status, task, { kind: 'productReview' });
       hasRecoverableTask.value = false; idle();
       const count = task.writtenCount || 0, failed = Number(status?.failed) || (Number(status?.status) === 2 ? 1 : 0);
       const stopped = Number(status?.status) === 3;
       const reason = status?.reason || status?.message || '';
       feedback.finish(`${stopped ? '任务已停止' : Number(status?.status) === 2 ? '商品评价获取失败' : '处理完成'}，已写入 ${count} 条商品评价${failed ? `，${failed} 个商品获取失败` : ''}${reason ? `：${reason}` : ''}`, { stopped, failCount: failed, successCount: count, empty: !count });
     },
-    onError: (error, task) => { if (!disposed) { hasRecoverableTask.value = true; idle(); feedback.fail(error, { persist: true }); } },
+    onError: (error, task) => { if (!disposed) { latestExecutionResult.value = { ...buildTaskExecutionResult(task?.latestStatus, task || {}, { kind: 'productReview' }), status: 'paused', reason: error.message }; hasRecoverableTask.value = true; idle(); feedback.fail(error, { persist: true }); } },
   });
   const resumeTask = async () => {
     if (disposed || loading.value || feedback.noticeRequiresReopen.value) return false;
     loading.value = true;
+    latestExecutionResult.value = null;
     try {
       const found = await taskEngine.resume(task => {
         assertMounted();
@@ -129,6 +133,7 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
     } catch (error) { if (!disposed) { hasRecoverableTask.value = true; idle(); feedback.fail(error, { persist: true }); } return false; }
   };
   const submitTask = async snapshot => {
+    latestExecutionResult.value = null;
     await taskEngine.submit(async () => {
       const task = { ...clone(snapshot), apiBaseURL: FEISHU_API_BASE_URL || '', apiPrefix: FEISHU_API_PATH_PREFIX, pendingWrite: false };
       const data = unwrapProductResponse(await api(task, 'post', 'task', clone(task.requestSnapshot)));
@@ -155,5 +160,5 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
     }
   };
   onUnmounted(() => { disposed = true; taskEngine.stop(); });
-  return { loading, hasRecoverableTask, isCancelling, clearing, feedback, assertMounted, resumeTask, submitTask, cancelTask };
+  return { latestExecutionResult, loading, hasRecoverableTask, isCancelling, clearing, feedback, assertMounted, resumeTask, submitTask, cancelTask };
 }

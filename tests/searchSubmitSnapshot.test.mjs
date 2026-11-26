@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import { nextTick } from 'vue';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,7 +17,7 @@ for (const [page, handler, engineName] of [['KeywordSearch', 'postSearchTask', '
     const form = { value: { social_type: 'xhs', keyword: 'test', radio: 2, table_id: 'original-table', writeMode: 'upsert', rangeType: 'all', workFetchRange: { type: 'all' } } };
     const fields = { value: ['user_id'] }, mappings = { value: [{ source_key: 'user_id', target_field_id: 'original-field' }] };
     let finishRequest, saved;
-    const bindings = {
+    const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult,
       ...loadRequestModule(),
       feedback: { begin() {}, fail: e => assert.fail(e?.message || e) }, nextTick, requiresReopen: { value: false },
       form, formData1: form, selectedFieldKeys: fields, mappingDraft: mappings,

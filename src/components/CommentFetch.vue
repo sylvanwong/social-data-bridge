@@ -4,6 +4,8 @@ const commentSubmission = { pending: null };
 </script>
 
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { buildTaskExecutionResult } from '../utils/taskExecutionResult.mjs';
 import { nextTableName } from '../utils/tableNames.mjs';
 import { parseManualUrls } from '../utils/sourceLinks.mjs';
 import { readRecordIds, readUniqueSourceLinks } from '../utils/sourceTableRows.mjs';
@@ -18,6 +20,8 @@ import { ElMessage } from "element-plus";
 import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request, { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, buildFeishuApiPath, feishuRequest } from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
+
+const latestExecutionResult = ref(null);
 
 const props = defineProps({
   api_key: String,
@@ -890,6 +894,7 @@ const commentStreamTask = useIncrementalTask({
     ? stoppedCommentProgress(task)
     : `正在写入 ${items.length} 条评论，已写入 ${task.writtenCount || 0} 条`, true),
   onFinish: async (status, task) => {
+    latestExecutionResult.value = buildTaskExecutionResult(status, task, { kind: 'comment' });
     clearing.value = false;
     hasRecoverableTask.value = false;
     recoveryRequiresReopen.value = false;
@@ -905,6 +910,7 @@ const commentStreamTask = useIncrementalTask({
     showCompletionToast((Number(status.status) === 2 ? (status.reason || '任务失败') : `处理完成，已写入 ${task.writtenCount || 0} 条评论`) + sortMessage, { type: Number(status.status) === 2 ? 'error' : undefined, empty: !task.writtenCount });
   },
   onError: async (error, task) => {
+    latestExecutionResult.value = { ...buildTaskExecutionResult(task?.latestStatus, task || {}, { kind: 'comment' }), status: task?.taskId || error.taskCreated || error.requiresReopen ? 'paused' : 'interrupted', reason: error?.response?.data?.msg || error.message || '任务已暂停' };
     clearing.value = false;
     hasRecoverableTask.value = true;
     recoveryRequiresReopen.value = !!error.requiresReopen;
@@ -922,6 +928,7 @@ const resumeCommentTask = async () => {
   }
   isSubmitting.value = true;
   loading.value = true;
+  latestExecutionResult.value = null;
   feedback.begin('正在检查未完成任务…');
   await nextTick();
   try {
@@ -1139,6 +1146,7 @@ const commit = async () => {
       return;
     }
     loading.value = true;
+    latestExecutionResult.value = null;
     feedback.begin('正在启动评论列表获取...请勿关闭插件，关闭将中断任务');
     await nextTick();
     const sourceTable = mode === 'manual' ? null : await bitable.base.getActiveTable();
@@ -1464,6 +1472,8 @@ watch(selectedFieldKeys, (keys) => {
         @click="handleTaskAction"
       >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
     </div>
+
+    <TaskExecutionResult :result="latestExecutionResult" />
 
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>

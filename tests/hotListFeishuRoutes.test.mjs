@@ -1,3 +1,4 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -21,7 +22,7 @@ function fixture(env, platform, reply) {
     calls.push(config);
     return { config, status: 200, data: reply };
   };
-  const bindings = {
+  const bindings = { executionResult: useTaskExecutionResult(),
     ...api, request: api.service, props: { api_key: 'test-only' },
     formData: { value: { platform } }, loading: { value: false },
     getActiveFieldMapping: () => [{ key: 'rank' }, { key: 'keyword' }], showErrorMsg: message => assert.fail(message),

@@ -1,4 +1,6 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { useTaskExecutionResult } from '../composables/useTaskExecutionResult.mjs';
 import { nextTableName } from '../utils/tableNames.mjs';
 import { parseManualUrls, extractCellLink } from '../utils/sourceLinks.mjs';
 import { readRecordIds, readSourceRows } from '../utils/sourceTableRows.mjs';
@@ -169,6 +171,8 @@ const tableOptions = ref([]);
 const loading = ref(false);
 const stopRequested = ref(false);
 const taskFeedback = useTaskFeedback();
+const executionResult = useTaskExecutionResult({ inputUnit: '条', outputUnit: '作者' });
+const latestExecutionResult = executionResult.result;
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const selectedFieldKeys = ref([]);
 const writeMode = ref('upsert');
@@ -913,7 +917,9 @@ const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFie
     }
 
     if (!Object.keys(fields).length) throw new Error('没有可写入的字段');
-    await table.setRecord(recordId, { fields });
+    try { await table.setRecord(recordId, { fields }); }
+    catch (error) { error.writeUncertain = true; throw error; }
+    return 1;
   } catch (error) {
     console.error('写入记录失败:', error);
     throw error;
@@ -974,10 +980,10 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
     }
   }
 
-  if (records.length === 0) return;
+  if (records.length === 0) return 0;
   if (options.writeMode !== 'upsert') {
-    await table.addRecords(records);
-    return;
+    try { await table.addRecords(records); } catch (error) { error.writeUncertain = true; throw error; }
+    return records.length;
   }
 
   const keyEntries = ['social_type', 'user_id'].map(key => fieldEntries.find(item => item.config.key === key));
@@ -1010,11 +1016,17 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
     if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
     else creates.push(records[index]);
   });
-  if (updates.length) await table.setRecords(updates);
-  if (creates.length) await table.addRecords(creates);
+  if (updates.length) {
+    try { await table.setRecords(updates); } catch (error) { error.writeUncertain = true; throw error; }
+  }
+  if (creates.length) {
+    try { await table.addRecords(creates); } catch (error) { error.writeUncertain = true; throw error; }
+  }
+  return records.length;
 };
 
 const fetchBloggerInfoByRows = async (rowList, { selectedFieldKeys: fields, onSuccess = null } = {}) => {
+  executionResult.setTotal(rowList.length);
   let successCount = 0;
   let failCount = 0;
 
@@ -1042,14 +1054,17 @@ const fetchBloggerInfoByRows = async (rowList, { selectedFieldKeys: fields, onSu
       if (res.sta === 0 && res.data) {
         const item = { ...res.data, __recordId: recordId };
         if (onSuccess) {
-          await onSuccess(item, i);
+          executionResult.written(await onSuccess(item, i));
         }
         successCount++;
+        executionResult.success();
       } else {
+        executionResult.failure(url, res.msg || '获取失败');
         taskFeedback.recordFailure(res.msg || '获取博主信息失败', { index: i + 1 });
         failCount++;
       }
     } catch (error) {
+      executionResult.failure(url, error, { writeUncertain: !!error?.writeUncertain });
       if (error?.code === 'INVALID_API_KEY') {
         throw error;
       }
@@ -1079,7 +1094,7 @@ const getCellValuesByFieldId = (table, recordIds, fieldId) =>
 const showToast = (text, isLoading = true, options = {}) => {
   if (isLoading) {
     const progressOptions = { stopping: stopRequested.value, ...options };
-    if (options.begin) taskFeedback.begin(text, progressOptions);
+    if (options.begin) { executionResult.begin(); taskFeedback.begin(text, progressOptions); }
     else taskFeedback.progress(text, progressOptions);
   } else {
     taskFeedback.finish(text, options);
@@ -1093,6 +1108,7 @@ const showExecutionProgress = (message) => {
 };
 
 const finishToast = (text, options = {}) => {
+  if (options.successCount != null || options.empty) executionResult.finish({ stopped: options.stopped, reason: options.successCount == null ? text : '' });
   showToast(text, false, options);
 };
 
@@ -1832,6 +1848,7 @@ const handleTableModeSubmit = async () => {
     );
   } catch (error) {
     const errorMessage = error.message || '获取数据失败';
+    executionResult.fail(error, { paused: !!(error?.writeUncertain || error?.requiresReopen || error?.stopPolling) });
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -1887,6 +1904,7 @@ const handleManualModeSubmit = async () => {
     );
   } catch (error) {
     const errorMessage = error.message || '获取数据失败';
+    executionResult.fail(error, { paused: !!(error?.writeUncertain || error?.requiresReopen || error?.stopPolling) });
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -2444,6 +2462,8 @@ watch(
         </div>
       </div>
     </div>
+
+    <TaskExecutionResult :result="latestExecutionResult" />
 
     <div class="task-manager">
       <div

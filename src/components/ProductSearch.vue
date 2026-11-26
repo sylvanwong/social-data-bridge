@@ -1,4 +1,6 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { buildTaskExecutionResult } from '../utils/taskExecutionResult.mjs';
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { bitable, DateFormatter, FieldType, NumberFormatter } from '@lark-base-open/js-sdk';
 import { ElMessage } from 'element-plus';
@@ -12,6 +14,8 @@ import { getPendingWriteLimit } from '../utils/taskWriteState.mjs';
 import { getTaskStoppingText } from '../utils/taskStopText';
 import TaskFeedback from './TaskFeedback.vue';
 import PageStepper from './PageStepper.vue';
+
+const latestExecutionResult = ref(null);
 
 const props = defineProps({ api_key: String });
 const emit = defineEmits(['back']);
@@ -255,6 +259,7 @@ const searchTask = useIncrementalTask({
   onWriting: (items, task) => { if (!disposed) feedback.progress(stopping.value ? stopText(task) : `正在写入 ${items.length} 条商品，已写入 ${task.writtenCount || 0} 条商品，请勿关闭插件，关闭将中断数据写入`, { stopping: stopping.value }); },
   onFinish: async (status, task) => {
     if (disposed) return;
+    latestExecutionResult.value = buildTaskExecutionResult(status, task, { kind: 'productSearch' });
     if (selectedKeysBeforeRecovery) {
       selectedKeys.value = selectedKeysBeforeRecovery;
       selectedKeysBeforeRecovery = undefined;
@@ -269,6 +274,7 @@ const searchTask = useIncrementalTask({
   },
   onError: (error, task) => {
     if (disposed) return;
+    latestExecutionResult.value = { ...buildTaskExecutionResult(task?.latestStatus, task || {}, { kind: 'productSearch' }), status: task?.taskId || error.taskCreated || error.requiresReopen ? 'paused' : 'interrupted', reason: error?.response?.data?.msg || error.message || '任务已暂停' };
     clearing.value = false; loading.value = false; stopping.value = false; activeTaskId.value = '';
     hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated; requiresReopen.value = !!error.requiresReopen;
     feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: requiresReopen.value });
@@ -277,6 +283,7 @@ const searchTask = useIncrementalTask({
 const resumeSavedTask = async () => {
   if (disposed || loading.value || requiresReopen.value) return;
   loading.value = true;
+  latestExecutionResult.value = null;
   feedback.begin('正在检查未完成任务…');
   try {
     const resumed = await searchTask.resume(task => restoreTask(task, true));
@@ -304,6 +311,7 @@ const handleSubmit = async () => {
     if (input.targetType === 'existing' && (!input.targetTableId || !outputReady.value)) throw new Error(targetError.value || '请等待目标表配置就绪，或重新读取配置');
     if (!fieldMappings.every(isCompleteMapping)) throw new Error(incompleteMappingMessage);
     const targetId = input.targetType === 'existing' ? input.targetTableId : '';
+    latestExecutionResult.value = null;
     feedback.begin('正在启动商品搜索…');
     loading.value = true; stopping.value = false;
     if (targetId) await validateTableFields(targetId, keys, {
@@ -432,6 +440,8 @@ const handleAction = () => actionState.value === 'running' ? cancelTask() : acti
       <div v-if="taskNotice" class="task-notice" role="status">{{ taskNotice }}</div>
       <div class="action-group"><el-button class="commit-btn" :class="{ 'is-running': actionState === 'running' || actionState === 'stopping' }" :loading="['submitting', 'stopping', 'clearing'].includes(actionState)" :disabled="['submitting', 'stopping', 'clearing', 'reopen'].includes(actionState)" @click="handleAction">{{ actionText }}</el-button></div>
     </div>
+    <TaskExecutionResult :result="latestExecutionResult" />
+
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>
