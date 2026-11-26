@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import { resolveWritableField } from '../src/utils/tableFields.js';
 import { nextTick } from 'vue';
 import test from 'node:test';
@@ -22,7 +24,7 @@ function load(name, bindings = {}) {
     bindings.isFieldTypeCompatible ??= load('isFieldTypeCompatible', bindings);
   }
   const node = declarations.find(node => node.id.name === name).init;
-  bindings = { ...loadRequestModule(), resolveWritableField, nextTick, ...bindings };
+  bindings = { latestExecutionResult: { value: null }, buildTaskExecutionResult, ...loadRequestModule(), resolveWritableField, nextTick, ...bindings };
   if (bindings.request) bindings.feishuRequest = config => bindings.request(config);
   bindings.feedback ??= { begin() {}, progress() {}, finish: (text, options) => bindings.showCompletionToast?.(text, options), fail: error => bindings.showErrorMsg?.(error?.message || error), hide() {} };
   return new Function(...Object.keys(bindings), `const ${name} = ${source.slice(node.start, node.end)}; return ${name};`)(...Object.values(bindings));
@@ -94,7 +96,7 @@ function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapp
   }, base: { getSelection: async () => ({ baseId: 'base' }), getTableById: async () => table,
     getTable: async () => { if (failSetup) { failSetup = false; throw new Error('setup failed'); } return table; },
   } };
-  const bindings = { getActiveFieldConfigs: load('getActiveFieldConfigs', { FIELD_CONFIG: configs, selectedFieldKeys }), buildFieldPayload: config => config,
+  const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, getActiveFieldConfigs: load('getActiveFieldConfigs', { FIELD_CONFIG: configs, selectedFieldKeys }), buildFieldPayload: config => config,
     getFieldInstanceMapByConfigs: load('getFieldInstanceMapByConfigs'), bitable,
     createSequentialTable: async () => { createdTables++; fields.clear(); return { tableId: 'table' }; },
     mappingDraft: { value: [] }, normalizeCommentId: load('normalizeCommentId'), normalizeFieldValue: value => value,
@@ -367,7 +369,7 @@ test('旧任务尚未建表：初始化失败后仍可在原表补字段，不�
 
 test('实际恢复按钮与任务引擎联动：继续原任务、核对首批并写完剩余结果', async () => {
   const f = fixture(); let created = 0;
-  const scope = { clearing: { value: false }, commentSubmission: { pending: null }, componentUnmounted: false, loading: { value: true }, isSubmitting: { value: false }, isCancelling: { value: false },
+  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, clearing: { value: false }, commentSubmission: { pending: null }, componentUnmounted: false, loading: { value: true }, isSubmitting: { value: false }, isCancelling: { value: false },
     activeCommentTaskId: { value: 'task' }, hasRecoverableTask: { value: false }, recoveryRequiresReopen: { value: false },
     showToast() {}, showCompletionToast() {}, showErrorMsg() {},
     computed: fn => ({ get value() { return fn(); } }), commit: () => { created++; }, cancelCommentTask() {},

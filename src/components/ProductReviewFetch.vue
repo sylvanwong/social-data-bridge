@@ -1,4 +1,5 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { bitable, FieldType, NumberFormatter } from '@lark-base-open/js-sdk';
 
@@ -105,7 +106,7 @@ const cloudConfigs = new Map();
 const configPath = buildFeishuApiPath('/v1/feishu/profile-fetch/table-output-config');
 const configListPath = `${configPath}s`;
 let configRequest = null, configApplying = false;
-const { loading, hasRecoverableTask, isCancelling, clearing, feedback, assertMounted, resumeTask, submitTask, cancelTask } = useProductReviewTask({ props, fields: FIELD_CONFIG, onCancelError: error => showError(error), onIdle: () => {
+const { latestExecutionResult, loading, hasRecoverableTask, isCancelling, clearing, feedback, assertMounted, resumeTask, submitTask, cancelTask } = useProductReviewTask({ props, fields: FIELD_CONFIG, onCancelError: error => showError(error), onIdle: () => {
   if (disposed) return;
   if (pendingSelection) { const selection = pendingSelection; pendingSelection = null; void loadSourceFields(selection); }
   if (!hasRecoverableTask.value && formData.value.radio === 2 && formData.value.table_id) {
@@ -678,6 +679,7 @@ onUnmounted(() => {
         <el-button v-else class="commit-btn" :loading="loading || !initialReady" :disabled="loading || !initialReady || noticeRequiresReopen" @click="handleSubmit">{{ hasRecoverableTask ? '恢复任务' : !initialReady ? '准备中…' : '立即执行' }}</el-button>
       </div>
     </div>
+    <TaskExecutionResult :result="latestExecutionResult" />
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>

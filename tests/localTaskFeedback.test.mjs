@@ -1,3 +1,4 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -24,7 +25,7 @@ function extract(page, name, bindings) {
   return new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
 }
 function setup(t,page,overrides={}) {
- const f=feedback(t),b={disposed:false,assertActive:()=>{},taskFeedback:f,...f,computed,props:{api_key:'test'},console:quiet,fieldSelectionReady:ref(true),loading:ref(false),isSubmitting:ref(false),stopRequested:ref(false),collecting:ref(false),submitting:ref(false),pendingWrite:ref(null),form:ref({social_type:'xhs',outputType:1}),formData:ref({radio:2,table_id:'table',platform:'xhs'}),tableConfigReady:ref(true),tableConfigError:ref(''),selectedFieldKeys:ref(['keyword']),mappingDraft:ref([]),getActiveFieldMapping:()=>[{key:'keyword'}],fetchSuggestions:async()=>[],validateTableFields:async()=>true,createAndWriteData:async()=>({tableId:'created'}),bitable:{ui:{switchToTable:async()=>{}}},ElMessage:()=>assert.fail('重复通知'),showErrorMsg:()=>assert.fail('重复通知'),...overrides};
+ const f=feedback(t), executionResult=useTaskExecutionResult(),b={executionResult,latestExecutionResult:executionResult.result,disposed:false,assertActive:()=>{},taskFeedback:f,...f,computed,props:{api_key:'test'},console:quiet,fieldSelectionReady:ref(true),loading:ref(false),isSubmitting:ref(false),stopRequested:ref(false),collecting:ref(false),submitting:ref(false),pendingWrite:ref(null),form:ref({social_type:'xhs',outputType:1}),formData:ref({radio:2,table_id:'table',platform:'xhs'}),tableConfigReady:ref(true),tableConfigError:ref(''),selectedFieldKeys:ref(['keyword']),mappingDraft:ref([]),getActiveFieldMapping:()=>[{key:'keyword'}],fetchSuggestions:async()=>[],validateTableFields:async()=>true,createAndWriteData:async()=>({tableId:'created'}),bitable:{ui:{switchToTable:async()=>{}}},ElMessage:()=>assert.fail('重复通知'),showErrorMsg:()=>assert.fail('重复通知'),...overrides};
  if(page==='SearchSuggestions'){const write=b.createAndWriteData;b.createAndWriteData=async(...args)=>{const result=await write(...args);args[5].onTargetTableReady?.(result.tableId);args[5].onBatchWritten?.(args[0].length);return{...result,recordIds:args[0].map((_,i)=>`record-${i}`)};};}
  b.showToast=extract(page,'showToast',b);b.hideToast=extract(page,'hideToast',b);return{f,b,run:name=>extract(page,name,b)};
 }

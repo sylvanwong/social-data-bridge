@@ -1,4 +1,6 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { useTaskExecutionResult } from '../composables/useTaskExecutionResult.mjs';
 import { useToolOutputConfig } from '../composables/useToolOutputConfig.js';
 import { parseManualUrls } from '../utils/sourceLinks.mjs';
 import { nextTableName } from '../utils/tableNames.mjs';
@@ -144,6 +146,8 @@ const tableOptions = ref([]);
 const loading = ref(false);
 const stopRequested = ref(false);
 const taskFeedback = useTaskFeedback();
+const executionResult = useTaskExecutionResult({ inputUnit: '条', outputUnit: '内容' });
+const latestExecutionResult = executionResult.result;
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
@@ -467,8 +471,11 @@ const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFie
   }
 
   if (Object.keys(fields).length > 0) {
-    assertMounted(await table.setRecord(recordId, { fields }));
+    try { assertMounted(await table.setRecord(recordId, { fields })); }
+    catch (error) { error.writeUncertain = true; throw error; }
+    return 1;
   }
+  return 0;
 };
 
 const writeDataToTargetRecord = async (table, item, activeFieldConfigs, fieldIdByName) => {
@@ -540,7 +547,9 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
   }
 
   if (records.length > 0) {
-    assertMounted(await table.addRecords(records));
+    try { assertMounted(await table.addRecords(records)); }
+    catch (error) { error.writeUncertain = true; throw error; }
+    executionResult.written(records.length);
   }
 };
 
@@ -593,6 +602,7 @@ const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
 
 const fetchXhsByRows = async (rowList, { activeFieldConfigs = [], onSuccess = null } = {}) => {
   const selectedFieldKeys = activeFieldConfigs.map(field => field.key);
+  executionResult.setTotal(rowList.length);
   let successCount = 0;
   let failCount = 0;
   const successList = [];
@@ -622,17 +632,20 @@ const fetchXhsByRows = async (rowList, { activeFieldConfigs = [], onSuccess = nu
       if (res.sta === 0 && res.data) {
         const item = { ...res.data, __recordId: recordId };
         if (onSuccess) {
-          assertMounted(await onSuccess(item, i));
+          executionResult.written(assertMounted(await onSuccess(item, i)));
         } else {
           successList.push(item);
         }
         successCount++;
+        executionResult.success();
       } else {
+        executionResult.failure(url, res.msg || '获取失败');
         taskFeedback.recordFailure(res.msg || '获取小红书内容失败', { index: i + 1 });
         failCount++;
       }
     } catch (error) {
       assertMounted();
+      executionResult.failure(url, error, { writeUncertain: !!error?.writeUncertain });
       if (error?.code === 'INVALID_API_KEY') {
         throw error;
       }
@@ -722,6 +735,7 @@ const handleTableModeSubmit = async () => {
   } catch (error) {
     if (componentUnmounted) return;
     const errorMessage = error.message || '获取数据失败';
+    executionResult.fail(error, { paused: !!(error?.writeUncertain || error?.requiresReopen || error?.stopPolling) });
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -796,6 +810,7 @@ const handleManualModeSubmit = async () => {
   } catch (error) {
     if (componentUnmounted) return;
     const errorMessage = error.message || '获取数据失败';
+    executionResult.fail(error, { paused: !!(error?.writeUncertain || error?.requiresReopen || error?.stopPolling) });
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -832,7 +847,7 @@ const stepNumber = (delta) => {
 const showToast = (text, isLoading = true, options = {}) => {
   if (isLoading) {
     const progressOptions = { stopping: stopRequested.value, ...options };
-    if (options.begin) taskFeedback.begin(text, progressOptions);
+    if (options.begin) { executionResult.begin(); taskFeedback.begin(text, progressOptions); }
     else taskFeedback.progress(text, progressOptions);
   } else {
     taskFeedback.finish(text, options);
@@ -840,6 +855,7 @@ const showToast = (text, isLoading = true, options = {}) => {
 };
 
 const finishToast = (text, options = {}) => {
+  if (options.successCount != null || options.empty) executionResult.finish({ stopped: options.stopped, reason: options.successCount == null ? text : '' });
   showToast(text, false, options);
 };
 
@@ -1086,6 +1102,7 @@ watch(
     </div>
 
     <!-- Toast 提示 -->
+    <TaskExecutionResult :result="latestExecutionResult" />
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>

@@ -1,3 +1,4 @@
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ const source = descriptor.scriptSetup.content;
 const declarations = parseJS(source, { sourceType: 'module' }).program.body
   .filter(node => node.type === 'VariableDeclaration').flatMap(node => node.declarations);
 const evaluate = (node, scope) => {
-  scope = { ...loadRequestModule(), ...scope };
+  scope = { latestExecutionResult: { value: null }, buildTaskExecutionResult, ...loadRequestModule(), ...scope };
   if (scope.request) scope.feishuRequest = config => scope.request(config);
   const pathHelper = declarations.find(node => node.id.name === 'commentTaskApiPath').init;
   scope.commentTaskApiPath = new Function('buildFeishuApiPath', 'LEGACY_FEISHU_API_PATH_PREFIX',

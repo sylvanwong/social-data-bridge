@@ -1,4 +1,6 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { buildTaskExecutionResult } from '../utils/taskExecutionResult.mjs';
 import { getPendingWriteLimit } from '../utils/taskWriteState.mjs';
 import { parseManualUrls } from '../utils/sourceLinks.mjs';
 import { readRecordIds, readUniqueSourceLinks } from '../utils/sourceTableRows.mjs';
@@ -13,6 +15,8 @@ import { computed, ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import request, { API_BASE_URL, FEISHU_API_BASE_URL, FEISHU_API_PATH_PREFIX, LEGACY_FEISHU_API_PATH_PREFIX, buildFeishuApiPath, feishuRequest } from '@/utils/request'
 import { useIncrementalTask } from '@/composables/useIncrementalTask'
 import { useSocialData } from '@/composables/useSocialData'
+
+const latestExecutionResult = ref(null);
 
 const props = defineProps({
   api_key: String,
@@ -457,6 +461,7 @@ const seriesStreamTask = useIncrementalTask({
   },
   onWriting: (items, task) => showToast(isCancelling.value ? getStoppingText(task) : `正在写入 ${items.length} 条短剧，已写入 ${task.writtenCount || 0} 条`, true),
   onFinish: (status, task) => {
+    latestExecutionResult.value = buildTaskExecutionResult(status, task, { kind: 'series' });
     clearing.value = false;
     loading.value = false; isCancelling.value = false; activeSeriesTaskId.value = ''; activeSeriesTask = null;
     hasRecoverableTask.value = false; recoveryRequiresReopen.value = false;
@@ -467,6 +472,7 @@ const seriesStreamTask = useIncrementalTask({
       { stopped, type: failed ? 'error' : undefined, empty: !task.writtenCount });
   },
   onError: (error, task) => {
+    latestExecutionResult.value = { ...buildTaskExecutionResult(task?.latestStatus, task || {}, { kind: 'series' }), status: task?.taskId || error.taskCreated || error.requiresReopen ? 'paused' : 'interrupted', reason: error?.response?.data?.msg || error.message || '任务已暂停' };
     clearing.value = false;
     loading.value = false; isCancelling.value = false; activeSeriesTaskId.value = ''; activeSeriesTask = null;
     hasRecoverableTask.value = !!task?.taskId || !!error.taskCreated;
@@ -479,6 +485,7 @@ const resumeSeriesTask = async () => {
   if (recoveryRequiresReopen.value) return;
   isSubmitting.value = true;
   loading.value = true;
+  latestExecutionResult.value = null;
   feedback.begin('正在检查未完成任务…');
   await nextTick();
   try {
@@ -758,6 +765,7 @@ const commit = async () => {
       return;
     }
     loading.value = true;
+    latestExecutionResult.value = null;
     feedback.begin('正在启动博主短剧获取...请勿关闭插件，关闭将中断任务');
     await nextTick();
     const sourceTable = mode === 'manual' ? null : await bitable.base.getActiveTable();
@@ -1078,6 +1086,8 @@ watch(selectedFieldKeys, (keys) => {
         {{ profileProgress.text }}
       </div>
     </div>
+
+    <TaskExecutionResult :result="latestExecutionResult" />
 
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>

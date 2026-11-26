@@ -1,4 +1,6 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { useTaskExecutionResult } from '../composables/useTaskExecutionResult.mjs';
 import { nextTableName } from '../utils/tableNames.mjs';
 import { resolveWritableField } from "../utils/tableFields.js";
 import TaskFeedback from './TaskFeedback.vue';
@@ -69,6 +71,8 @@ const table_options = ref([]);
 const loading = ref(false);
 const isSubmitting = ref(false);
 const taskFeedback = useTaskFeedback();
+const executionResult = useTaskExecutionResult({ inputUnit: '次请求', outputUnit: '热榜数据' });
+const latestExecutionResult = executionResult.result;
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const FIELD_SELECTION_STORAGE_KEY = 'hot_list_selected_fields_v1';
 const selectedFieldKeys = ref([]);
@@ -134,6 +138,7 @@ const getMappingTargetFields = (index) => {
 };
 
 const showToast = (text, isLoading = true, options = {}) => {
+  if (options.begin) executionResult.begin(1);
   if (isLoading) return options.begin ? taskFeedback.begin(text, options) : taskFeedback.progress(text, options);
   taskFeedback.finish(text, options);
 };
@@ -478,7 +483,9 @@ const writeDataToTable = async (table, list, isExistingTable = false, activeFiel
     records.push(record);
     showToast(`正在写入第 ${records.length}/${list.length} 条...`, true);
   }
-  await table.addRecords(records);
+  try { await table.addRecords(records); }
+  catch (error) { error.writeUncertain = true; throw error; }
+  return records.length;
 };
 
 const submit = async (targetTableId = "", activeFieldMapping = getActiveFieldMapping()) => {
@@ -495,6 +502,8 @@ const submit = async (targetTableId = "", activeFieldMapping = getActiveFieldMap
     return;
   }
 
+  executionResult.begin(1);
+  let fetchedCount;
   loading.value = true;
   showToast("正在获取热榜数据...", true);
 
@@ -514,7 +523,10 @@ const submit = async (targetTableId = "", activeFieldMapping = getActiveFieldMap
     }
 
     const list = extractList(res.data);
+    fetchedCount = list.length;
+    executionResult.success();
     if (!list.length) {
+      executionResult.finish({ reason: "未获取到热榜数据", status: "completed" });
       showToast("未获取到热榜数据", false, { empty: true });
       return;
     }
@@ -529,11 +541,15 @@ const submit = async (targetTableId = "", activeFieldMapping = getActiveFieldMap
     }
 
     const table = await bitable.base.getTableById(currentTableId);
-    await writeDataToTable(table, list, Boolean(targetTableId), activeFieldMapping);
+    const writtenCount = await writeDataToTable(table, list, Boolean(targetTableId), activeFieldMapping);
 
+    executionResult.written(writtenCount);
+    executionResult.finish({ notes: [`获取 ${list.length} 条热榜数据`] });
     showToast(`处理完成：成功 ${list.length} 条，失败 0 条`, false);
 
   } catch (error) {
+    if (fetchedCount == null) executionResult.failure(null, error);
+    executionResult.finish({ status: error.writeUncertain ? "paused" : "interrupted", reason: error.message, notes: fetchedCount == null ? [] : [`获取 ${fetchedCount} 条热榜数据`, ...(error.writeUncertain ? ["写入结果待核对，请先检查目标表，避免重复执行。"] : [])] });
     console.error("提交热榜获取失败:", error);
     taskFeedback.fail(error);
   } finally {
@@ -568,6 +584,7 @@ const commit = async () => {
     showToast("正在准备获取热榜…", true, { begin: true });
     await submit("", activeFieldMapping);
   } catch (error) {
+    executionResult.fail(error, { paused: !!(error?.writeUncertain || error?.requiresReopen || error?.stopPolling) });
     taskFeedback.fail(error);
   } finally {
     isSubmitting.value = false;
@@ -686,6 +703,7 @@ watch(selectedFieldKeys, (keys) => {
       >{{ loading ? '执行中…' : (!fieldSelectionReady || isSubmitting) ? '准备中…' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
     </div>
 
+    <TaskExecutionResult :result="latestExecutionResult" />
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>

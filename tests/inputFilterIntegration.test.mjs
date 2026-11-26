@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import { readRecordIds, readUniqueSourceLinks, readSourceRows } from '../src/utils/sourceTableRows.mjs';
 import { resolveWritableField } from '../src/utils/tableFields.js';
 import test from 'node:test';
@@ -51,6 +53,7 @@ function pageHandler(page, name, bindings) {
     bindings.isFieldTypeCompatible = pageHandler(page, 'isFieldTypeCompatible', bindings);
   }
   const node = declarations.find(node => node.id.name === name).init;
+  bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, ...bindings };
   return new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
 }
 
@@ -1342,6 +1345,7 @@ function taskDialogCloseHandler(page, bindings) {
     node.type === 'ExpressionStatement' && node.expression.callee?.name === 'watch'
     && source.slice(node.expression.arguments[0].start, node.expression.arguments[0].end).includes('taskDialogVisible.value'));
   const callback = watcher.expression.arguments[1];
+  bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, ...bindings };
   return new Function(...Object.keys(bindings), `return (${source.slice(callback.start, callback.end)});`)(...Object.values(bindings));
 }
 

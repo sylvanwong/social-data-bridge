@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -21,7 +23,7 @@ function fixture(env = production) {
     calls.push(call);
     return { config, status: 200, data: await reply(call) };
   };
-  const bindings = { ...api, request: api.service, props: { api_key: 'test-only' },
+  const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, ...api, request: api.service, props: { api_key: 'test-only' },
     assertMounted: value => value, sleep: async ms => { waits.push(ms); },
     showToast() {}, stopRequested: { value: false },
     taskFeedback: { recordFailure: (error, row) => failures.push({ error, row }) },

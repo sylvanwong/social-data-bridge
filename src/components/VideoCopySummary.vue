@@ -1,4 +1,6 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { useTaskExecutionResult } from '../composables/useTaskExecutionResult.mjs';
 import { useToolOutputConfig } from '../composables/useToolOutputConfig.js';
 import { parseManualUrls } from '../utils/sourceLinks.mjs';
 import { nextTableName } from '../utils/tableNames.mjs';
@@ -58,6 +60,8 @@ const tableOptions = ref([]);
 const loading = ref(false);
 const stopRequested = ref(false);
 const taskFeedback = useTaskFeedback();
+const executionResult = useTaskExecutionResult({ inputUnit: '条', outputUnit: '视频文案' });
+const latestExecutionResult = executionResult.result;
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
@@ -391,17 +395,22 @@ const setupNewTableFields = async (tableId, activeFieldConfigs) => {
 };
 
 const writeDataToRecord = async (table, recordId, item, fieldNameToId, activeFieldConfigs) => {
-  for (const config of activeFieldConfigs) {
-    const fieldId = resolveFieldId(config, fieldNameToId);
-    if (!fieldId) continue;
+  let writeStarted = false;
+  try {
+    for (const config of activeFieldConfigs) {
+      const fieldId = resolveFieldId(config, fieldNameToId);
+      if (!fieldId) continue;
 
-    const sourceField = assertMounted(await table.getFieldById(fieldId));
-    const { field, fieldType } = assertMounted(await resolveWritableField(table, sourceField));
-    const value = config.name === '平台' && fieldType === FieldType.SingleSelect
-      ? (config.getValue(item) || null)
-      : config.getValue(item);
-    assertMounted(await field.setValue(recordId, value));
-  }
+      const sourceField = assertMounted(await table.getFieldById(fieldId));
+      const { field, fieldType } = assertMounted(await resolveWritableField(table, sourceField));
+      const value = config.name === '平台' && fieldType === FieldType.SingleSelect
+        ? (config.getValue(item) || null)
+        : config.getValue(item);
+      writeStarted = true;
+      assertMounted(await field.setValue(recordId, value));
+    }
+    return writeStarted ? 1 : 0;
+  } catch (error) { if (writeStarted) error.writeUncertain = true; throw error; }
 };
 
 const createCellValue = async (table, fieldId, item, config) => {
@@ -437,8 +446,10 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
   }
 
   if (records.length > 0) {
-    assertMounted(await table.addRecords(records));
+    try { assertMounted(await table.addRecords(records)); }
+    catch (error) { error.writeUncertain = true; throw error; }
   }
+  return records.length;
 };
 
 const extractVideoLink = (value) => {
@@ -550,6 +561,7 @@ const resolveTargetTableId = async (targetType, activeFieldConfigs) => {
 
 const fetchSummaryByEntries = async (recordEntries, { activeFieldConfigs = [], onSuccess = null } = {}) => {
   const selectedFieldKeys = activeFieldConfigs.map(field => field.key);
+  executionResult.setTotal(recordEntries.length);
   let successCount = 0;
   let failCount = 0;
 
@@ -572,11 +584,13 @@ const fetchSummaryByEntries = async (recordEntries, { activeFieldConfigs = [], o
       const item = { ...result, __recordId: recordId };
       if (onSuccess) {
         showToast(`正在写入第 ${i + 1}/${recordEntries.length} 条结果...`, true);
-        assertMounted(await onSuccess(item, i));
+        executionResult.written(assertMounted(await onSuccess(item, i)));
       }
       successCount++;
+      executionResult.success();
     } catch (error) {
       assertMounted();
+      executionResult.failure(url, error, { writeUncertain: !!error?.writeUncertain });
       if (error?.code === "INVALID_API_KEY") {
         throw error;
       }
@@ -691,6 +705,7 @@ const handleTableModeSubmit = async () => {
   } catch (error) {
     if (isUnmounted) return;
     const errorMessage = error.message || "获取数据失败";
+    executionResult.fail(error, { paused: !!(error?.writeUncertain || error?.requiresReopen || error?.stopPolling) });
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -755,6 +770,7 @@ const handleManualModeSubmit = async () => {
   } catch (error) {
     if (isUnmounted) return;
     const errorMessage = error.message || "获取数据失败";
+    executionResult.fail(error, { paused: !!(error?.writeUncertain || error?.requiresReopen || error?.stopPolling) });
     taskFeedback.fail(Object.assign(new Error(`处理失败：${errorMessage}`), { requiresReopen: error?.requiresReopen, stopPolling: error?.stopPolling }), { persist: /核对|重新(?:打开|进入)|暂停写入/.test(errorMessage) });
   } finally {
     loading.value = false;
@@ -791,7 +807,7 @@ const stepNumber = (delta) => {
 const showToast = (text, isLoading = true, options = {}) => {
   if (isLoading) {
     const progressOptions = { stopping: stopRequested.value, ...options };
-    if (options.begin) taskFeedback.begin(text, progressOptions);
+    if (options.begin) { executionResult.begin(); taskFeedback.begin(text, progressOptions); }
     else taskFeedback.progress(text, progressOptions);
   } else {
     taskFeedback.finish(text, options);
@@ -799,6 +815,7 @@ const showToast = (text, isLoading = true, options = {}) => {
 };
 
 const finishToast = (text, options = {}) => {
+  if (options.successCount != null || options.empty) executionResult.finish({ stopped: options.stopped, reason: options.successCount == null ? text : '' });
   showToast(text, false, options);
 };
 
@@ -1047,6 +1064,7 @@ watch(() => formData.value.targetType, changeTargetType);
       <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
     </div>
 
+    <TaskExecutionResult :result="latestExecutionResult" />
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>

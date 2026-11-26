@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -19,7 +21,7 @@ function fixture(task = { taskId: 'old-task' }, env = production) {
     calls.push(call);
     return { config, status: 200, data: await reply(call) };
   };
-  const bindings = {
+  const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult,
     ...api, request: api.service, props: { api_key: 'test-only' }, componentUnmounted: false,
     commentSubmission: { pending: null },
     selectedFieldKeys: { value: ['cid', 'text'] },

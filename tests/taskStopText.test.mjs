@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -34,7 +36,7 @@ for (const [page, engine, label] of [['CommentFetch','commentStreamTask','评论
     const format = new Function(`${formatterSource};return getTaskStoppingText;`)();
     let message;
     const cancelling = {value:false};
-    const bindings = { clearing:{value:false}, isCancelling:cancelling, cancelling, activeStreamTask:null, activeSeriesTask:null,
+    const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, clearing:{value:false}, isCancelling:cancelling, cancelling, activeStreamTask:null, activeSeriesTask:null,
       getStoppingText:task=>format(task,label), stoppedCommentProgress:task=>format(task,label),
       showToast:text=>message=text, TASK_TOAST_SUFFIX:'请勿关闭插件，关闭将中断任务', getStreamProgressText:()=>'',
       showCompletionToast:text=>message=text, finishToast:text=>message=text,

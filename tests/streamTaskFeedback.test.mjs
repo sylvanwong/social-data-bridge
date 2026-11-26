@@ -1,3 +1,4 @@
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import { readRecordIds, readUniqueSourceLinks } from '../src/utils/sourceTableRows.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -30,7 +31,7 @@ function fixture(t, page, taskName, overrides = {}) {
   const declarations = parseJS(source, { sourceType: 'module' }).program.body
     .filter(n => n.type === 'VariableDeclaration').flatMap(n => n.declarations);
   const notifications = [];
-  const bindings = {
+  const bindings = { latestExecutionResult: ref(null), buildTaskExecutionResult,
     ...loadRequestModule(),
     readRecordIds, readUniqueSourceLinks, feedback, ...feedback, toastLoading: ref(false), ref, nextTick, toastTimer: null,
     setTimeout, clearTimeout, console: { error() {}, log() {} },

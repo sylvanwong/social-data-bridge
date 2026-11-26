@@ -1,4 +1,6 @@
 <script setup>
+import TaskExecutionResult from './TaskExecutionResult.vue';
+import { useTaskExecutionResult } from '../composables/useTaskExecutionResult.mjs';
 import { parseTableConfigList } from '../utils/tableOutputConfig.mjs';
 import TaskFeedback from './TaskFeedback.vue';
 import { useTaskFeedback } from '@/composables/useTaskFeedback.mjs';
@@ -60,6 +62,8 @@ const busy = computed(() => !fieldSelectionReady.value || loading.value || submi
 const collecting = ref(false);
 const stopRequested = ref(false);
 const taskFeedback = useTaskFeedback();
+const executionResult = useTaskExecutionResult({ inputUnit: '个关键词', outputUnit: '推荐词' });
+const latestExecutionResult = executionResult.result;
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const tableOutputConfigs = ref({});
 const tableConfigsLoaded = ref(false);
@@ -268,6 +272,7 @@ const execute = async keywords => {
   stopRequested.value = false;
   try {
     if (!pendingWrite.value) {
+      executionResult.begin(keywords.length);
       const fields = [...selectedFieldKeys.value];
       const rows = [];
       const emptyKeywords = [];
@@ -282,6 +287,7 @@ const execute = async keywords => {
         try {
           const items = await fetchSuggestions(keyword, fields);
           if (disposed) return;
+          executionResult.success();
           if (!items.length) {
             emptyKeywords.push(keyword);
             continue;
@@ -297,6 +303,7 @@ const execute = async keywords => {
           })));
         } catch (error) {
           if (disposed) return;
+          executionResult.failure(keyword, error);
           failedKeywords.push(keyword);
           errors.push(error);
           if (error.code === 'INVALID_API_KEY' || [401, 403].includes(error.response?.status)) {
@@ -310,6 +317,7 @@ const execute = async keywords => {
 
       collecting.value = false;
       if (!rows.length) {
+        executionResult.finish({ stopped: stopRequested.value, reason: authFailureReason, notes: emptyKeywords.length ? [`${emptyKeywords.length} 个关键词无结果`] : [] });
         if (authFailureReason) throw new Error(authFailureReason);
         if (stopRequested.value) {
           taskFeedback.finish(`任务已停止，已写入 0 条推荐词${failedKeywords.length ? `（${failedKeywords.length} 个关键词获取失败）` : ''}`, { stopped: true, failCount: failedKeywords.length });
@@ -329,6 +337,7 @@ const execute = async keywords => {
       };
     }
     const task = pendingWrite.value;
+    latestExecutionResult.value = null;
     const remaining = task.rows.slice(task.writtenCount);
     if (remaining.length) {
       if (task.targetTableId) {
@@ -347,7 +356,7 @@ const execute = async keywords => {
         fieldMappings: task.fieldMappings,
         appendState: task.appendState,
         onTargetTableReady: tableId => { task.targetTableId = tableId; },
-        onBatchWritten: count => { task.writtenCount += count; },
+        onBatchWritten: count => { task.writtenCount += count; executionResult.written(count); },
       });
       if (disposed) return;
       if (!result?.tableId || !Array.isArray(result.recordIds) || result.recordIds.length !== remaining.length) {
@@ -363,6 +372,7 @@ const execute = async keywords => {
     if (task.failedKeywords.length) notes.push(`${task.failedKeywords.length} 个关键词获取失败`);
     if (task.authFailureReason) notes.push(`获取已中止：${task.authFailureReason}`);
     taskFeedback.finish(`${task.stopped ? '任务已停止，' : task.authFailureReason ? '' : '处理完成，'}已写入 ${task.writtenCount} 条${task.stopped ? '推荐词' : ''}${notes.length ? `（${notes.join('，')}）` : ''}`, { stopped: task.stopped, failCount: task.failedKeywords.length, type: task.failedKeywords.length ? 'warning' : 'success' });
+    executionResult.finish({ stopped: task.stopped, writtenCount: task.writtenCount, reason: task.authFailureReason, notes });
     pendingWrite.value = null;
   } catch (error) {
     if (disposed) return;
@@ -371,6 +381,7 @@ const execute = async keywords => {
     const progress = !task ? '' : error.requiresReopen
       ? `；已写入 ${task.writtenCount}/${task.rows.length} 条。关闭或刷新插件页面会清除本次未写入的结果，重新进入后需重新执行。`
       : `；已写入 ${task.writtenCount}/${task.rows.length} 条，可继续写入本次剩余结果。请保留当前页面，关闭或刷新会清除这份进度。`;
+    executionResult.finish({ status: task ? 'paused' : 'interrupted', reason: `${message}${progress}`, ...(task ? { writtenCount: task.writtenCount } : {}) });
     taskFeedback.fail(`${message}${progress}`, { persist: !!task, requiresReopen: !!error.requiresReopen });
   } finally {
     loading.value = false;
@@ -398,6 +409,7 @@ const submit = async () => {
   if (form.value.outputType === 2 && mappingLoading.value) return showError('正在读取目标表字段，请稍后重试');
   if (form.value.outputType === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) return showError('请完成字段映射，或删除未完成的映射');
   submitting.value = true;
+  executionResult.begin(keywords.length);
   taskFeedback.begin(form.value.outputType === 2 && !tableConfigsLoaded.value ? '正在读取输出表配置…'
     : form.value.outputType === 2 && tableFieldsError ? '正在读取目标表字段…'
     : `正在获取「${keywords[0]}」（1/${keywords.length}）…`);
@@ -420,7 +432,7 @@ const submit = async () => {
     if (form.value.outputType === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
     return await execute(keywords);
   } catch (error) {
-    if (!disposed) taskFeedback.fail(error);
+    if (!disposed) { executionResult.fail(error); taskFeedback.fail(error); }
   } finally {
     submitting.value = false;
   }
@@ -428,6 +440,7 @@ const submit = async () => {
 
 const endWrite = () => {
   if (disposed || loading.value || submitting.value) return;
+  if (pendingWrite.value) executionResult.finish({ stopped: true, writtenCount: pendingWrite.value.writtenCount, reason: '已结束本次写入，未写入的结果不会继续处理。' });
   pendingWrite.value = null;
   taskFeedback.hide();
   taskFeedback.clearNotice();
@@ -550,6 +563,7 @@ onMounted(async () => {
       <el-button class="commit-btn" :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }" :loading="!fieldSelectionReady || taskActionState === 'submitting' || taskActionState === 'stopping'" :disabled="!fieldSelectionReady || taskActionState === 'submitting' || taskActionState === 'stopping' || noticeRequiresReopen" @click="handleTaskAction">{{ !fieldSelectionReady ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : loading ? '执行中…' : submitting ? '准备中…' : noticeRequiresReopen ? '请重新进入插件' : pendingWrite ? '继续写入' : '立即执行' }}</el-button>
       <el-button v-if="pendingWrite && !loading && !submitting" class="end-write-btn" @click="endWrite">结束本次写入</el-button>
     </div>
+    <TaskExecutionResult :result="latestExecutionResult" />
     <TaskFeedback :visible="toastVisible" :text="toastText" :kind="toastType" />
   </div>
 </template>

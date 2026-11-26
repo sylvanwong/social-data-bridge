@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -20,7 +22,7 @@ function fixture(task = { taskId: 'old-task' }, env = production) {
     calls.push(call);
     return { config, status: 200, data: await reply(call) };
   };
-  const bindings = {
+  const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult,
     ...api, getPendingWriteLimit, request: api.service, props: { api_key: 'test-only' }, nextTick,
     selectedFieldKeys: { value: ['user_id', 'nickname'] }, mappingDraft: { value: [{ source_key: 'nickname', target_field_id: 'name' }] },
     form: { value: { social_type: 'douyin', keyword: '露营\n徒步，露营', rangeType: 'pages', pages: 2,

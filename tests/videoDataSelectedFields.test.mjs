@@ -1,3 +1,5 @@
+import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
+import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -16,7 +18,7 @@ const callback = parseJS(source, { sourceType: 'module' }).program.body
 for (const keys of [[], ['title'], ['title', 'view_count'], ['comment_count', 'share_count']]) {
   test(`detail request forwards selected output fields: ${JSON.stringify(keys)}`, async () => {
     const requests = [];
-    const bindings = {
+    const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult,
       props: { api_key: 'test-key' }, stopRequested: { value: false },
       TASK_TOAST_SUFFIX: '', showToast() {}, console: { log() {}, error() {} },
       buildFeishuApiPath,
@@ -52,7 +54,7 @@ for (const [elapsed, success] of [[51000, true], [60000, false], [61000, false]]
       return { status: 200, statusText: 'OK', headers: {}, config,
         data: { sta: 0, data: { social_type: 'dewu', social_id: '539977960' } } };
     };
-    const bindings = {
+    const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult,
       ...api,
       props: { api_key: 'test-key' }, stopRequested: { value: false },
       TASK_TOAST_SUFFIX: '', showToast() {}, console: { log() {}, error() {} }, request,
