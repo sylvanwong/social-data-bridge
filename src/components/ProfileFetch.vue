@@ -76,19 +76,35 @@ const fieldSelectionReady = ref(false);
 const feedback = useTaskFeedback();
 const { toastVisible, toastText, toastType, toastLoading, taskNotice } = feedback;
 const latestProfileResult = ref(null);
+const profileRetry = ref(null);
 const manualCopyLinks = ref('');
-const failedInputLabel = result => result.failedItems.length === result.failed ? '全部失败输入' : '已返回的失败输入';
+const manualCopyInput = ref(null);
+const copyingFailedInputs = ref(false);
 const copyFailedProfileLinks = async () => {
   const result = latestProfileResult.value;
+  if (copyingFailedInputs.value || !result?.failedItems.length) return;
   const links = result.failedItems.map(item => item.url).join('\n');
+  copyingFailedInputs.value = true;
   try {
     await navigator.clipboard.writeText(links);
     if (!componentUnmounted && latestProfileResult.value === result) {
       manualCopyLinks.value = '';
-      ElMessage({ message: `已复制${failedInputLabel(result)}`, type: 'success' });
+      const count = result.failedItems.length;
+      const message = count < result.failed ? `已复制 ${count} 条失败输入` : '已复制失败输入';
+      ElMessage({ message, type: 'success' });
     }
   } catch {
-    if (!componentUnmounted && latestProfileResult.value === result) manualCopyLinks.value = links;
+    if (componentUnmounted || latestProfileResult.value !== result) return;
+    manualCopyLinks.value = links;
+    await nextTick();
+    if (componentUnmounted || latestProfileResult.value !== result || manualCopyLinks.value !== links
+      || !latestProfileResultExpanded.value) return;
+    const input = manualCopyInput.value;
+    input?.focus({ preventScroll: true });
+    input?.select();
+    input?.closest('label')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  } finally {
+    copyingFailedInputs.value = false;
   }
 };
 
@@ -659,7 +675,9 @@ const saveSelectedFieldKeys = async (keys) => {
 const unwrapApiData = (responseData) => {
   if (responseData?.sta !== undefined) {
     if (responseData.sta !== 0) {
-      throw new Error(responseData.msg || '请求失败');
+      const error = new Error(responseData.msg || '请求失败');
+      error.apiStatus = Number(responseData.sta);
+      throw error;
     }
     return responseData.data || {};
   }
@@ -766,6 +784,14 @@ const restoreProfileTask = (task, progressText = '正在恢复未完成的作者
 const profileStreamTask = useIncrementalTask({
   storageKey: STREAM_TASK_STORAGE_KEY,
   operationTimeoutMs: 180000,
+  // 后端心跳超过 15 分钟才确认中断，预留下一次轮询时间。
+  stallTimeoutMinutes: 16,
+  shouldRetryStalledStatusRead: error => {
+    // 状态接口将服务内部异常返回为 sta=-101，明确业务失败使用其他状态码。
+    if (error.apiStatus !== undefined) return error.apiStatus === -101;
+    const status = error.response?.status;
+    return status == null || status === 408 || status === 429 || status >= 500;
+  },
   isTerminal: status => [1, 2, 3].includes(Number(status.status)),
   getStatus: getProfileTaskStatus,
   getResults: readAvailablePosts,
@@ -835,6 +861,17 @@ const profileStreamTask = useIncrementalTask({
     loading.value = false; isCancelling.value = false; activeProfileTaskId.value = ''; activeStreamTask = null;
     hasRecoverableTask.value = false; recoveryRequiresReopen.value = false;
     const result = buildProfileTaskResult(status, task);
+    const { retry_generation: generation, retryable_count: count } = status;
+    profileRetry.value = Number(status.status) === 1 && count > 0 && Number.isInteger(generation) && generation >= 0
+      && task.baseId && task.selectedFieldKeys?.length
+      ? { generation, requestId: '', task: {
+        taskId: task.taskId, baseId: task.baseId, apiBaseUrl: task.apiBaseUrl, apiPathPrefix: task.apiPathPrefix,
+        targetTableId: task.targetTableId, selectedFieldKeys: [...task.selectedFieldKeys],
+        fieldMappings: cloneFieldMappings(task.fieldMappings), writeMode: task.writeMode,
+        cursor: task.cursor, writtenCount: task.writtenCount, executionStartedAt: task.executionStartedAt,
+        pendingWrite: false,
+      } }
+      : null;
     latestProfileResult.value = result;
     const written = `已写入 ${task.writtenCount || 0} 条作品`;
     const stopped = Number(status.status) === 3;
@@ -1371,6 +1408,38 @@ const taskActionState = computed(() => {
   if (hasRecoverableTask.value) return 'recoverable';
   return 'idle';
 });
+
+const canRetryProfilePages = computed(() => {
+  const taskId = profileRetry.value?.task.taskId;
+  return !!taskId && taskId === latestProfileResult.value?.taskId && formData.value.executionMode === 'immediate';
+});
+
+const resumeFailedProfilePages = async () => {
+  if (componentUnmounted || !canRetryProfilePages.value || taskActionState.value !== 'idle') return;
+  const retry = profileRetry.value;
+  isSubmitting.value = true;
+  feedback.begin('正在提交重试…');
+  try {
+    await profileStreamTask.submit(async () => {
+      const { baseId } = await bitable.base.getSelection();
+      if (componentUnmounted) throw new Error('页面已关闭');
+      if (baseId !== retry.task.baseId) throw new Error('请回到原多维表格后继续');
+      retry.requestId ||= globalThis.crypto.randomUUID();
+      const response = await feishuRequest({
+        url: profileTaskApiPath(retry.task, '/v1/feishu/social/task'),
+        method: 'post',
+        baseURL: retry.task.apiBaseUrl ?? API_BASE_URL,
+        headers: { authorization: `Bearer ${props.api_key}` },
+        data: { retry_task_id: retry.task.taskId, retry_generation: retry.generation, retry_request_id: retry.requestId },
+      });
+      const data = unwrapApiData(response.data);
+      if (data.task_id !== retry.task.taskId) throw new Error('续跑任务与原任务不一致，请重试');
+      return retry.task;
+    }, task => restoreProfileTask(task, '正在重试失败输入…'));
+  } finally {
+    if (!componentUnmounted) isSubmitting.value = false;
+  }
+};
 
 const handleTaskAction = () => {
   if (taskActionState.value === 'recoverable') return resumeSavedStreamTask();
@@ -2300,10 +2369,16 @@ watch(
             </ul>
             <p v-if="latestProfileResult.failedItems.length > 5">已返回 {{ latestProfileResult.failedItems.length }} 条失败明细，展示前 5 条</p>
             <p v-else-if="latestProfileResult.failedItems.length < latestProfileResult.failed">已返回 {{ latestProfileResult.failedItems.length }} 条失败明细</p>
-            <el-button link type="primary" @click="copyFailedProfileLinks">复制{{ failedInputLabel(latestProfileResult) }}</el-button>
-            <label v-if="manualCopyLinks">请手动复制{{ failedInputLabel(latestProfileResult) }}<textarea readonly :value="manualCopyLinks" @focus="$event.target.select()" /></label>
           </details>
           <p v-else-if="latestProfileResult.failed" class="profile-result-time">本次任务未返回失败输入明细。</p>
+          <div v-if="latestProfileResult.failed > 0" class="profile-result-actions">
+            <el-button link type="primary" :disabled="!canRetryProfilePages || taskActionState !== 'idle'" @click="resumeFailedProfilePages">重试失败输入</el-button>
+            <el-button link type="primary" :disabled="copyingFailedInputs || !latestProfileResult.failedItems.length" @click="copyFailedProfileLinks">复制失败输入</el-button>
+          </div>
+          <label v-if="manualCopyLinks" class="profile-result-copy-fallback">请手动复制失败输入
+            <textarea ref="manualCopyInput" readonly :value="manualCopyLinks" @focus="$event.target.select()" />
+          </label>
+          <p v-if="canRetryProfilePages" class="profile-result-hint">可重试的输入会从失败页接着获取，已成功的页会保留。</p>
           <p v-if="latestProfileResult.finishedAt" class="profile-result-time profile-result-timing">
             <span v-if="latestProfileResult.executionDurationSeconds != null">执行耗时 {{ profileResultDuration(latestProfileResult.executionDurationSeconds) }}</span>
             <span>结束于 {{ formatProfileResultTime(latestProfileResult.finishedAt) }}</span>
@@ -3576,13 +3651,17 @@ watch(
 .profile-result-failure-reason, .profile-result-failures p { color: #646A73; font-size: var(--app-font-size-caption); line-height: 18px; }
 .profile-result-failures p { margin: 8px 0; }
 .profile-result-failures .profile-result-reasons { color: #1d2129; }
-.profile-result-failures label { display: block; margin-top: 8px; color: #646A73; font-size: var(--app-font-size-caption); line-height: 18px; }
-.profile-result-failures textarea {
+.profile-result-actions {
+  display: flex; align-items: center; gap: var(--app-space-control); margin-top: var(--app-space-control);
+}
+.profile-result-actions :deep(.el-button + .el-button) { margin-left: 0; }
+.profile-result-copy-fallback { display: block; margin-top: 8px; color: #646A73; font-size: var(--app-font-size-caption); line-height: 18px; }
+.profile-result-copy-fallback textarea {
   display: block; box-sizing: border-box; width: 100%; min-height: 72px; margin-top: 4px; padding: 8px 12px;
   border: 1px solid #E5E6EB; border-radius: 6px; outline: none; background: #fff; color: #1d2129;
   font: inherit; font-size: var(--app-font-size-caption); line-height: 18px; resize: vertical;
 }
-.profile-result-failures textarea:focus { border-color: #86909C; }
+.profile-result-copy-fallback textarea:focus { border-color: #86909C; }
 .profile-result-count { margin: 0; color: #1d2129; font-size: var(--app-font-size-body); font-weight: var(--app-font-weight-regular); line-height: 20px; }
 .profile-result-stat { display: inline-block; white-space: pre; }
 .profile-result-failed-count { font-weight: var(--app-font-weight-semibold); }

@@ -20,10 +20,17 @@ Authorization: Bearer <apikey>
 这是同步接口，不涉及历史任务 ID 或任务来源分流。不增加失败后跨服务重试，避免重复扣费。
 
 新增回归执行真实组件转换函数和 Axios 拦截器，覆盖三环境地址、5 条分批、鉴权与版本、
-附件下载、业务/认证失败、后批失败及空结果。并运行已有附件字段写入和请求认证回归：
+附件下载、业务/认证失败、后批失败及空结果。在公开仓库可运行转换和请求认证回归。
 
 ```sh
-node --test tests/attachmentFeishuRoutes.test.mjs tests/fieldWriteRules.test.mjs tests/targetFieldOwnership.test.mjs tests/requestAuth.test.mjs
+node --test tests/attachmentFeishuRoutes.test.mjs tests/requestAuth.test.mjs
+```
+
+验证附件字段写入和目标字段归属时，从完整内部仓库根目录执行以下命令。
+
+```sh
+cd social-data-bridge
+node --test tests/fieldWriteRules.test.mjs tests/targetFieldOwnership.test.mjs
 ```
 
 本次仅修改源码，未构建、未更新 `dist/`、未部署或发布。

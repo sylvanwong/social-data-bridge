@@ -15,12 +15,19 @@ Authorization: Bearer <apikey>
 
 新增路由回归执行实际 `submit` 与 Axios 请求拦截器，核对三环境、七平台、
 新建与已有表、业务/认证失败和空结果，并复用已有热榜字段兼容回归。
-本地热榜、请求及字段回归 124 项通过，共用结果接口相关回归 28 项通过；
-在当前目录使用 Node 20 执行：
+此前本地热榜、请求及字段回归 124 项通过，共用结果接口相关回归 28 项通过。
+在公开仓库根目录可运行热榜、请求和共用结果接口回归。
 
 ```sh
-node --test tests/hotListFeishuRoutes.test.mjs tests/feishuApiBase.test.mjs tests/requestAuth.test.mjs tests/hotListFields.test.mjs tests/fieldWriteRules.test.mjs
+node --test tests/hotListFeishuRoutes.test.mjs tests/feishuApiBase.test.mjs tests/requestAuth.test.mjs tests/hotListFields.test.mjs
 node --test tests/profileFeishuRoutes.test.mjs tests/keywordFeishuRoutes.test.mjs tests/streamTaskCoverage.test.mjs
+```
+
+验证字段写入规则时，从完整内部仓库根目录执行以下命令。
+
+```sh
+cd social-data-bridge
+node --test tests/fieldWriteRules.test.mjs
 ```
 
 ## 共用 `/feishu/post/list` 检查
