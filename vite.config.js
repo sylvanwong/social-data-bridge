@@ -19,6 +19,7 @@ export default defineConfig({
     proxy: {
       '/socialdatax/api': {
         target: 'https://api.socialdatax.com',
+        // target: 'https://test-lotto.weiyoubot.cn',
         changeOrigin: true,
         rewrite: (path) => path
       },
