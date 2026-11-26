@@ -22,6 +22,26 @@ function harness(options = {}) {
     tick: async () => { const [id, timer] = [...timers].find(([, timer]) => timer.delay < 60000); timers.delete(id); await timer.fn(); } };
 }
 
+test('未配置等待时间的入口仍在 10 分钟无进度后暂停', async t => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const h = harness({
+    getStatus: async () => ({ status: 0, processed: 0 }),
+    getResults: async () => ({ items: [] }),
+  });
+  try {
+    await h.task.start({ taskId: 'original' });
+    now += 10 * 60 * 1000 - 1;
+    await h.tick();
+    assert.ok(h.task.getActiveTask());
+    now++;
+    await h.tick();
+    assert.equal(h.task.getActiveTask(), null);
+    assert.equal(h.errors[0]?.message, '任务超过 10 分钟没有进度更新，请稍后重试');
+    assert.equal(h.saved().taskId, 'original');
+  } finally { h.task.stop(); }
+});
+
 const flush = async () => { for (let i = 0; i < 80; i++) await Promise.resolve(); };
 const releaseSaveRetry = async h => {
   const retry = [...h.timers].find(([, timer]) => timer.delay === 1000);

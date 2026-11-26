@@ -2,7 +2,6 @@ import { bitable } from '@lark-base-open/js-sdk';
 
 const ACTIVE_INTERVAL = 2000;
 const MAX_INTERVAL = 30000;
-const STALL_TIMEOUT = 10 * 60 * 1000;
 // SDK 清理不会随页面卸载或超时取消；同一存储键的其他实例也必须等待它结束。
 const pendingClears = new Map();
 const pendingMutations = new Map();
@@ -16,7 +15,12 @@ const unwrapApiData = (responseData) => {
   return responseData || {};
 };
 
-export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBatch, operationTimeoutMs = 0, onProgress, onWriting, onFinish, onError, isTerminal }) => {
+export const useIncrementalTask = ({
+  storageKey, getStatus, getResults, writeBatch,
+  operationTimeoutMs = 0, stallTimeoutMinutes = 10, shouldRetryStalledStatusRead,
+  onProgress, onWriting, onFinish, onError, isTerminal,
+}) => {
+  const stallTimeoutMs = stallTimeoutMinutes * 60 * 1000;
   let activeTask = null;
   let timer = null;
   let inFlightTask = null;
@@ -131,9 +135,9 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
     timer = null;
     activeTask = null;
   };
-  const schedule = (task, delay) => {
+  const schedule = (task, delay, retryingStatusRead = false) => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => poll(task), delay);
+    timer = setTimeout(() => poll(task, retryingStatusRead), delay);
   };
 
   const drain = async (task) => {
@@ -195,15 +199,18 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
     await onFinish?.(task.latestStatus, task);
   };
 
-  const poll = async (task) => {
+  const poll = async (task, retryingStatusRead = false) => {
     if (activeTask !== task || inFlightTask === task) return;
     inFlightTask = task;
+    let readingStatus = false;
     try {
       if (finishingTask === task) {
         await finishTask(task);
         return;
       }
+      readingStatus = true;
       const status = unwrapApiData(await bounded(() => getStatus(task), '读取任务进度', { readOnly: true }));
+      readingStatus = false;
       if (activeTask !== task) return;
       if (Number(task.latestStatus?.status) !== 3 || Number(status.status) !== 3) delete task.resultCount;
       task.latestStatus = status;
@@ -234,8 +241,8 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
         await finishTask(task);
         return;
       }
-      if (Date.now() - (task.lastActivityAt || Date.now()) >= STALL_TIMEOUT) {
-        throw new Error('任务超过 10 分钟没有进度更新，请稍后重试');
+      if (Date.now() - (task.lastActivityAt || Date.now()) >= stallTimeoutMs) {
+        throw new Error(`任务超过 ${stallTimeoutMinutes} 分钟没有进度更新，请稍后重试`);
       }
       await save(task);
       schedule(task, task.pollInterval || ACTIVE_INTERVAL);
@@ -243,13 +250,15 @@ export const useIncrementalTask = ({ storageKey, getStatus, getResults, writeBat
       if (activeTask !== task) return;
       task.pollInterval = Math.min(Math.max(task.pollInterval || ACTIVE_INTERVAL, ACTIVE_INTERVAL) * 2, MAX_INTERVAL);
       const invalidAuth = error.code === 'INVALID_API_KEY' || [401, 403].includes(error.response?.status);
-      if (error.stopPolling || invalidAuth || Date.now() - (task.lastActivityAt || Date.now()) >= STALL_TIMEOUT) {
+      const stalled = Date.now() - (task.lastActivityAt || Date.now()) >= stallTimeoutMs;
+      const canRetryStatus = stalled && readingStatus && !retryingStatusRead && shouldRetryStalledStatusRead?.(error);
+      if (error.stopPolling || invalidAuth || (stalled && !canRetryStatus)) {
         stop();
         await onError?.(error, task);
       } else {
         try {
           await save(task);
-          if (activeTask === task) schedule(task, task.pollInterval);
+          if (activeTask === task) schedule(task, task.pollInterval, readingStatus);
         } catch (saveError) {
           if (activeTask === task) {
             stop();

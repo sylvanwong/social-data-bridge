@@ -83,22 +83,30 @@ test('侧栏只预览前五条失败输入，全部和部分明细均可完整�
   const inputs = ['https://weibo.com/u/123456789', '123456789', 'gh_demo', 'demo@finder',
     'https://example.com/user/4', 'https://example.com/user/5', 'gh_last'];
   const failedItems = inputs.map((url, i) => ({ url, reason: '原因' + i }));
-  const latestProfileResult = Vue.ref(null), manualCopyLinks = Vue.ref('');
+  const latestProfileResult = Vue.ref(null), manualCopyLinks = Vue.ref(''), manualCopyInput = Vue.ref(null);
+  const copyingFailedInputs = Vue.ref(false);
+  const latestProfileResultExpanded = Vue.ref(true);
   const notices = [];
-  const failedInputLabel = new Function('return ' + functionBody('failedInputLabel'))();
-  const copyFailedProfileLinks = new Function('failedInputLabel', 'latestProfileResult', 'manualCopyLinks', 'componentUnmounted', 'ElMessage',
-    'return ' + functionBody('copyFailedProfileLinks'))(failedInputLabel, latestProfileResult, manualCopyLinks, false, value => notices.push(value));
+  const copyFailedProfileLinks = new Function('latestProfileResult', 'manualCopyLinks', 'manualCopyInput',
+    'nextTick', 'latestProfileResultExpanded', 'copyingFailedInputs', 'componentUnmounted', 'ElMessage', 'return ' + functionBody('copyFailedProfileLinks'))(
+    latestProfileResult, manualCopyLinks, manualCopyInput, Vue.nextTick, latestProfileResultExpanded, copyingFailedInputs, false, value => notices.push(value));
   const statusLabels = new Function('return ' + functionBody('profileResultStatusLabels'))();
   const profileResultStatusLabel = new Function('profileResultStatusLabels', 'return ' + functionBody('profileResultStatusLabel'))(statusLabels);
   const profileResultTone = new Function('return ' + functionBody('profileResultTone'))();
   const profileFailureReasonSummary = new Function('PROFILE_FAILURE_REASON_LIMIT', 'return ' + functionBody('profileFailureReasonSummary'))(
     Number(functionBody('PROFILE_FAILURE_REASON_LIMIT')));
   const profileFailuresOpen = Vue.ref(true);
-  Vue.watch(latestProfileResult, () => { profileFailuresOpen.value = true; }, { flush: 'sync' });
+  const canRetryProfilePages = Vue.ref(true);
+  Vue.watch(latestProfileResult, () => {
+    latestProfileResultExpanded.value = true;
+    profileFailuresOpen.value = true;
+    manualCopyLinks.value = '';
+  }, { flush: 'sync' });
   const app = Vue.createApp({
-    setup: () => ({ failedInputLabel, latestProfileResult, manualCopyLinks, copyFailedProfileLinks,
+    setup: () => ({ latestProfileResult, manualCopyLinks, manualCopyInput, copyFailedProfileLinks, copyingFailedInputs,
       profileResultTone, profileFailureReasonSummary, profileFailuresOpen,
-      latestProfileResultExpanded: true, toggleLatestProfileResult() {},
+      latestProfileResultExpanded, toggleLatestProfileResult() {}, canRetryProfilePages,
+      taskActionState: 'idle', resumeFailedProfilePages() {},
       profileResultStatusLabel, profileResultDuration: new Function('return ' + functionBody('profileResultDuration'))(), formatProfileResultTime: new Function('return ' + functionBody('formatProfileResultTime'))() }),
     render: Vue.compile(card.loc.source),
   });
@@ -111,7 +119,8 @@ test('侧栏只预览前五条失败输入，全部和部分明细均可完整�
   let copied;
   const clipboard = {};
   Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: clipboard });
-  for (const [failed, label] of [[7, '全部失败输入'], [9, '已返回的失败输入']]) {
+  const scrollIntoView = t.mock.method(window.Element.prototype, 'scrollIntoView');
+  for (const failed of [7, 9]) {
     latestProfileResult.value = buildProfileTaskResult({
       status: 1, failed: failed - 2, succeeded: 2, failed_items: failedItems.slice(0, 5),
       invalid_url_count: 2, invalid_items: failedItems.slice(5),
@@ -128,23 +137,107 @@ test('侧栏只预览前五条失败输入，全部和部分明细均可完整�
     assert.equal(summary.nextElementSibling.tagName, 'DETAILS');
     assert.equal(container.querySelector('summary').textContent, '查看失败输入（7）');
     assert.equal(container.querySelector('details p:not(.profile-result-reasons)').textContent, '已返回 7 条失败明细，展示前 5 条');
-    const button = container.querySelector('details button');
-    assert.equal(button.textContent.trim(), '复制' + label);
+    const actions = container.querySelector('.profile-result-actions');
+    assert.ok(actions, '重试和复制需要在失败明细外共用一行');
+    const [retry, button] = actions.querySelectorAll('button');
+    assert.deepEqual([retry.textContent.trim(), button.textContent.trim()], ['重试失败输入', '复制失败输入']);
+    assert.equal(retry.disabled, false);
+    assert.equal(button.disabled, false);
+    const details = container.querySelector('details');
+    assert.equal(details.contains(actions), false);
+    profileFailuresOpen.value = false;
+    await Vue.nextTick();
+    assert.equal(details.open, false);
     copied = '';
     notices.length = 0;
-    clipboard.writeText = async text => { copied = text; };
+    let finishCopy;
+    clipboard.writeText = t.mock.fn(text => {
+      copied = text;
+      return new Promise(resolve => { finishCopy = resolve; });
+    });
+    button.click();
     button.click();
     await Vue.nextTick();
+    assert.equal(clipboard.writeText.mock.callCount(), 1, '剪贴板请求未结束时只允许一次复制');
+    assert.equal(button.disabled, true);
+    finishCopy();
+    await new Promise(setImmediate);
+    assert.equal(button.disabled, false);
     assert.equal(copied, inputs.join('\n'));
-    assert.deepEqual(notices, [{ message: '已复制' + label, type: 'success' }]);
+    assert.deepEqual(notices, [{ message: failed === 7 ? '已复制失败输入' : '已复制 7 条失败输入', type: 'success' }]);
     clipboard.writeText = async () => { throw new Error('clipboard unavailable'); };
     button.click();
-    await Promise.resolve();
-    await Vue.nextTick();
-    assert.equal(container.querySelector('label').textContent.trim(), '请手动复制' + label);
-    assert.equal(container.querySelector('textarea').value, copied);
+    await new Promise(setImmediate);
+    assert.equal(button.disabled, false, '自动复制失败后可以再次复制');
+    const input = container.querySelector('textarea');
+    assert.equal(container.querySelector('label').textContent.trim(), '请手动复制失败输入');
+    assert.equal(details.contains(input), false);
+    assert.equal(input.value, copied);
+    assert.ok(window.document.activeElement === input, '手动复制框需要自动聚焦');
+    assert.equal(input.selectionStart, 0);
+    assert.equal(input.selectionEnd, copied.length);
     assert.equal(notices.length, 1);
+    clipboard.writeText = async () => {};
+    button.click();
+    await new Promise(setImmediate);
+    assert.ok(!container.querySelector('textarea'), '再次复制成功后收起手动复制框');
   }
+
+  assert.equal(scrollIntoView.mock.callCount(), 2);
+  for (const call of scrollIntoView.mock.calls) {
+    assert.equal(call.this.className, 'profile-result-copy-fallback');
+    assert.deepEqual(call.arguments, [{ block: 'nearest', inline: 'nearest' }]);
+  }
+  let rejectCopy;
+  clipboard.writeText = () => new Promise((_, reject) => { rejectCopy = reject; });
+  container.querySelector('.profile-result-actions button:last-child').click();
+  latestProfileResultExpanded.value = false;
+  rejectCopy(new Error('clipboard unavailable'));
+  await new Promise(setImmediate);
+  assert.ok(window.document.activeElement !== container.querySelector('textarea'));
+  assert.equal(scrollIntoView.mock.callCount(), 2, '主动收起结果卡片后不再滚动');
+
+  canRetryProfilePages.value = false;
+  const remainingFailures = [
+    { url: 'https://example.test/a?full=1', reason: '请求超时' },
+    { url: 'https://example.test/b', reason: '积分不足' },
+  ];
+  for (const [status, completed, title, reason] of [
+    [3, 0, '已停止', '用户主动停止'],
+    [3, 1, '已停止', '用户主动停止'],
+    [2, 0, '任务中断', '保存作品时连接中断'],
+  ]) {
+    const failedItems = remainingFailures.slice(completed);
+    latestProfileResult.value = buildProfileTaskResult({
+      status, total: 3, processed: 3, succeeded: 1 + completed, failed: failedItems.length,
+      cancel_requested: true, reason, failed_items: failedItems,
+    }, { writtenCount: 4 + completed });
+    await Vue.nextTick();
+    assert.equal(container.querySelector('.profile-result-status').textContent, title);
+    assert.equal(container.querySelector('.profile-result-reason').textContent, reason);
+    assert.equal(container.querySelector('.profile-result-failed-count').textContent, `失败 ${failedItems.length} 条`);
+    assert.deepEqual([...container.querySelectorAll('details li')].map(item => item.textContent),
+      failedItems.map(item => item.url + item.reason));
+    profileFailuresOpen.value = false;
+    await Vue.nextTick();
+    const [retry, copy] = container.querySelectorAll('.profile-result-actions button');
+    assert.equal(retry.disabled, true);
+    assert.equal(copy.disabled, false);
+    copied = '';
+    clipboard.writeText = async text => { copied = text; };
+    copy.click();
+    await new Promise(setImmediate);
+    assert.equal(copied, failedItems.map(item => item.url).join('\n'));
+  }
+
+  latestProfileResult.value = buildProfileTaskResult({ status: 1, succeeded: 1, failed: 1 });
+  await Vue.nextTick();
+  assert.match(container.textContent, /本次任务未返回失败输入明细/);
+  assert.deepEqual([...container.querySelectorAll('.profile-result-actions button')]
+    .map(button => [button.textContent.trim(), button.disabled]), [['重试失败输入', true], ['复制失败输入', true]]);
+  latestProfileResult.value = buildProfileTaskResult({ status: 1, succeeded: 1, failed: 0 });
+  await Vue.nextTick();
+  assert.equal(container.querySelector('.profile-result-actions'), null);
 
   latestProfileResult.value = buildProfileTaskResult({
     status: 1, total: 2, processed: 2, succeeded: 1, failed: 1,
@@ -212,7 +305,7 @@ test('侧栏只预览前五条失败输入，全部和部分明细均可完整�
       items.map(item => item.url + item.reason));
     copied = '';
     clipboard.writeText = async text => { copied = text; };
-    container.querySelector('details button').click();
+    container.querySelector('.profile-result-actions button:last-child').click();
     await Vue.nextTick();
     assert.equal(copied, items.map(item => item.url).join('\n'));
   }

@@ -39,6 +39,9 @@ function pageHandler(page, name, bindings) {
       }
     }
   }
+  if (page === 'ProfileFetch' && name === 'saveTask') {
+    bindings.syncMainFormToTaskForm = pageHandler(page, 'syncMainFormToTaskForm', bindings);
+  }
   if (name !== 'cloneFieldMappings' && !bindings.cloneFieldMappings && declarations.some(node => node.id.name === 'cloneFieldMappings')) {
     bindings.cloneFieldMappings = pageHandler(page, 'cloneFieldMappings', bindings);
   }

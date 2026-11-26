@@ -41,11 +41,18 @@
 
 ## 本地回归
 
-使用支持现有测试入口的 Node 运行：
+在公开仓库根目录可运行以下回归。
 
 ```sh
 node --test tests/mediaFeishuRoutes.test.mjs tests/localTaskFeedback.test.mjs tests/requestAuth.test.mjs
-node --test --test-name-pattern='VideoCopySummary|视频文案' tests/rowTaskFeedback.test.mjs tests/targetFieldOwnership.test.mjs tests/fieldWriteRules.test.mjs tests/configLockInteraction.test.mjs tests/tableConfigSaveSnapshot.test.mjs
+node --test --test-name-pattern='VideoCopySummary|视频文案' tests/rowTaskFeedback.test.mjs
+```
+
+补充回归从完整内部仓库根目录执行。
+
+```sh
+cd social-data-bridge
+node --test --test-name-pattern='VideoCopySummary|视频文案' tests/targetFieldOwnership.test.mjs tests/fieldWriteRules.test.mjs tests/configLockInteraction.test.mjs tests/tableConfigSaveSnapshot.test.mjs
 ```
 
 路由回归执行真实请求层并替换 HTTP 适配器，覆盖三个环境、任务来源快照、旧 ID/旧对象、空主机/空前缀、
