@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { loadRequestModule } from './helpers/requestService.mjs';
+import { getPendingWriteLimit } from '../src/utils/taskWriteState.mjs';
 
 function handler(name, bindings) {
   const source = parse(fs.readFileSync(new URL('../src/components/CommentFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
@@ -63,6 +64,7 @@ test('评论只在停止确认后请求总数，旧接口没有总数也能返�
   const bindings = { ...loadRequestModule(), props: { api_key: 'test' },
     feishuRequest: async options => { config = options; return response; } };
   bindings.commentTaskApiPath = handler('commentTaskApiPath', bindings);
+  bindings.getCommentResultLimit = handler('getCommentResultLimit', { getPendingWriteLimit, RESULT_BATCH_SIZE: 20 });
   const read = new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
   const task = { taskId: 'task', writtenCount: 100 };
   assert.deepEqual(await read(task), response.data);
@@ -73,4 +75,9 @@ test('评论只在停止确认后请求总数，旧接口没有总数也能返�
   task.latestStatus = { status: 3 };
   assert.deepEqual(await read(task), response.data);
   assert.equal(config.data.include_count, true);
+  const append = { ...task, writeMode: 'append', pendingCommentWrite: true, pendingWriteCount: 7,
+    appendState: { pendingCount: 7, fieldIds: ['cid'], knownRecordIds: ['historical'] } };
+  await read(append);
+  assert.equal(config.data.limit, 7);
+  await assert.rejects(read({ ...append, pendingWriteCount: undefined }), /无法确认原写入批次范围/);
 });

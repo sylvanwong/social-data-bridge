@@ -1,5 +1,6 @@
 <script setup>
 import TaskExecutionResult from './TaskExecutionResult.vue';
+import { useAppendWriteRecovery } from '../composables/useAppendWriteRecovery.mjs';
 import { useTaskExecutionResult } from '../composables/useTaskExecutionResult.mjs';
 import { nextTableName } from '../utils/tableNames.mjs';
 import { resolveWritableField } from "../utils/tableFields.js";
@@ -73,6 +74,7 @@ const isSubmitting = ref(false);
 const taskFeedback = useTaskFeedback();
 const executionResult = useTaskExecutionResult({ inputUnit: '次请求', outputUnit: '热榜数据' });
 const latestExecutionResult = executionResult.result;
+const { appendWithRecovery, appendPaused, appendRetrying, resumeAppend, endAppend } = useAppendWriteRecovery(taskFeedback, executionResult);
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const FIELD_SELECTION_STORAGE_KEY = 'hot_list_selected_fields_v1';
 const selectedFieldKeys = ref([]);
@@ -483,9 +485,7 @@ const writeDataToTable = async (table, list, isExistingTable = false, activeFiel
     records.push(record);
     showToast(`正在写入第 ${records.length}/${list.length} 条...`, true);
   }
-  try { await table.addRecords(records); }
-  catch (error) { error.writeUncertain = true; throw error; }
-  return records.length;
+  return appendWithRecovery(table, records, { notes: [`获取 ${list.length} 条热榜数据`] });
 };
 
 const submit = async (targetTableId = "", activeFieldMapping = getActiveFieldMapping()) => {
@@ -541,13 +541,20 @@ const submit = async (targetTableId = "", activeFieldMapping = getActiveFieldMap
     }
 
     const table = await bitable.base.getTableById(currentTableId);
-    const writtenCount = await writeDataToTable(table, list, Boolean(targetTableId), activeFieldMapping);
+    const { writtenCount, ended } = await writeDataToTable(table, list, Boolean(targetTableId), activeFieldMapping);
 
+    if (componentUnmounted) return;
     executionResult.written(writtenCount);
+    if (ended) {
+      executionResult.finish({ status: 'stopped' });
+      showToast('已结束本次写入', false, { stopped: true });
+      return;
+    }
     executionResult.finish({ notes: [`获取 ${list.length} 条热榜数据`] });
     showToast(`处理完成：成功 ${list.length} 条，失败 0 条`, false);
 
   } catch (error) {
+    if (componentUnmounted) return;
     if (fetchedCount == null) executionResult.failure(null, error);
     executionResult.finish({ status: error.writeUncertain ? "paused" : "interrupted", reason: error.message, notes: fetchedCount == null ? [] : [`获取 ${fetchedCount} 条热榜数据`, ...(error.writeUncertain ? ["写入结果待核对，请先检查目标表，避免重复执行。"] : [])] });
     console.error("提交热榜获取失败:", error);
@@ -558,7 +565,9 @@ const submit = async (targetTableId = "", activeFieldMapping = getActiveFieldMap
 };
 
 const commit = async () => {
-  if (!fieldSelectionReady.value || loading.value || isSubmitting.value || noticeRequiresReopen.value) return;
+  if (noticeRequiresReopen.value) return;
+  if (appendPaused.value) return resumeAppend();
+  if (!fieldSelectionReady.value || loading.value || isSubmitting.value) return;
   if (!props.api_key) return showErrorMsg("请输入 API Key");
   if (!formData.value.platform) return showErrorMsg("请选择平台");
   const activeFieldMapping = getActiveFieldMapping();
@@ -697,10 +706,11 @@ watch(selectedFieldKeys, (keys) => {
       <el-button
         color="#a8071a"
         class="commit-btn"
-        :loading="!fieldSelectionReady || loading || isSubmitting"
-        :disabled="!fieldSelectionReady || !tableConfigReady || loading || isSubmitting || noticeRequiresReopen"
+        :loading="!appendPaused && (!fieldSelectionReady || loading || isSubmitting)"
+        :disabled="noticeRequiresReopen || (!appendPaused && (!fieldSelectionReady || !tableConfigReady || loading || isSubmitting))"
         @click="commit"
-      >{{ loading ? '执行中…' : (!fieldSelectionReady || isSubmitting) ? '准备中…' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
+      >{{ appendPaused ? '继续写入' : appendRetrying ? '正在核对写入…' : loading ? '执行中…' : (!fieldSelectionReady || isSubmitting) ? '准备中…' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
+      <el-button v-if="appendPaused" class="append-end-write-btn" @click="endAppend">结束本次写入</el-button>
     </div>
 
     <TaskExecutionResult :result="latestExecutionResult" />

@@ -27,11 +27,14 @@ function fixture(env, platform, reply) {
     formData: { value: { platform } }, loading: { value: false },
     getActiveFieldMapping: () => [{ key: 'rank' }, { key: 'keyword' }], showErrorMsg: message => assert.fail(message),
     showToast: (...args) => notices.push(args), taskFeedback: { fail: error => errors.push(error) },
-    console: { error() {} },
+    componentUnmounted: false, console: { error() {} },
     createSequentialTable: async name => { created.push(name); return { tableId: 'new-table' }; },
     setupTableFields: async () => {},
     bitable: { base: { getTableById: async id => ({ id }) }, ui: { switchToTable: async () => {} } },
-    writeDataToTable: async (table, items, existing) => writes.push({ tableId: table.id, items, existing }),
+    writeDataToTable: async (table, items, existing) => {
+      writes.push({ tableId: table.id, items, existing });
+      return { writtenCount: items.length, ended: false };
+    },
   };
   const handler = name => {
     const node = declarations.find(item => item.id.name === name).init;

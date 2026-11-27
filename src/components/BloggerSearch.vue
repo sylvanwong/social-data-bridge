@@ -95,15 +95,23 @@ const restoreTask = async (task, progressText = '正在恢复未完成的作者�
 };
 const resumeSavedTask = async (endMissingTarget = false, expectedTask) => {
   if (requiresReopen.value || componentUnmounted || loading.value) return;
+  if (endMissingTarget === 'paused') {
+    if (!feedback.endPausedAction.value) return;
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, requiresReopen, undefined, undefined, feedback.endPausedAction);
+  }
   if (endMissingTarget && feedback.missingTargetAction?.value) {
     return feedback.endMissingTargetTask(loading, hasRecoverableTask, requiresReopen, task => resumeSavedTask(false, task));
   }
   loading.value = true;
   latestExecutionResult.value = null;
+  let fallbackEndAction = feedback.endPausedAction?.value;
   feedback.begin('正在检查未完成任务…');
   try {
     await nextTick();
-    const resumed = await searchTask.resume(task => restoreTask(task, undefined, true), expectedTask);
+    const resumed = await searchTask.resume(task => {
+      fallbackEndAction = null;
+      return restoreTask(task, undefined, true);
+    }, expectedTask, () => { hasRecoverableTask.value = false; });
     if (!resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -113,7 +121,7 @@ const resumeSavedTask = async (endMissingTarget = false, expectedTask) => {
     hasRecoverableTask.value = true;
     requiresReopen.value = !!error.requiresReopen;
     loading.value = false;
-    feedback.fail(error, { persist: true, requiresReopen: requiresReopen.value });
+    feedback.fail(error, { persist: true, requiresReopen: requiresReopen.value, fallbackEndAction });
   }
 };
 
@@ -403,8 +411,12 @@ const submit = async () => {
       if (!loaded) throw tableFieldsError || new Error('读取目标表字段失败，请稍后重试');
     }
     if (form.value.radio === 2 && mappingDraft.value.some(item => !item.source_key || !item.target_field_id)) throw new Error('请完成字段映射，或删除未完成的映射');
+    const formData = JSON.parse(JSON.stringify(form.value));
+    if (new TextEncoder().encode(JSON.stringify(formData.keyword)).length > 80 * 1024) {
+      formData.keyword = keywords.join('\n');
+    }
     const outputSnapshot = {
-      formData: JSON.parse(JSON.stringify(form.value)),
+      formData,
       targetTableId: form.value.radio === 2 ? form.value.table_id : '',
       selectedFieldKeys: [...selectedFieldKeys.value], writeMode: form.value.writeMode,
       fieldMappings: form.value.radio === 2 ? mappingDraft.value.map(item => ({ ...item })) : [],
@@ -625,7 +637,11 @@ onUnmounted(() => {
           :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
           :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || taskActionState === 'reopen'"
           @click="handleTaskAction"
-        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : '立即执行' }}</el-button>
+        >{{ feedback.endingMissingTarget?.value ? '正在结束任务…' : taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : '立即执行' }}</el-button>
+        <template v-if="taskActionState === 'recoverable' && feedback.endPausedAction?.value">
+          <el-button class="append-end-write-btn" @click="resumeSavedTask('paused')">结束本次任务</el-button>
+          <p class="sub-hint">已写入的数据会保留，未写入的结果将无法继续写入。</p>
+        </template>
     </div>
 
     <TaskExecutionResult :result="latestExecutionResult" />

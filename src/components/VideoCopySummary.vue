@@ -1,5 +1,6 @@
 <script setup>
 import TaskExecutionResult from './TaskExecutionResult.vue';
+import { useAppendWriteRecovery } from '../composables/useAppendWriteRecovery.mjs';
 import { useTaskExecutionResult } from '../composables/useTaskExecutionResult.mjs';
 import { useToolOutputConfig } from '../composables/useToolOutputConfig.js';
 import { parseManualUrls } from '../utils/sourceLinks.mjs';
@@ -62,6 +63,7 @@ const stopRequested = ref(false);
 const taskFeedback = useTaskFeedback();
 const executionResult = useTaskExecutionResult({ inputUnit: '条', outputUnit: '视频文案' });
 const latestExecutionResult = executionResult.result;
+const { appendWithRecovery, appendPaused, appendRetrying, resumeAppend, endAppend } = useAppendWriteRecovery(taskFeedback, executionResult);
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
@@ -445,11 +447,7 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
     }
   }
 
-  if (records.length > 0) {
-    try { assertMounted(await table.addRecords(records)); }
-    catch (error) { error.writeUncertain = true; throw error; }
-  }
-  return records.length;
+  return records.length ? appendWithRecovery(table, records) : { writtenCount: 0, ended: false };
 };
 
 const extractVideoLink = (value) => {
@@ -584,7 +582,9 @@ const fetchSummaryByEntries = async (recordEntries, { activeFieldConfigs = [], o
       const item = { ...result, __recordId: recordId };
       if (onSuccess) {
         showToast(`正在写入第 ${i + 1}/${recordEntries.length} 条结果...`, true);
-        executionResult.written(assertMounted(await onSuccess(item, i)));
+        const written = assertMounted(await onSuccess(item, i));
+        if (written === null) break;
+        executionResult.written(written);
       }
       successCount++;
       executionResult.success();
@@ -600,6 +600,15 @@ const fetchSummaryByEntries = async (recordEntries, { activeFieldConfigs = [], o
   }
 
   return { successCount, failCount, stopped: stopRequested.value };
+};
+
+const appendVideoResult = async (tableId, item, activeFieldConfigs) => {
+  const { writtenCount, ended } = assertMounted(await appendRecordsToTable(tableId, [item], activeFieldConfigs));
+  if (ended) {
+    stopRequested.value = true;
+    if (!writtenCount) return null;
+  }
+  return writtenCount;
 };
 
 const requestStop = () => {
@@ -693,7 +702,7 @@ const handleTableModeSubmit = async () => {
 
     const { successCount, failCount, stopped } = assertMounted(await fetchSummaryByEntries(recordEntries, {
       activeFieldConfigs,
-      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
+      onSuccess: (item) => appendVideoResult(targetTableId, item, activeFieldConfigs),
     }));
 
     finishToast(
@@ -758,7 +767,7 @@ const handleManualModeSubmit = async () => {
     const recordEntries = urls.map((url) => ({ url }));
     const { successCount, failCount, stopped } = assertMounted(await fetchSummaryByEntries(recordEntries, {
       activeFieldConfigs,
-      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs),
+      onSuccess: (item) => appendVideoResult(targetTableId, item, activeFieldConfigs),
     }));
 
     finishToast(
@@ -790,7 +799,9 @@ const handleSubmit = async () => {
 };
 
 const handleTaskAction = () => {
-  if (stopRequested.value || noticeRequiresReopen.value) return;
+  if (noticeRequiresReopen.value) return;
+  if (appendPaused.value) return resumeAppend();
+  if (appendRetrying.value || stopRequested.value) return;
   if (loading.value) {
     requestStop();
     return;
@@ -1056,11 +1067,12 @@ watch(() => formData.value.targetType, changeTargetType);
 
       <el-button
         class="commit-btn"
-        :class="{ 'is-running': loading }"
-        :loading="stopRequested"
-        :disabled="stopRequested || noticeRequiresReopen || (!loading && (!fieldSelectionReady || (formData.mode === 'table' && sourceFieldLoading)))"
+        :class="{ 'is-running': loading && !appendPaused && !appendRetrying }"
+        :loading="!appendPaused && (stopRequested || appendRetrying)"
+        :disabled="noticeRequiresReopen || (!appendPaused && (stopRequested || appendRetrying || (!loading && (!fieldSelectionReady || (formData.mode === 'table' && sourceFieldLoading)))))"
         @click="handleTaskAction"
-      >{{ stopRequested ? '正在停止…' : loading ? '停止任务' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
+      >{{ appendPaused ? '继续写入' : appendRetrying ? '正在核对写入…' : stopRequested ? '正在停止…' : loading ? '停止任务' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
+      <el-button v-if="appendPaused" class="append-end-write-btn" @click="endAppend">结束本次写入</el-button>
       <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
     </div>
 

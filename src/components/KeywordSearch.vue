@@ -1,3 +1,9 @@
+<script>
+// 返回首页会卸载组件，重进后仍需等待已经发出的历史写入。
+let keywordHistorySaveVersion = 0;
+let keywordHistoryPublish = Promise.resolve();
+</script>
+
 <script setup>
 import TaskExecutionResult from './TaskExecutionResult.vue';
 import { buildTaskExecutionResult } from '../utils/taskExecutionResult.mjs';
@@ -16,6 +22,70 @@ import { useIncrementalTask } from '@/composables/useIncrementalTask'
 const latestExecutionResult = ref(null);
 
 const TASK_TOAST_SUFFIX = '请勿关闭插件，关闭将中断任务';
+const KEYWORD_HISTORY_KEY = 'search_keyword';
+const KEYWORD_HISTORY_MAX_BYTES = 80 * 1024;
+const KEYWORD_HISTORY_PART_LENGTH = 26000;
+
+const keywordHistoryParts = saved => typeof saved?.prefix === 'string'
+  && saved.prefix.startsWith(`${KEYWORD_HISTORY_KEY}:part:`)
+  && Number.isSafeInteger(saved.count) && saved.count > 0
+  ? Array.from({ length: saved.count }, (_, index) => `${saved.prefix}:${index}`) : [];
+
+const readKeywordHistory = async (saved, canReread = true) => {
+  let keyword = typeof saved === 'string' ? saved : saved?.keyword;
+  const keys = keywordHistoryParts(saved);
+  if (keys.length) {
+    const parts = await Promise.all(keys.map(key => bitable.bridge.getData(key)));
+    if (parts.some(part => typeof part?.data !== 'string')) {
+      if (!canReread) return null;
+      // 新历史保存成功后可能刚清理了旧分块。
+      const latest = await bitable.bridge.getData(KEYWORD_HISTORY_KEY);
+      return latest?.prefix === saved.prefix ? null : readKeywordHistory(latest, false);
+    }
+    keyword = JSON.parse(parts.map(part => part.data).join(''));
+  }
+  const platform = typeof saved?.platform === 'string' ? saved.platform : await bitable.bridge.getData('search_platform');
+  return { platform, keyword: typeof keyword === 'string' ? keyword : '' };
+};
+
+const saveKeywordHistory = async (platform, keyword) => {
+  const version = ++keywordHistorySaveVersion;
+  const history = { platform, keyword };
+  const serialized = JSON.stringify(keyword);
+  const next = new TextEncoder().encode(JSON.stringify(history)).length <= KEYWORD_HISTORY_MAX_BYTES ? history : {
+    platform,
+    prefix: `${KEYWORD_HISTORY_KEY}:part:${crypto.randomUUID()}`,
+    count: Math.ceil(serialized.length / KEYWORD_HISTORY_PART_LENGTH),
+  };
+  const clearParts = keys => Promise.allSettled(keys.map(async key => bitable.bridge.setData(key, {})));
+  const staged = [];
+  let publishing = false;
+  try {
+    for (const [index, key] of keywordHistoryParts(next).entries()) {
+      staged.push(key);
+      const start = index * KEYWORD_HISTORY_PART_LENGTH;
+      const saved = await bitable.bridge.setData(key, { data: serialized.slice(start, start + KEYWORD_HISTORY_PART_LENGTH) });
+      if (version !== keywordHistorySaveVersion) return;
+      if (saved === false) throw new Error('飞书未保存历史关键词分块');
+    }
+    const publish = keywordHistoryPublish.then(async () => {
+      if (version !== keywordHistorySaveVersion) return;
+      const previous = await bitable.bridge.getData(KEYWORD_HISTORY_KEY);
+      if (version !== keywordHistorySaveVersion) return;
+      // 发布响应丢失时，保留可能已被引用的分块。
+      publishing = true;
+      if (await bitable.bridge.setData(KEYWORD_HISTORY_KEY, next) === false) {
+        publishing = false;
+        throw new Error('飞书未保存历史关键词');
+      }
+      void clearParts(keywordHistoryParts(previous));
+    });
+    keywordHistoryPublish = publish.catch(() => {});
+    await publish;
+  } finally {
+    if (!publishing && staged.length) void clearParts(staged);
+  }
+};
 
 const props = defineProps({
   api_key: String,
@@ -376,25 +446,36 @@ const restoreTask = async (task, progressText = '正在恢复未完成的数据�
 };
 const resumeSavedTask = async (endMissingTarget = false, expectedTask) => {
   if (requiresReopen.value || componentUnmounted || loading.value) return;
+  if (endMissingTarget === 'paused') {
+    if (!feedback.endPausedAction.value) return;
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, requiresReopen, undefined, undefined, feedback.endPausedAction);
+  }
   if (endMissingTarget && feedback.missingTargetAction?.value) {
     return feedback.endMissingTargetTask(loading, hasRecoverableTask, requiresReopen, task => resumeSavedTask(false, task));
   }
   loading.value = true;
   latestExecutionResult.value = null;
+  let fallbackEndAction = feedback.endPausedAction?.value;
   feedback.begin('正在检查未完成任务…');
   try {
     await nextTick();
-    const resumed = await keywordStreamTask.resume(task => restoreTask(task, undefined, true), expectedTask);
+    const resumed = await keywordStreamTask.resume(task => {
+      fallbackEndAction = null;
+      return restoreTask(task, undefined, true);
+    }, expectedTask, () => { hasRecoverableTask.value = false; });
     if (!resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
-      else hideToast();
+      else {
+        hideToast();
+        return false;
+      }
     }
   } catch (error) {
     hasRecoverableTask.value = true;
     requiresReopen.value = !!error.requiresReopen;
     loading.value = false;
-    feedback.fail(error, { persist: true, requiresReopen: requiresReopen.value });
+    feedback.fail(error, { persist: true, requiresReopen: requiresReopen.value, fallbackEndAction });
   }
 };
 
@@ -790,27 +871,29 @@ watch(
 
 onMounted(async () => {
   isSubmitting.value = true;
+  formData1.value.social_type = props.social_type_options[0]?.value || "";
+  let shouldLoadHistory = false;
   try {
-    const search_platform = await bitable.bridge.getData("search_platform");
-    const search_keyword = await bitable.bridge.getData("search_keyword");
-    if (search_keyword && typeof search_keyword == "string") {
-      formData1.value.keyword = search_keyword;
-    }
-    if (search_platform && typeof search_platform == "string" && props.social_type_options.some(opt => opt.value === search_platform)) {
-      formData1.value.social_type = search_platform;
-    } else {
-      formData1.value.social_type = props.social_type_options[0]?.value || "";
-    }
     await loadSelectedFieldKeys();
     await loadTableOutputConfigs();
     fieldSelectionReady.value = true;
-    await resumeSavedTask();
+    shouldLoadHistory = (await resumeSavedTask()) === false;
   } catch (error) {
     hasRecoverableTask.value = true;
     loading.value = false;
     requiresReopen.value = !!error.requiresReopen;
     feedback.fail(error, { persist: true });
   } finally { isSubmitting.value = false; }
+
+  if (!shouldLoadHistory || componentUnmounted) return;
+  const initialForm = JSON.stringify(formData1.value);
+  const history = await bitable.bridge.getData(KEYWORD_HISTORY_KEY).then(readKeywordHistory).catch(() => null);
+  if (!history || componentUnmounted || taskActionState.value !== 'idle'
+    || JSON.stringify(formData1.value) !== initialForm) return;
+  if (props.social_type_options.some(opt => opt.value === history.platform)) {
+    formData1.value.social_type = history.platform;
+  }
+  if (history.keyword) formData1.value.keyword = history.keyword;
 });
 
 onUnmounted(() => {
@@ -896,8 +979,8 @@ const commit = async () => {
     }
 
     await getSearchData("");
-    bitable.bridge.setData("search_platform", formData1.value.social_type);
-    bitable.bridge.setData("search_keyword", formData1.value.keyword);
+    if (componentUnmounted) return;
+    void saveKeywordHistory(social_type, keyword).catch(() => console.warn('保存关键词搜索历史失败'));
   } catch (error) {
     loading.value = false;
     requiresReopen.value = !!error.requiresReopen;
@@ -1295,7 +1378,11 @@ watch(selectedFieldKeys, (keys) => {
         :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
         :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || taskActionState === 'reopen' || (taskActionState === 'idle' && formData1.radio === 2 && (tableConfigApplying || !!tableConfigLoadError))"
         @click="handleTaskAction"
-      >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : '立即执行' }}</el-button>
+      >{{ feedback.endingMissingTarget?.value ? '正在结束任务…' : taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : '立即执行' }}</el-button>
+        <template v-if="taskActionState === 'recoverable' && feedback.endPausedAction?.value">
+          <el-button class="append-end-write-btn" @click="resumeSavedTask('paused')">结束本次任务</el-button>
+          <p class="sub-hint">已写入的数据会保留，未写入的结果将无法继续写入。</p>
+        </template>
     </div>
 
     <TaskExecutionResult :result="latestExecutionResult" />

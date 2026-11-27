@@ -75,7 +75,7 @@ test('热榜获取成功但写入超时，保留获取条数且不虚报写入�
     executionResult, latestExecutionResult: executionResult.result, props: { api_key: 'test' },
     formData: { value: { platform: 'xhs' } }, loading: {}, getActiveFieldMapping: () => [{}], showErrorMsg() {}, showToast() {},
     feishuRequest: async () => ({ data: { sta: 0, data: ['a', 'b'] } }), buildFeishuApiPath: x => x, extractList: x => x,
-    bitable: { base: { getTableById: async () => ({}) } },
+    componentUnmounted: false, bitable: { base: { getTableById: async () => ({}) } },
     writeDataToTable: async () => { throw Object.assign(new Error('写入超时'), { writeUncertain: true }); }, taskFeedback: { fail() {} },
   });
   await run('existing', [{}]);

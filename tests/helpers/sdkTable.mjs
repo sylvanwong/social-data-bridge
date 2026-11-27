@@ -1,7 +1,7 @@
 // 真实 SDK 负责字段缓存及单元格转换；只替换飞书宿主读取和表格存储。
-export async function installSDKCells(table, bitable) {
+export async function installSDKCells(table, bitable, batchUploadFile = async files => files.map((_, index) => `file-${index}`)) {
   const base = Object.create(bitable.base);
-  Object.defineProperties(base, { isTableExist: { value: async () => true }, tableMapCache: { value: new Map() }, batchUploadFile: { value: async files => files.map((_, index) => `file-${index}`) } });
+  Object.defineProperties(base, { isTableExist: { value: async () => true }, tableMapCache: { value: new Map() }, batchUploadFile: { value: batchUploadFile } });
   const sdkTable = await base.getTableById(table.id);
   Object.defineProperties(sdkTable, {
     isFieldExist: { value: async id => table.fields.some(field => field.id === id) },
@@ -16,7 +16,7 @@ export async function installSDKCells(table, bitable) {
       createCell: async value => {
         const cell = await cached.createCell(value);
         const raw = await cell.getValue();
-        return { fieldId: id, value: raw, getFieldId: () => id, getValue: async () => raw };
+        return { editable: cell.editable, fieldId: id, value: raw, getFieldId: () => id, getValue: async () => raw };
       },
     };
   };
@@ -31,7 +31,11 @@ export async function installSDKCells(table, bitable) {
     }
   };
   const add = table.addRecords, update = table.setRecords;
-  table.addRecords = async rows => { rows.forEach(cells => check(Object.fromEntries(cells.map(cell => [cell.fieldId, cell.value])))); return add(rows); };
+  table.addRecords = async rows => {
+    rows.forEach(row => check(Array.isArray(row)
+      ? Object.fromEntries(row.map(cell => [cell.fieldId, cell.value])) : row.fields));
+    return add(rows);
+  };
   table.setRecords = async rows => { rows.forEach(row => check(row.fields)); return update(rows); };
   table.setRecord = async (id, { fields }) => { check(fields); Object.assign(table.records.find(row => row.recordId === id).fields, fields); };
 }

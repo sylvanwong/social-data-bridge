@@ -13,13 +13,14 @@ export function useTaskFeedback({ executionResult } = {}) {
   const toastLoading = computed(() => toastType.value === 'loading');
   const taskNotice = ref('');
   const missingTargetAction = ref(null);
+  const endPausedAction = ref(null);
   const endingMissingTarget = ref(false);
   let disposed = false;
   const noticeRequiresReopen = ref(false);
   let timer = null;
 
   const cancelTimer = () => { if (timer !== null) clearTimeout(timer); timer = null; };
-  const clearNotice = () => { missingTargetAction.value = null; taskNotice.value = ''; noticeRequiresReopen.value = false; };
+  const clearNotice = () => { missingTargetAction.value = null; endPausedAction.value = null; taskNotice.value = ''; noticeRequiresReopen.value = false; };
   const hide = () => { cancelTimer(); toastVisible.value = false; };
   const progress = (text, { stopping = false } = {}) => {
     cancelTimer();
@@ -42,10 +43,13 @@ export function useTaskFeedback({ executionResult } = {}) {
       ? 8000 : kind === 'success' || (stopped && !failCount) ? 3000 : 5000;
     timer = setTimeout(() => { timer = null; toastVisible.value = false; }, duration);
   };
-  const fail = (error, { persist = false, requiresReopen = !!error?.requiresReopen } = {}) => {
+  const fail = (error, { persist = false, requiresReopen = !!error?.requiresReopen, fallbackEndAction = null } = {}) => {
     const text = errorText(error);
     finish(text, { type: 'error' });
     missingTargetAction.value = error?.endMissingTarget || null;
+    if (!requiresReopen && !error?.cause?.requiresReopen && !error?.taskEnded && !missingTargetAction.value) {
+      endPausedAction.value = error?.endPausedTask || fallbackEndAction;
+    }
     if (persist || requiresReopen || error?.stopPolling) {
       taskNotice.value = text;
       noticeRequiresReopen.value = requiresReopen;
@@ -56,8 +60,8 @@ export function useTaskFeedback({ executionResult } = {}) {
     noticeRequiresReopen.value = false;
   };
 
-  const endMissingTargetTask = async (loading, recoverable, requiresReopen, onRestored, onEnded) => {
-    const end = missingTargetAction.value;
+  const endMissingTargetTask = async (loading, recoverable, requiresReopen, onRestored, onEnded, action = missingTargetAction) => {
+    const end = action.value;
     if (!end || loading.value) return;
     const pausedResult = executionResult?.value?.status === 'paused' ? executionResult.value : null;
     const pausedReason = pausedResult?.reason;
@@ -82,8 +86,8 @@ export function useTaskFeedback({ executionResult } = {}) {
       if (disposed) return;
       if (requiresReopen) requiresReopen.value = !!error.requiresReopen;
       fail(error, { persist: true });
-      if (!missingTargetAction.value) {
-        missingTargetAction.value = end;
+      if (!action.value && (action === missingTargetAction || !error.requiresReopen)) {
+        action.value = end;
         if (end.notice) taskNotice.value = `${taskNotice.value} ${end.notice}`;
       }
       if (pausedResult && executionResult.value === pausedResult) pausedResult.reason = taskNotice.value;
@@ -97,5 +101,5 @@ export function useTaskFeedback({ executionResult } = {}) {
   };
 
   onUnmounted(() => { disposed = true; hide(); clearNotice(); });
-  return { missingTargetAction, endingMissingTarget, endMissingTargetTask, toastVisible, toastText, toastType, toastLoading, taskNotice, noticeRequiresReopen, begin, progress, finish, fail, recordFailure, hide, clearNotice };
+  return { endPausedAction, missingTargetAction, endingMissingTarget, endMissingTargetTask, toastVisible, toastText, toastType, toastLoading, taskNotice, noticeRequiresReopen, begin, progress, finish, fail, recordFailure, hide, clearNotice };
 }

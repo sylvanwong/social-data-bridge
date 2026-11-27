@@ -37,11 +37,11 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
     'activeKeywordTaskId', 'activeProfileTaskId', 'activeCommentTaskId', 'activeSeriesTaskId',
     'hasRecoverableTask', 'requiresReopen', 'recoveryRequiresReopen', 'componentUnmounted',
     'pausedWriteCount', 'activeStreamTask', 'activeSeriesTask', 'feedback', 'latestProfileResult', 'profileRetry', 'storageKey', 'STREAM_TASK_STORAGE_KEY',
-    'TASK_TOAST_SUFFIX', 'STREAM_RESULT_LIMIT', 'listPageSize', 'normalizeCommentId',
+    'TASK_TOAST_SUFFIX', 'STREAM_RESULT_LIMIT', 'RESULT_BATCH_SIZE', 'listPageSize', 'normalizeCommentId',
     'showToast', 'hideToast', 'showCompletionToast', 'finishToast', 'showErrorMsg',
     'showFieldProgress', 'showProfileFieldProgress', 'getStreamProgressText',
     'getStoppingText', 'stoppedCommentProgress', 'unwrapApiData', 'auth',
-    'getProfileTaskStatus', 'readAvailablePosts', 'getSeriesTask', 'getSeriesResults',
+    'getProfileTaskStatus', 'readAvailablePosts', 'getSeriesTask', 'getSeriesResults', 'getCommentResultLimit',
     'profileTaskApiPath', 'seriesTaskApiPath', 'keywordTaskApiPath', 'commentTaskApiPath', 'bloggerTaskApiPath',
     'restoreTask', 'restoreProfileTask', 'restoreSeriesTask', 'taskActionState', 'handleTaskAction', engineName, cancelName, resumeName,
   ]);

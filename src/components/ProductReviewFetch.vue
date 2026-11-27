@@ -678,6 +678,10 @@ onUnmounted(() => {
         <el-button v-if="endingMissingTarget" class="commit-btn" loading disabled>正在结束任务…</el-button>
         <el-button v-else-if="loading && !clearing" class="commit-btn" :loading="isCancelling" :disabled="isCancelling" @click="handleCancel">{{ isCancelling ? '正在停止…' : '停止任务' }}</el-button>
         <el-button v-else class="commit-btn" :loading="loading || !initialReady" :disabled="loading || !initialReady || noticeRequiresReopen" @click="handleSubmit">{{ hasRecoverableTask ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : !initialReady ? '准备中…' : '立即执行' }}</el-button>
+        <template v-if="initialReady && !loading && !isCancelling && !clearing && !noticeRequiresReopen && hasRecoverableTask && feedback.endPausedAction?.value">
+          <el-button class="append-end-write-btn" @click="resumeTask('paused')">结束本次任务</el-button>
+          <p class="sub-hint">已写入的数据会保留，未写入的结果将无法继续写入。</p>
+        </template>
       </div>
     </div>
     <TaskExecutionResult :result="latestExecutionResult" />
@@ -757,4 +761,5 @@ onUnmounted(() => {
 .mapping-arrow { color: #86909c; text-align: center; }
 .mapping-actions { display: flex; margin-top: var(--app-space-control); }
 .action-group { display: flex; flex-direction: column; gap: var(--app-space-control); margin-top: var(--app-space-group); }
+.action-group > .el-button.append-end-write-btn { margin-top: 0; }
 </style>

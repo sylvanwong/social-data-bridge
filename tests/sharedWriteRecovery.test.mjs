@@ -4,15 +4,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { parse } from '@babel/parser';
+import { matchWrittenAppendRows, readTableRecords } from '../src/utils/taskWriteState.mjs';
 
-function fixture({ mapped = false, loseResponse = true, fallback = false, fallbackColumn = false } = {}) {
+function fixture({ mapped = false, loseResponse = true, fallback = false, fallbackColumn = false, singleRecordBatches = true } = {}) {
   const source = fs.readFileSync(new URL('../src/composables/useSocialData.js', import.meta.url), 'utf8');
   let callback;
   const keyDeclarations = [];
   function visit(node) {
     if (!node || typeof node !== 'object') return;
     if (node.type === 'VariableDeclarator' && node.id.name === 'createAndWriteData') callback = node.init;
-    if (node.type === 'VariableDeclarator' && ['normalizeUniqueKeyPart', 'buildWorkUniqueKey', 'readTableRecords'].includes(node.id.name)) {
+    if (node.type === 'VariableDeclarator' && ['normalizeUniqueKeyPart', 'buildWorkUniqueKey'].includes(node.id.name)) {
       keyDeclarations.push(`const ${source.slice(node.start, node.end)};`);
     }
     for (const value of Object.values(node)) {
@@ -21,10 +22,10 @@ function fixture({ mapped = false, loseResponse = true, fallback = false, fallba
     }
   }
   visit(parse(source, { sourceType: 'module' }));
-  const { buildWorkUniqueKey, readTableRecords } = new Function(`${keyDeclarations.join('\n')} return { buildWorkUniqueKey, readTableRecords };`)();
+  const buildWorkUniqueKey = new Function(`${keyDeclarations.join('\n')} return buildWorkUniqueKey;`)();
   const config = { key: 'user_id', name: '作者ID', type: 'text' };
   const fallbackConfig = { key: 'identity_key', name: '作者标识', type: 'text' };
-  const rows = [], events = [];
+  const rows = [], events = [], reads = [];
   const makeField = id => ({ id, getType: async () => 'text', createCell: async value => ({ fieldId: id, value, getValue: async () => value }) });
   const field = makeField('mapped-id');
   const metadata = [{ id: field.id, name: mapped ? '自定义ID' : '作者ID' }];
@@ -32,7 +33,10 @@ function fixture({ mapped = false, loseResponse = true, fallback = false, fallba
   const table = {
     id: 'table', getFieldMetaList: async () => [...metadata],
     getFieldById: async id => makeField(id),
-    getRecordsByPage: async () => { events.push('scan'); return { records: rows }; },
+    getRecordsByPage: async ({ filter } = {}) => {
+      events.push('scan'); reads.push(filter);
+      return { records: filter ? rows.filter(row => filter.conditions.some(({ fieldId, value }) => row.fields[fieldId] === value)) : rows };
+    },
     addField: async config => { events.push('addField'); metadata.push({ id: 'fallback-id', ...config }); },
     addRecords: async records => {
       events.push('add');
@@ -57,11 +61,11 @@ function fixture({ mapped = false, loseResponse = true, fallback = false, fallba
     fieldMapping: fallback ? [config, fallbackConfig] : [config], getActiveFieldMapping: () => [],
     bitable: { base: { getTableById: async () => table } },
     resolveFieldMetaByConfig: (map, cfg) => ({ fieldMeta: map.get(cfg.name) }),
-    isFieldTypeCompatible: () => true, FieldType: { Attachment: 'attachment' },
+    isFieldTypeCompatible: () => true, FieldType: { Text: 'text', Attachment: 'attachment' },
     normalizeCellValue: async (_, field, value) => value,
     applyFieldDisplayConfig: async () => {}, uploadAttachmentFilesInBatch: async () => {},
     prepareAttachmentPipeline: async () => {}, api_key: '',
-    buildWorkUniqueKey, readTableRecords, chunkRecords: list => list.map(item => [item]),
+    buildWorkUniqueKey, matchWrittenAppendRows, readTableRecords, chunkRecords: list => singleRecordBatches ? list.map(item => [item]) : [list],
     upsertIndexCache: new Map(), console: { error() {} },
   };
   const write = new Function(...Object.keys(bindings), `return (${source.slice(callback.start, callback.end)});`)(...Object.values(bindings));
@@ -71,7 +75,7 @@ function fixture({ mapped = false, loseResponse = true, fallback = false, fallba
       ...(fallbackColumn ? [{ source_key: 'identity_key', target_field_id: 'fallback-id' }] : [])] : [],
     onBeforeWrite: async () => events.push('save-pending'),
   };
-  return { write: (items, opts = {}) => write(items, 'stream', 'task', 'table', [], { ...options, ...opts }), rows, events, table, bindings };
+  return { write: (items, opts = {}) => write(items, 'stream', 'task', 'table', [], { ...options, ...opts }), rows, events, reads, table, bindings };
 }
 
 for (const mode of ['append', 'upsert']) {
@@ -105,6 +109,70 @@ test('append recovery keeps the original field snapshot until the uncertain batc
   await f.write([{ user_id: 'a' }], { appendState, reconcile: true });
   assert.deepEqual(f.rows, rows, '恢复原字段后只确认已落表结果，不重复新增');
   assert.equal(appendState.pendingCount, 0);
+  assert.equal(f.events.filter(event => event === 'add').length, 1);
+});
+
+test('两万行追加只保存本批同 ID 的旧行，部分落表超时后补缺并清除已确认基线', async () => {
+  const f = fixture({ mapped: true, singleRecordBatches: false });
+  f.rows.push(
+    { recordId: 'history-a-1', fields: { 'mapped-id': 'a' } },
+    { recordId: 'history-a-2', fields: { 'mapped-id': 'a' } },
+    ...Array.from({ length: 20000 }, (_, i) => ({ recordId: 'old-' + i, fields: { 'mapped-id': 'other-' + i } })),
+  );
+  const appendState = {}, snapshots = [];
+  const items = [{ user_id: 'a' }, { user_id: 'b' }];
+  const options = state => ({ appendState: state, onBeforeWrite: async () => snapshots.push(structuredClone(state)) });
+  await assert.rejects(f.write(items, options(appendState)), /response lost/);
+  assert.deepEqual(snapshots[0].knownRecordIds, ['history-a-1', 'history-a-2']);
+  assert.equal(snapshots[0].pendingCount, 2);
+  assert.equal(f.rows.length, 20003);
+
+  const resumed = JSON.parse(JSON.stringify(snapshots[0]));
+  await f.write(items, { ...options(resumed), reconcile: true });
+  assert.deepEqual(snapshots[1], { ...snapshots[0], confirmedRecordIds: [f.rows.at(-2).recordId, null] },
+    '续写保留写前基线，并在补写前保存已核对的记录 ID');
+  assert.deepEqual(f.rows.slice(-2).map(row => row.fields['mapped-id']), ['a', 'b']);
+  assert.equal(f.rows.length, 20004);
+  assert.equal(resumed.pendingCount, 0);
+  assert.equal(resumed.knownRecordIds, undefined);
+
+  await f.write([{ user_id: 'b' }], options(resumed));
+  assert.deepEqual(snapshots[2].knownRecordIds, [f.rows.at(-2).recordId], '上一批已落表的同 ID 行属于新批次的历史行');
+  assert.equal(f.rows.length, 20005);
+  assert.deepEqual(f.reads.map(filter => filter?.conditions.map(item => item.value)), [['a', 'b'], ['a', 'b'], ['b']]);
+  assert.ok(f.reads.every(filter => filter.conditions.every(item => item.fieldId === 'mapped-id')));
+});
+
+test('共用追加补写再次超时，重进后保留已核对行并补上剩余结果', async () => {
+  const f = fixture({ singleRecordBatches: false });
+  const items = [{ user_id: 'a' }, { user_id: 'b' }, { user_id: 'c' }];
+  let saved;
+  const write = (state, reconcile) => f.write(items, { appendState: state, reconcile,
+    onBeforeWrite: async () => { saved = JSON.parse(JSON.stringify(state)); } });
+  await assert.rejects(write({}, false), /response lost/);
+
+  const add = f.table.addRecords;
+  f.table.addRecords = async rows => { await add(rows.slice(0, 1)); throw new Error('补写响应超时'); };
+  await assert.rejects(write(saved, true), /补写响应超时/);
+  const confirmed = f.rows[0];
+  confirmed.fields['mapped-id'] = 'c'; // 编辑成与仍待写结果相同的内容。
+  f.table.addRecords = add;
+  const resumed = saved;
+  const result = await write(resumed, true);
+  assert.deepEqual(f.rows.map(row => row.fields['mapped-id']), ['c', 'b', 'c']);
+  assert.equal(f.rows[0], confirmed);
+  assert.equal(result.recordIds.length, items.length);
+  assert.equal(new Set(result.recordIds).size, items.length);
+  assert.equal(resumed.confirmedRecordIds, undefined, '已完成批次清除核对记录');
+});
+
+test('追加检查点的作品标识变化时保留检查点，不按同样的条数续写', async () => {
+  const f = fixture({ singleRecordBatches: false });
+  const appendState = {};
+  await assert.rejects(f.write([{ user_id: 'a' }, { user_id: 'b' }], { appendState }), /response lost/);
+  const saved = structuredClone(appendState);
+  await assert.rejects(f.write([{ user_id: 'a' }, { user_id: 'c' }], { appendState, reconcile: true }), /待核对批次与原结果不一致/);
+  assert.deepEqual(appendState, saved);
   assert.equal(f.events.filter(event => event === 'add').length, 1);
 });
 test('missing author ID pauses whole batch before any mutation', async () => {

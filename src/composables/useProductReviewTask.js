@@ -114,16 +114,24 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
   });
   const resumeTask = async (endMissingTarget = false, expectedTask) => {
     if (disposed || loading.value || feedback.noticeRequiresReopen.value) return false;
+    if (endMissingTarget === 'paused') {
+      if (!feedback.endPausedAction.value) return;
+      return feedback.endMissingTargetTask(loading, hasRecoverableTask, undefined, undefined, idle, feedback.endPausedAction);
+    }
     if (endMissingTarget && feedback.missingTargetAction?.value) {
       return feedback.endMissingTargetTask(loading, hasRecoverableTask, undefined, task => resumeTask(false, task), idle);
     }
+    let fallbackEndAction = feedback.endPausedAction.value;
     loading.value = true;
     latestExecutionResult.value = null;
     try {
       const found = await taskEngine.resume(task => {
+        fallbackEndAction = null;
         assertMounted();
         const pendingCancel = isCancelling.value;
         const confirmedStop = !!(task.latestStatus?.cancel_requested || Number(task.latestStatus?.status) === 3);
+        // 老版本的恢复记录也可能保存了提交时的链接；原输入已由 sourceSnapshot 保留。
+        if (task.sourceSnapshot) delete task.requestSnapshot?.url;
         isCancelling.value = pendingCancel || confirmedStop;
         feedback.begin(isCancelling.value ? getTaskStoppingText(task, '商品评价') : '正在恢复未完成的商品评价任务…', { stopping: isCancelling.value });
         hasRecoverableTask.value = true;
@@ -135,15 +143,17 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
           void cancelTask().catch(error => onCancelError?.(error));
         }
       }, expectedTask);
-      if (!found && !disposed) { hasRecoverableTask.value = false; idle(); feedback.hide(); }
+      if (!found && !disposed) { hasRecoverableTask.value = false; idle(); feedback.clearNotice(); feedback.hide(); }
       return found;
-    } catch (error) { if (!disposed) { hasRecoverableTask.value = true; idle(); feedback.fail(error, { persist: true }); } return false; }
+    } catch (error) { if (!disposed) { hasRecoverableTask.value = true; idle(); feedback.fail(error, { persist: true, fallbackEndAction }); } return false; }
   };
   const submitTask = async snapshot => {
     latestExecutionResult.value = null;
     await taskEngine.submit(async () => {
       const task = { ...clone(snapshot), apiBaseURL: FEISHU_API_BASE_URL || '', apiPrefix: FEISHU_API_PATH_PREFIX, pendingWrite: false };
       const data = unwrapProductResponse(await api(task, 'post', 'task', clone(task.requestSnapshot)));
+      // 恢复按任务 ID 取结果，手动输入由 sourceSnapshot 回显。
+      delete task.requestSnapshot.url;
       return { ...task, taskId: data?.task_id };
     }, async task => {
       if (isCancelling.value) {
