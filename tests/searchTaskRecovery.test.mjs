@@ -1,3 +1,4 @@
+import { createTaskStorage } from './helpers/taskStorage.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -16,13 +17,14 @@ function loadWriteBatch(component, taskName, createAndWriteData) {
 for (const [component, taskName] of [['KeywordSearch', 'keywordStreamTask'], ['BloggerSearch', 'searchTask']]) {
   test(`${component}：新表写入失败后恢复仍使用原表，不重复建表`, async () => {
     let saved, createdTables = 0, attempts = 0;
+    const storage = createTaskStorage();
     const targets = [], errors = [], finished = [];
     const timers = new Map(); let timerId = 0;
     const source = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
       .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
     const bitable = { bridge: {
-      setData: async (_, value) => { saved = structuredClone(value); },
-      getData: async () => structuredClone(saved),
+      setData: async (key, value) => { await storage.setData(key, value); saved = storage.current(); },
+      getData: storage.getData,
     }, base: { getSelection: async () => ({ baseId: 'base' }) } };
     const create = new Function('bitable', 'setTimeout', 'clearTimeout', `${source}; return useIncrementalTask;`)(bitable,
       (fn) => { timers.set(++timerId, fn); return timerId; }, id => timers.delete(id));

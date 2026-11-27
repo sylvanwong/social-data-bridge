@@ -10,6 +10,7 @@ import { useTaskFeedback } from '../src/composables/useTaskFeedback.mjs';
 import { loadRequestModule } from './helpers/requestService.mjs';
 import { buildProfileTaskResult } from '../src/utils/profileTaskResult.mjs';
 import { getPendingWriteLimit } from '../src/utils/taskWriteState.mjs';
+import { taskProgressView } from './helpers/taskStorage.mjs';
 
 const pages = [
   ['BloggerSearch', 'searchTask', 'cancel', 'resumeSavedTask'],
@@ -35,7 +36,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
     'submitting', 'isSubmitting', 'cancelling', 'isCancelling', 'clearing', 'taskId',
     'activeKeywordTaskId', 'activeProfileTaskId', 'activeCommentTaskId', 'activeSeriesTaskId',
     'hasRecoverableTask', 'requiresReopen', 'recoveryRequiresReopen', 'componentUnmounted',
-    'pausedWriteCount', 'activeStreamTask', 'activeSeriesTask', 'feedback', 'latestProfileResult', 'storageKey', 'STREAM_TASK_STORAGE_KEY',
+    'pausedWriteCount', 'activeStreamTask', 'activeSeriesTask', 'feedback', 'latestProfileResult', 'profileRetry', 'storageKey', 'STREAM_TASK_STORAGE_KEY',
     'TASK_TOAST_SUFFIX', 'STREAM_RESULT_LIMIT', 'listPageSize', 'normalizeCommentId',
     'showToast', 'hideToast', 'showCompletionToast', 'finishToast', 'showErrorMsg',
     'showFieldProgress', 'showProfileFieldProgress', 'getStreamProgressText',
@@ -53,9 +54,21 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
   let status = { status: 0, processed: 1, total: 10 };
   const timers = new Map(), stops = [], notices = [];
   const writeStarted = deferred(), writePending = deferred();
+  const records = {};
+  const stored = taskProgressView(records);
+  let storageKey;
   const bitable = {
     base: { getSelection: async () => ({ baseId: 'base' }) },
-    bridge: { getData: async () => structuredClone(saved), setData: async (_, value) => { saved = structuredClone(value); } },
+    bridge: {
+      getData: async key => {
+        if (!storageKey && key) { storageKey = key; records[storageKey] = saved; }
+        return structuredClone(key === undefined ? (storageKey ? stored[storageKey] : saved) : records[key]);
+      },
+      setData: async (key, value) => {
+        storageKey ??= key;
+        records[key] = structuredClone(value);
+      },
+    },
   };
   const engineSource = read('../src/composables/useIncrementalTask.js')
     .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
@@ -74,8 +87,10 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
       }
       if (config.method === 'get') {
         if (options.authFailure && config.headers.authorization === 'Bearer test-key') throw Object.assign(new Error('API Key 已失效'), { code: 'INVALID_API_KEY' });
-        await options.statusReply?.promise; return { data: { sta: 0, data: { ...status } } };
+        await options.statusReply?.promise;
+        return { data: options.taskMissing ? { sta: -1, msg: '任务不存在' } : { sta: 0, data: { ...status } } };
       }
+      if (phase === 'result-task-missing') return { data: { sta: -1, msg: '任务不存在' } };
       return { data: { sta: 0, data: {
         count: phase === 'initial' ? 0 : 1,
         items: phase === 'initial' || config.data.after_id ? [] : [{ cid: 'comment-1', user_id: 'author-1', aweme_id: 'post-1', series_id: 'series-1' }],
@@ -83,6 +98,7 @@ function mountTask(t, [page, engineName, cancelName, resumeName], options = {}) 
       } } };
     },
     createAndWriteData: async (...args) => {
+      if (phase === 'target-deleted') throw new Error('table not found error');
       if (phase === 'prepare-fail') throw new Error('暂时无法读取作品列');
       await args.at(-1).onBeforeWrite?.();
       if (phase === 'fail') throw new Error('本地写入失败');
@@ -162,7 +178,7 @@ for (const page of pages) {
     setStatus({ status: 1 });
     const save = bitable.bridge.setData; let clears = 0;
     bitable.bridge.setData = async (key, value) => {
-      if (!value.taskId && ++clears === 1) { await gate.promise; throw new Error('清理失败'); }
+      if (key.endsWith(':finished') && ++clears === 1) { await gate.promise; throw new Error('清理失败'); }
       return save(key, value);
     };
     const pending = s.resume();
@@ -182,7 +198,7 @@ for (const page of pages) {
       let clears = 0;
       const save = bitable.bridge.setData;
       bitable.bridge.setData = async (key, value) => {
-        if (!value.taskId && ++clears === 1) {
+        if (key.endsWith(':finished') && ++clears === 1) {
           if (applied) await save(key, value);
           throw new Error('清理进度响应失败');
         }
@@ -210,7 +226,7 @@ for (const page of pages) {
     let clears = 0;
     const save = bitable.bridge.setData;
     bitable.bridge.setData = async (key, value) => {
-      if (!value.taskId && ++clears === 1) { await save(key, value); throw new Error('清理响应失败'); }
+      if (key.endsWith(':finished') && ++clears === 1) { await save(key, value); throw new Error('清理响应失败'); }
       return save(key, value);
     };
     await s.resume();
@@ -465,3 +481,56 @@ test('作者作品写入请求发出后失败，待核对数量未知，只提�
   assert.equal(state.pausedWriteCount.value, 0);
   assert.equal(state.feedback.taskNotice.value, '本地写入失败，任务已暂停。\n已写入的作品已保留，恢复时会自动核对写入进度。');
 });
+
+
+for (const page of pages) {
+  test(`${page[0]}：旧任务的输出表已删除，点击结束时用原任务发出停止请求`, async t => {
+    const f = mountTask(t, page);
+    f.bitable.base.isTableExist = async id => { assert.equal(id, 'target'); return false; };
+    f.setPhase('target-deleted');
+    const { state: s } = f;
+    await s.resume();
+    assert.match(s.feedback.taskNotice.value, /原输出表已删除/);
+    assert.equal((await f.bitable.bridge.getData()).taskId, 'same-task');
+    const ending = s.action();
+    await new Promise(setImmediate);
+    assert.equal(f.stops.length, 1);
+    f.stops[0].resolve({ data: { sta: 0, data: { status: 3 } } });
+    await ending;
+    assert.equal((await f.bitable.bridge.getData()).taskId, 'same-task');
+    assert.equal(s.hasRecoverableTask.value, false);
+    assert.equal(s.feedback.taskNotice.value, '');
+  });
+}
+
+
+for (const page of pages) {
+  test(`${page[0]}：结果读取查不到任务且原表已删除，保留进度直到用户结束`, async t => {
+    const f = mountTask(t, page);
+    f.bitable.base.isTableExist = async id => { assert.equal(id, 'target'); return false; };
+    f.setPhase('result-task-missing');
+    await f.state.resume();
+    assert.match(f.state.feedback.taskNotice.value, /原输出表已删除/);
+    assert.equal((await f.bitable.bridge.getData()).taskId, 'same-task');
+    assert.equal(f.stops.length, 0);
+
+    f.setStatus({ status: 1 });
+    await f.state.action();
+    assert.equal((await f.bitable.bridge.getData()).taskId, 'same-task');
+    assert.equal(f.stops.length, 0);
+    assert.equal(f.state.hasRecoverableTask.value, false);
+  });
+
+  test(`${page[0]}：原表删除且状态接口查不到任务时只清恢复进度`, async t => {
+    const f = mountTask(t, page, { taskMissing: true });
+    f.bitable.base.isTableExist = async id => { assert.equal(id, 'target'); return false; };
+    const { state: s } = f;
+    await s.resume();
+    assert.match(s.feedback.taskNotice.value, /无法确认后台是否已停止/);
+    assert.equal((await f.bitable.bridge.getData()).taskId, 'same-task');
+    await s.action();
+    assert.equal((await f.bitable.bridge.getData()).taskId, 'same-task');
+    assert.equal(f.stops.length, 0);
+    assert.equal(s.hasRecoverableTask.value, false);
+  });
+}

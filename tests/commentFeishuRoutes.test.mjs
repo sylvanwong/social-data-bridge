@@ -1,5 +1,6 @@
 import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
 import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
+import { createTaskStorage } from './helpers/taskStorage.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -103,9 +104,10 @@ test('评论恢复在环境变更后保留来源、游标、原字段和目标�
   const first = fixture();
   await first.create('original-table', 'https://example.test', { sort_type: 'oldest' });
   let saved, timerId = 0;
+  const storage = createTaskStorage('comment-route-test');
   const timers = new Map(), rows = [], finished = [];
   const sdk = { base: { getSelection: async () => ({ baseId: 'base' }) },
-    bridge: { getData: async () => structuredClone(saved), setData: async (_, value) => { saved = structuredClone(value); } } };
+    bridge: { getData: storage.getData, setData: async (key, value) => { await storage.setData(key, value); saved = storage.current(); } } };
   const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
     .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
   const createEngine = new Function('bitable', 'setTimeout', 'clearTimeout', `${engineSource}; return useIncrementalTask;`)(sdk,

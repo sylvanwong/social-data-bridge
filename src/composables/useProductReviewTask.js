@@ -11,13 +11,15 @@ export const PRODUCT_REVIEW_TASK_KEY = 'product_review_incremental_task_v1';
 const clone = value => JSON.parse(JSON.stringify(value));
 export const unwrapProductResponse = response => {
   const envelope = response?.data;
-  if (envelope?.sta !== 0) throw new Error(envelope?.msg || '商品评价请求失败');
+  if (envelope?.sta !== 0) {
+    throw Object.assign(new Error(envelope?.msg || '商品评价请求失败'), { apiStatus: Number(envelope?.sta) });
+  }
   return envelope.data;
 };
 export function useProductReviewTask({ props, fields, onIdle, onRestore, onCancelError }) {
   const loading = ref(false), hasRecoverableTask = ref(false), isCancelling = ref(false), clearing = ref(false);
-  const feedback = useTaskFeedback();
   const latestExecutionResult = ref(null);
+  const feedback = useTaskFeedback({ executionResult: latestExecutionResult });
   const { createAndWriteData } = useSocialData(() => '商品评价', '', fields);
   let disposed = false;
   const assertMounted = value => { if (disposed) { const error = new Error('页面已离开'); error.stopPolling = true; throw error; } return value; };
@@ -26,7 +28,9 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
     return feishuRequest({ baseURL: task.apiBaseURL, url: buildFeishuApiPath(`/v1/feishu/product/review/${suffix}`, task.apiPrefix), method, headers: { authorization: `Bearer ${props.api_key}` }, ...(method === 'get' ? { params: data } : { data }) });
   };
   const idle = () => { loading.value = false; isCancelling.value = false; clearing.value = false; onIdle?.(); };
+  const requestStop = async task => unwrapProductResponse(await api(task, 'post', 'task/cancel', { task_id: task.taskId }));
   const taskEngine = useIncrementalTask({
+    requestStop,
     storageKey: PRODUCT_REVIEW_TASK_KEY, operationTimeoutMs: 60000,
     isTerminal: status => [1, 2, 3].includes(Number(status.status)),
     getStatus: async task => unwrapProductResponse(await api(task, 'get', 'task', { task_id: task.taskId })),
@@ -36,7 +40,7 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
       const limit = Number.isInteger(pendingCount) && pendingCount > 0 && pendingCount <= 20 ? pendingCount : 20;
       return unwrapProductResponse(await api(task, 'post', 'list', { task_id: task.taskId, after_id: task.cursor || '', limit, ...(Number(task.latestStatus?.status) === 3 ? { include_count: true } : {}) }));
     },
-    writeBatch: async (items, task, { assertActive, saveProgress }) => {
+    writeBatch: async (items, task, { assertActive, assertCanWrite, saveProgress }) => {
       const active = value => { assertMounted(); assertActive(); return value; };
       active();
       if (!task.targetTableId) {
@@ -79,7 +83,7 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
       }));
       await createAndWriteData(normalized, 'stream', task.taskId, task.targetTableId, task.selectedFieldKeys, {
         stopAfterCurrentBatch: true, uniqueKey: 'review_id', writeMode: task.writeMode, fieldMappings: task.fieldMappings,
-        reconcile: !append && !!task.pendingWrite, skipFieldDisplayConfig: true, assertActive: active,
+        reconcile: !append && !!task.pendingWrite, skipFieldDisplayConfig: true, assertActive: active, assertCanWrite,
         // 原任务的字段key顺序与追加批次的fieldIds配套，不随界面排序变化。
         ...(append ? { appendState, fieldOrder: task.selectedFieldKeys } : {}),
         onBeforeWrite: async () => { if (append) syncAppend(); else task.pendingWrite = true; await saveProgress(); active(); },
@@ -108,8 +112,11 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
     },
     onError: (error, task) => { if (!disposed) { latestExecutionResult.value = { ...buildTaskExecutionResult(task?.latestStatus, task || {}, { kind: 'productReview' }), status: 'paused', reason: error.message }; hasRecoverableTask.value = true; idle(); feedback.fail(error, { persist: true }); } },
   });
-  const resumeTask = async () => {
+  const resumeTask = async (endMissingTarget = false, expectedTask) => {
     if (disposed || loading.value || feedback.noticeRequiresReopen.value) return false;
+    if (endMissingTarget && feedback.missingTargetAction?.value) {
+      return feedback.endMissingTargetTask(loading, hasRecoverableTask, undefined, task => resumeTask(false, task), idle);
+    }
     loading.value = true;
     latestExecutionResult.value = null;
     try {
@@ -127,7 +134,7 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
           isCancelling.value = false;
           void cancelTask().catch(error => onCancelError?.(error));
         }
-      });
+      }, expectedTask);
       if (!found && !disposed) { hasRecoverableTask.value = false; idle(); feedback.hide(); }
       return found;
     } catch (error) { if (!disposed) { hasRecoverableTask.value = true; idle(); feedback.fail(error, { persist: true }); } return false; }
@@ -140,17 +147,17 @@ export function useProductReviewTask({ props, fields, onIdle, onRestore, onCance
       return { ...task, taskId: data?.task_id };
     }, async task => {
       if (isCancelling.value) {
-        try { unwrapProductResponse(await api(task, 'post', 'task/cancel', { task_id: task.taskId })); }
+        try { await requestStop(task); }
         catch (error) { isCancelling.value = false; throw error; }
       }
     });
   };
   const cancelTask = async () => {
     const task = taskEngine.getActiveTask();
-    if (disposed || isCancelling.value || clearing.value) return;
+    if (disposed || isCancelling.value || clearing.value || feedback.endingMissingTarget.value) return;
     isCancelling.value = true; feedback.progress(getTaskStoppingText(task || {}, '商品评价'), { stopping: true });
     if (!task) return;
-    try { unwrapProductResponse(await api(task, 'post', 'task/cancel', { task_id: task.taskId })); }
+    try { await requestStop(task); }
     catch (error) {
       if (disposed || taskEngine.getActiveTask() !== task) return;
       if (task.latestStatus?.cancel_requested || Number(task.latestStatus?.status) === 3) return;

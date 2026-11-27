@@ -45,7 +45,7 @@ const activeSeriesTaskId = ref('');
 let activeSeriesTask = null;
 const profileProgress = ref({ text: "", done: false });
 const listPageSize = 20;
-const feedback = useTaskFeedback();
+const feedback = useTaskFeedback({ executionResult: latestExecutionResult });
 const { toastVisible, toastText, toastType, toastLoading, taskNotice } = feedback;
 const FIELD_SELECTION_STORAGE_KEY = 'series_fetch_selected_fields_v1';
 const selectedFieldKeys = ref([]);
@@ -367,7 +367,9 @@ const getSeriesTask = async (task) => {
     headers: { authorization: `Bearer ${props.api_key}` },
   });
   const res = response.data || {};
-  if (Number(res.sta) !== 0) throw new Error(res.msg || '查询任务状态失败');
+  if (Number(res.sta) !== 0) {
+    throw Object.assign(new Error(res.msg || '查询任务状态失败'), { apiStatus: Number(res.sta) });
+  }
   let data = res.data || {};
   while (data && data.data && typeof data.data === 'object' && data.status === undefined && data.task_id === undefined) {
     data = data.data;
@@ -388,7 +390,9 @@ const getSeriesResults = async (task) => {
     },
   });
   const res = response.data || {};
-  if (Number(res.sta) !== 0) throw new Error(res.msg || '读取短剧结果失败');
+  if (Number(res.sta) !== 0) {
+    throw Object.assign(new Error(res.msg || '读取短剧结果失败'), { apiStatus: Number(res.sta) });
+  }
   let result = res.data || {};
   while (result && result.data && !Array.isArray(result.data) && typeof result.data === 'object') {
     result = result.data;
@@ -410,6 +414,7 @@ const restoreSeriesTask = (task, progressText = '正在恢复未完成的短剧�
   showToast(isCancelling.value ? getStoppingText(task) : progressText, true);
 };
 const seriesStreamTask = useIncrementalTask({
+  requestStop: task => cancelSeriesTask(task),
   storageKey: 'series_fetch_stream_task_v1', operationTimeoutMs: 180000,
   isTerminal: status => [1, 2, 3].includes(Number(status.status)),
   getStatus: getSeriesTask,
@@ -430,6 +435,7 @@ const seriesStreamTask = useIncrementalTask({
         uniqueKey: 'series_id', writeMode: task.writeMode || 'upsert',
         fieldMappings: task.fieldMappings || [], upsertCacheKey: task.taskId,
         reconcile, appendState, assertActive: controls.assertActive,
+        assertCanWrite: controls.assertCanWrite,
         onProgress: message => { controls.assertActive(); showFieldProgress(message); },
         onBeforeWrite: async () => {
           controls.assertActive();
@@ -480,16 +486,19 @@ const seriesStreamTask = useIncrementalTask({
     feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: recoveryRequiresReopen.value });
   },
 });
-const resumeSeriesTask = async () => {
+const resumeSeriesTask = async (endMissingTarget = false, expectedTask) => {
   if (componentUnmounted || isSubmitting.value || loading.value) return;
   if (recoveryRequiresReopen.value) return;
+  if (endMissingTarget && feedback.missingTargetAction?.value) {
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, recoveryRequiresReopen, task => resumeSeriesTask(false, task));
+  }
   isSubmitting.value = true;
   loading.value = true;
   latestExecutionResult.value = null;
   feedback.begin('正在检查未完成任务…');
   await nextTick();
   try {
-    const resumed = await seriesStreamTask.resume(restoreSeriesTask);
+    const resumed = await seriesStreamTask.resume(restoreSeriesTask, expectedTask);
     if (!componentUnmounted && !resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -523,11 +532,13 @@ const postSeriesTask = async (targetTableId = '', profileUrlText = '') => {
   }, task => restoreSeriesTask(task, '任务已创建，正在准备获取短剧…'));
 };
 
-const cancelSeriesTask = async () => {
-  const task = seriesStreamTask.getActiveTask();
-  if (!task?.taskId || isCancelling.value || clearing.value) return;
-  isCancelling.value = true;
-  showToast(getStoppingText(task), true);
+const cancelSeriesTask = async (savedTask) => {
+  const task = savedTask || seriesStreamTask.getActiveTask();
+  if (!task?.taskId || (!savedTask && (isCancelling.value || clearing.value))) return;
+  if (!savedTask) {
+    isCancelling.value = true;
+    showToast(getStoppingText(task), true);
+  }
   try {
     const response = await feishuRequest({
       url: seriesTaskApiPath(task, '/v1/feishu/series/list/cancel'),
@@ -537,7 +548,9 @@ const cancelSeriesTask = async () => {
       data: { task_id: task.taskId },
     });
     if (Number(response.data?.sta) !== 0) throw new Error(response.data?.msg || '停止任务失败');
+    return response.data.data;
   } catch (error) {
+    if (savedTask) throw error;
     if (seriesStreamTask.getActiveTask() !== task || clearing.value) return;
     const status = task.latestStatus;
     isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
@@ -819,7 +832,7 @@ const taskActionState = computed(() => {
 });
 
 const handleTaskAction = () => {
-  if (taskActionState.value === 'recoverable') return resumeSeriesTask();
+  if (taskActionState.value === 'recoverable') return resumeSeriesTask(true);
   if (taskActionState.value === 'running') {
     return cancelSeriesTask();
   }
@@ -1079,7 +1092,7 @@ watch(selectedFieldKeys, (keys) => {
           :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
           :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || recoveryRequiresReopen"
           @click="handleTaskAction"
-        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
+        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : '立即执行' }}</el-button>
       </div>
       <div v-if="profileProgress.text" class="profile-progress" :class="{ 'profile-progress--done': profileProgress.done }">
         <span v-if="profileProgress.done" class="profile-progress-check">✓</span>

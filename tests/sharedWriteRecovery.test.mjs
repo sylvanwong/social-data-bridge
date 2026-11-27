@@ -1,3 +1,4 @@
+import { createTaskStorage } from './helpers/taskStorage.mjs';
 import { resolveWritableField } from '../src/utils/tableFields.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -118,6 +119,69 @@ test('SDK response after task timeout cannot initiate a second mutation', async 
     writeMode: 'upsert', assertActive: () => { if (!active) throw new Error('timeout'); },
   }), /timeout/);
   assert.equal(f.events.filter(event => event === 'add').length, 1);
+});
+
+test('另一窗口已完成时，迟到的更新响应不能发出同一批的新增请求', async () => {
+  const f = fixture({ loseResponse: false });
+  f.rows.push({ recordId: 'existing', fields: { 'mapped-id': 'a' } });
+  const started = Promise.withResolvers(), release = Promise.withResolvers();
+  const update = f.table.setRecords;
+  let updates = 0;
+  f.table.setRecords = async records => {
+    const first = ++updates === 1;
+    const result = await update(records);
+    if (first) {
+      started.resolve();
+      await release.promise;
+    }
+    return result;
+  };
+  const initial = { taskId: 'task', baseId: 'base', targetTableId: 'table', cursor: '' };
+  const storage = createTaskStorage('test', initial);
+  const bitable = { bridge: storage, base: { getSelection: async () => ({ baseId: 'base' }) } };
+  const source = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
+    .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
+  const load = new Function('bitable', 'setTimeout', 'clearTimeout', `${source}; return useIncrementalTask;`);
+  const finished = [], errors = [];
+  function open(name) {
+    let scheduled;
+    const task = load(bitable, callback => (scheduled = callback), () => {})({
+      storageKey: 'test',
+      getStatus: async () => ({ status: 1 }),
+      getResults: async task => task.cursor
+        ? { items: [] } : { items: [{ user_id: 'a' }, { user_id: 'b' }], next_cursor: 'done' },
+      writeBatch: (items, task, controls) => f.write(items, {
+        writeMode: 'upsert',
+        assertActive: controls.assertActive,
+        assertCanWrite: controls.assertCanWrite,
+        onBeforeWrite: async () => { f.events.push('save-pending'); await controls.saveProgress(); },
+      }),
+      onFinish: () => finished.push(name),
+      onError: error => errors.push(error),
+    });
+    return { task, tick: () => scheduled() };
+  }
+  const old = open('old'), current = open('current');
+  const pending = old.task.resume();
+  try {
+    await started.promise;
+    await current.task.resume();
+    await current.tick();
+    assert.deepEqual(finished, ['current']);
+    release.resolve();
+    await pending;
+    assert.deepEqual(f.rows.map(row => row.fields['mapped-id']), ['a', 'b']);
+    assert.equal(f.events.filter(event => event === 'add').length, 1);
+    assert.equal(f.events.filter(event => event === 'save-pending').length, 2);
+    assert.match(errors[0]?.message, /其他窗口.*结束/);
+    assert.equal(errors[0]?.taskEnded, true);
+    assert.equal(errors[0]?.requiresReopen, true);
+  } finally {
+    release.resolve();
+    old.task.stop();
+    current.task.stop();
+    await pending;
+  }
 });
 
 for (const [component, taskName] of [['KeywordSearch', 'keywordStreamTask'], ['BloggerSearch', 'searchTask']]) {
@@ -278,9 +342,10 @@ for (const mode of ['append', 'upsert']) {
       const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
         .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
       let saved, finished = false, timerId = 0;
+      const storage = createTaskStorage('fallback');
       const errors = [], timers = new Map();
       const bitable = { base: { getSelection: async () => ({ baseId: 'base' }) }, bridge: {
-        setData: async (_, value) => { saved = structuredClone(value); }, getData: async () => saved,
+        setData: async (key, value) => { await storage.setData(key, value); saved = storage.current(); }, getData: storage.getData,
       } };
       const create = new Function('bitable', 'setTimeout', 'clearTimeout', `${engineSource};return useIncrementalTask;`)(bitable,
         fn => { timers.set(++timerId, fn); return timerId; }, id => timers.delete(id));

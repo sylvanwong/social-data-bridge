@@ -15,6 +15,7 @@ export function getPendingWriteLimit(task, maxLimit) {
     if (reason) {
       const error = new Error(`${reason}，已暂停自动恢复。请核对目标表格中的已写入结果；原任务进度已保留。`);
       error.stopPolling = true;
+      error.checkMissingOutputTable = true;
       throw error;
     }
   }

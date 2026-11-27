@@ -44,7 +44,7 @@ for (const [page, engine, label] of [['CommentFetch','commentStreamTask','评论
       activeKeywordTaskId:{value:'task'}, activeCommentTaskId:{value:'task'}, activeProfileTaskId:{value:'task'},
       activeSeriesTaskId:{value:'task'}, taskId:{value:'task'} };
     if (page === 'ProfileFetch') {
-      Object.assign(bindings, { latestProfileResult: { value: null }, buildProfileTaskResult });
+      Object.assign(bindings, { latestProfileResult: { value: null }, profileRetry: { value: null }, buildProfileTaskResult });
       const helper = declarations.find(n => n.id.name === 'showProfileFieldProgress').init;
       bindings.showProfileFieldProgress = new Function(...Object.keys(bindings),
         `return (${source.slice(helper.start, helper.end)});`)(...Object.values(bindings));

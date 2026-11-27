@@ -129,7 +129,7 @@ const { latestExecutionResult, loading, hasRecoverableTask, isCancelling, cleari
   replyPagesType.value = task.requestSnapshot.reply_pages === -1 ? 'none' : task.requestSnapshot.reply_pages === 0 ? 'all' : 'pages';
   configApplying = false;
 } });
-const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = feedback;
+const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen, endingMissingTarget } = feedback;
 const { validateTableFields } = useSocialData(() => '商品评价', '', FIELD_CONFIG);
 const initialReady = ref(false);
 const busy = computed(() => loading.value || hasRecoverableTask.value || !initialReady.value);
@@ -278,7 +278,7 @@ const extractProductReviewLink = value => {
 };
 const handleSubmit = async () => {
   if (disposed || loading.value || !initialReady.value) return;
-  if (hasRecoverableTask.value) return resumeTask();
+  if (hasRecoverableTask.value) return resumeTask(true);
   const input = JSON.parse(JSON.stringify(formData.value));
   const source = { ...sourceContext };
   const output = { selectedFieldKeys: [...selectedFieldKeys.value], fieldMappings: mappingDraft.value.map(row => ({ ...row })), writeMode: input.radio === 1 ? 'append' : input.writeMode, targetTableId: input.radio === 2 ? input.table_id : '', initializingTableId: '' };
@@ -675,8 +675,9 @@ onUnmounted(() => {
       </el-form>
       <div class="action-group">
         <p v-if="taskNotice" class="sub-hint" role="status">{{ taskNotice }}{{ noticeRequiresReopen ? ' 请重新进入插件恢复。' : '' }}</p>
-        <el-button v-if="loading && !clearing" class="commit-btn" :loading="isCancelling" :disabled="isCancelling" @click="handleCancel">{{ isCancelling ? '正在停止…' : '停止任务' }}</el-button>
-        <el-button v-else class="commit-btn" :loading="loading || !initialReady" :disabled="loading || !initialReady || noticeRequiresReopen" @click="handleSubmit">{{ hasRecoverableTask ? '恢复任务' : !initialReady ? '准备中…' : '立即执行' }}</el-button>
+        <el-button v-if="endingMissingTarget" class="commit-btn" loading disabled>正在结束任务…</el-button>
+        <el-button v-else-if="loading && !clearing" class="commit-btn" :loading="isCancelling" :disabled="isCancelling" @click="handleCancel">{{ isCancelling ? '正在停止…' : '停止任务' }}</el-button>
+        <el-button v-else class="commit-btn" :loading="loading || !initialReady" :disabled="loading || !initialReady || noticeRequiresReopen" @click="handleSubmit">{{ hasRecoverableTask ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : !initialReady ? '准备中…' : '立即执行' }}</el-button>
       </div>
     </div>
     <TaskExecutionResult :result="latestExecutionResult" />

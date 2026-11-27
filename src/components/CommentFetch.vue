@@ -80,7 +80,7 @@ const FIELD_SELECTION_STORAGE_KEY = 'comment_fetch_selected_fields_v1';
 const STREAM_TASK_STORAGE_KEY = 'comment_fetch_stream_task_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
-const feedback = useTaskFeedback();
+const feedback = useTaskFeedback({ executionResult: latestExecutionResult });
 const { toastVisible, toastText, toastType, toastLoading, taskNotice } = feedback;
 const commentUpsertIndexCache = new Map();
 
@@ -768,10 +768,12 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
         });
 
         for (const updates of chunkRecords(pendingUpdates)) {
+          if (options.assertCanWrite) await options.assertCanWrite();
           options.assertActive?.();
           await activeTable.setRecords(updates);
         }
         for (const creates of chunkRecords(pendingCreates)) {
+          if (options.assertCanWrite) await options.assertCanWrite();
           options.assertActive?.();
           const created = await activeTable.addRecords(creates.map(item => item.record));
           created.forEach((recordId, index) => existingByCid.set(creates[index].cid, recordId));
@@ -824,6 +826,7 @@ const commentTaskApiPath = (task, path) => buildFeishuApiPath(path,
   task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX);
 
 const commentStreamTask = useIncrementalTask({
+  requestStop: task => cancelCommentTask(task),
   storageKey: STREAM_TASK_STORAGE_KEY,
   operationTimeoutMs: 180000,
   isTerminal: (status) => [1, 2, 3].includes(Number(status.status)),
@@ -860,6 +863,7 @@ const commentStreamTask = useIncrementalTask({
       selectedFieldKeys: task.selectedFieldKeys,
       upsertCacheKey: task.taskId,
       assertActive: controls.assertActive,
+      assertCanWrite: controls.assertCanWrite,
       onProgress: (message) => { controls.assertActive(); showFieldProgress(message); },
       onTargetTableReady: async (tableId) => {
         controls.assertActive();
@@ -921,10 +925,13 @@ const commentStreamTask = useIncrementalTask({
   },
 });
 
-const resumeCommentTask = async () => {
+const resumeCommentTask = async (endMissingTarget = false, expectedTask) => {
   if (componentUnmounted || isSubmitting.value || loading.value) return;
   if (recoveryRequiresReopen.value) {
     return;
+  }
+  if (endMissingTarget && feedback.missingTargetAction?.value) {
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, recoveryRequiresReopen, task => resumeCommentTask(false, task));
   }
   isSubmitting.value = true;
   loading.value = true;
@@ -960,7 +967,7 @@ const resumeCommentTask = async () => {
       const status = task.latestStatus;
       isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
       showToast(isCancelling.value ? stoppedCommentProgress(task) : '正在恢复未完成的评论数据获取任务...', true);
-    });
+    }, expectedTask);
     if (!componentUnmounted && !resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -978,14 +985,16 @@ const resumeCommentTask = async () => {
   }
 };
 
-const cancelCommentTask = async () => {
-  const task = commentStreamTask.getActiveTask();
-  if (!task?.taskId || isCancelling.value || clearing.value) {
+const cancelCommentTask = async (savedTask) => {
+  const task = savedTask || commentStreamTask.getActiveTask();
+  if (!task?.taskId || (!savedTask && (isCancelling.value || clearing.value))) {
     return;
   }
 
-  isCancelling.value = true;
-  showToast(stoppedCommentProgress(task), true);
+  if (!savedTask) {
+    isCancelling.value = true;
+    showToast(stoppedCommentProgress(task), true);
+  }
   try {
     const response = await feishuRequest({
       url: commentTaskApiPath(task, '/v1/feishu/comment/task/cancel'),
@@ -998,7 +1007,9 @@ const cancelCommentTask = async () => {
     if (res?.sta !== 0) {
       throw new Error(res?.msg || '停止任务失败');
     }
+    return res.data;
   } catch (error) {
+    if (savedTask) throw error;
     if (commentStreamTask.getActiveTask() !== task || clearing.value) return;
     const status = task.latestStatus;
     isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
@@ -1199,7 +1210,7 @@ const taskActionState = computed(() => {
 });
 
 const handleTaskAction = () => {
-  if (taskActionState.value === 'recoverable') return resumeCommentTask();
+  if (taskActionState.value === 'recoverable') return resumeCommentTask(true);
   if (taskActionState.value === 'running') {
     return cancelCommentTask();
   }
@@ -1470,7 +1481,7 @@ watch(selectedFieldKeys, (keys) => {
         :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
         :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || recoveryRequiresReopen"
         @click="handleTaskAction"
-      >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
+      >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : '立即执行' }}</el-button>
     </div>
 
     <TaskExecutionResult :result="latestExecutionResult" />

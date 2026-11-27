@@ -1010,6 +1010,9 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         if (!writePrepared) {
           await options.onBeforeWrite?.();
           writePrepared = true;
+        } else if (options.assertCanWrite) {
+          // 等待前一次 SDK 写入期间，另一窗口可能已经完成任务。
+          await options.assertCanWrite();
         }
         options.assertActive?.();
         const start = metrics ? performance.now() : 0;
@@ -1171,7 +1174,7 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
         resetParams();
       }
     } catch (error) {
-      if (options.appendState) throw error;
+      if (options.appendState || error?.taskEnded) throw error;
       if (options.stopAfterCurrentBatch) {
         const writeError = new Error(`${error?.message || '写入失败'}；已暂停写入，已写入的数据会保留，请点击「恢复任务」继续。`, { cause: error });
         writeError.writePaused = true;

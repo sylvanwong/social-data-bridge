@@ -782,6 +782,7 @@ const restoreProfileTask = (task, progressText = '正在恢复未完成的作者
 };
 
 const profileStreamTask = useIncrementalTask({
+  requestStop: task => cancelProfileTask(task),
   storageKey: STREAM_TASK_STORAGE_KEY,
   operationTimeoutMs: 180000,
   // 后端心跳超过 15 分钟才确认中断，预留下一次轮询时间。
@@ -812,6 +813,7 @@ const profileStreamTask = useIncrementalTask({
         attachmentPipeline: true, uploadBatchSize: 5,
         writeMode: task.writeMode || 'upsert', fieldMappings: task.fieldMappings || [],
         upsertCacheKey: task.taskId, reconcile, appendState, assertActive: controls.assertActive,
+        assertCanWrite: controls.assertCanWrite,
         onProgress: message => { controls.assertActive(); showProfileFieldProgress(message, task); },
         onBeforeWrite: async () => {
           controls.assertActive();
@@ -907,16 +909,19 @@ const profileStreamTask = useIncrementalTask({
 });
 
 const stopStreamTask = () => { profileStreamTask.stop(); activeStreamTask = null; };
-const resumeSavedStreamTask = async () => {
+const resumeSavedStreamTask = async (endMissingTarget = false, expectedTask) => {
   if (componentUnmounted || isSubmitting.value || loading.value) return;
   if (recoveryRequiresReopen.value) return;
+  if (endMissingTarget && feedback.missingTargetAction?.value) {
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, recoveryRequiresReopen, task => resumeSavedStreamTask(false, task));
+  }
   pausedWriteCount.value = 0;
   isSubmitting.value = true;
   loading.value = true;
   feedback.begin('正在检查未完成任务…');
   await nextTick();
   try {
-    const resumed = await profileStreamTask.resume(restoreProfileTask);
+    const resumed = await profileStreamTask.resume(restoreProfileTask, expectedTask);
     if (!componentUnmounted && !resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -959,14 +964,16 @@ const postProfileTask = async (targetTableId = '', urlText = '', taskConfig = {}
   }, task => restoreProfileTask(task, '任务已创建，正在准备获取作者作品…'));
 };
 
-const cancelProfileTask = async () => {
-  const task = profileStreamTask.getActiveTask();
-  if (!task?.taskId || isCancelling.value || clearing.value) {
+const cancelProfileTask = async (savedTask) => {
+  const task = savedTask || profileStreamTask.getActiveTask();
+  if (!task?.taskId || (!savedTask && (isCancelling.value || clearing.value))) {
     return;
   }
 
-  isCancelling.value = true;
-  showToast(getStoppingText(task), true);
+  if (!savedTask) {
+    isCancelling.value = true;
+    showToast(getStoppingText(task), true);
+  }
   try {
     const response = await feishuRequest({
       url: profileTaskApiPath(task, '/v1/feishu/social/task/cancel'),
@@ -979,7 +986,9 @@ const cancelProfileTask = async () => {
     if (data?.sta !== 0) {
       throw new Error(data?.msg || '停止任务失败');
     }
+    return data.data;
   } catch (error) {
+    if (savedTask) throw error;
     if (profileStreamTask.getActiveTask() !== task || clearing.value) return;
     const status = task.latestStatus;
     isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
@@ -1434,7 +1443,7 @@ const resumeFailedProfilePages = async () => {
       });
       const data = unwrapApiData(response.data);
       if (data.task_id !== retry.task.taskId) throw new Error('续跑任务与原任务不一致，请重试');
-      return retry.task;
+      return { ...retry.task, retryGeneration: retry.generation + 1 };
     }, task => restoreProfileTask(task, '正在重试失败输入…'));
   } finally {
     if (!componentUnmounted) isSubmitting.value = false;
@@ -1442,7 +1451,7 @@ const resumeFailedProfilePages = async () => {
 };
 
 const handleTaskAction = () => {
-  if (taskActionState.value === 'recoverable') return resumeSavedStreamTask();
+  if (taskActionState.value === 'recoverable') return resumeSavedStreamTask(true);
   if (taskActionState.value === 'running') {
     return cancelProfileTask();
   }
@@ -2194,14 +2203,14 @@ watch(
 
       <p v-if="taskNotice" class="sub-hint profile-task-notice">{{ taskNotice }}</p>
       <div v-if="formData.executionMode === 'immediate'" class="action-group">
-        <p v-if="taskActionState === 'recoverable' && pausedWriteCount && !recoveryRequiresReopen" class="sub-hint">本批还有 {{ pausedWriteCount }} 条作品待写入。</p>
+        <p v-if="taskActionState === 'recoverable' && !feedback.missingTargetAction?.value && pausedWriteCount && !recoveryRequiresReopen" class="sub-hint">本批还有 {{ pausedWriteCount }} 条作品待写入。</p>
         <el-button
           class="commit-btn"
           :class="{ 'is-running': taskActionState === 'running' || taskActionState === 'stopping' }"
           :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
           :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || recoveryRequiresReopen"
           @click="handleTaskAction"
-        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (pausedWriteCount ? '继续写入' : '恢复任务') : '立即执行' }}</el-button>
+        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : pausedWriteCount ? '继续写入' : '恢复任务') : '立即执行' }}</el-button>
       </div>
 
       <div v-else class="schedule-inline-panel">

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { nextTick } from 'vue';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
@@ -49,15 +50,22 @@ for (const [page, engineName, kind] of [['KeywordSearch', 'keywordStreamTask', '
       componentUnmounted: false, disposed: false, clearing: {}, hasRecoverableTask: {}, loading: {}, cancelling: {}, taskId: {},
       isCancelling: {}, activeKeywordTaskId: {}, activeCommentTaskId: {}, recoveryRequiresReopen: {}, activeSeriesTaskId: {}, activeSeriesTask: null,
       stopping: {}, activeTaskId: {}, form: { value: {} }, feedback: { fail() {}, finish() {} }, showCompletionToast() {}, finishToast() {},
-      selectedKeysBeforeRecovery: null, selectedKeys: { value: [] }, STREAM_TASK_STORAGE_KEY: 'test', getSeriesTask() {}, getSeriesResults() {}, storageKey: 'test', KEYWORD_TASK_STORAGE_KEY: 'test', COMMENT_TASK_STORAGE_KEY: 'test', SERIES_TASK_STORAGE_KEY: 'test',
+      STREAM_TASK_STORAGE_KEY: 'test', getSeriesTask() {}, getSeriesResults() {}, storageKey: 'test', KEYWORD_TASK_STORAGE_KEY: 'test', COMMENT_TASK_STORAGE_KEY: 'test', SERIES_TASK_STORAGE_KEY: 'test',
       getPendingWriteLimit() {},
     };
+    const selectedKeys = { value: ['title'] };
+    if (page === 'ProductSearch') {
+      scope.restoreUserOutputSelection = fn(page, 'restoreUserOutputSelection', {
+        selectedKeysBeforeRecovery: ['product_id'], selectedKeys, nextTick,
+      });
+    }
     // 引擎参数中的依赖闭包不会在构造时执行，仅调用真正的完成回调。
     const options = fn(page, engineName, scope);
     await options.onFinish({ status: 1, total: 2, processed: 2, succeeded: 1, failed: 1 }, { writtenCount: 5 });
     assert.equal(latestExecutionResult.value?.writtenCount, 5);
     assert.equal(latestExecutionResult.value.status, 'partial');
     assert.equal(latestExecutionResult.value.outputUnit, buildTaskExecutionResult({}, {}, { kind }).outputUnit);
+    if (page === 'ProductSearch') assert.deepEqual(selectedKeys.value, ['product_id']);
   });
 }
 

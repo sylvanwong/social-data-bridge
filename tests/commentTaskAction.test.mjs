@@ -1,5 +1,6 @@
 import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
 import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
+import { createTaskStorage } from './helpers/taskStorage.mjs';
 import { nextTick } from 'vue';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -42,7 +43,8 @@ function fixture() {
   const action = load('handleTaskAction', scope);
   const labelExpression = descriptor.template.content.match(/\{\{ (taskActionState[^\n]+?) \}\}/)[1];
   return { scope, onError, onFinish, action, messages,
-    label: () => new Function('taskActionState', 'recoveryRequiresReopen', `return (${labelExpression});`)(scope.taskActionState.value, scope.recoveryRequiresReopen.value),
+    label: () => new Function('taskActionState', 'recoveryRequiresReopen', 'feedback', `return (${labelExpression});`)(
+      scope.taskActionState.value, scope.recoveryRequiresReopen.value, scope.feedback ?? {}),
     created: () => created, resumed: () => resumed, cancelled: () => cancelled,
   };
 }
@@ -126,10 +128,11 @@ for (const blocked of ['getData', 'getSelection']) {
   test(`真实恢复流程 ${blocked} 不返回：超时退出忙碌，保留进度且晚返回不触发写入`, async () => {
     const f = fixture(); f.scope.loading.value = false;
     const snapshot = { taskId: 'old-task', baseId: 'base', targetTableId: 'table', cursor: 'saved-cursor', writtenCount: 20 };
-    let saved = structuredClone(snapshot), release, statusReads = 0, writes = 0;
+    const storage = createTaskStorage('test', snapshot);
+    let release, statusReads = 0, writes = 0;
     const timers = new Map(); let timerId = 0;
     const bitable = { bridge: {
-      getData: async () => structuredClone(saved), setData: async (_, value) => { saved = structuredClone(value); },
+      getData: storage.getData, setData: storage.setData,
     }, base: { getSelection: async () => ({ baseId: 'base' }) } };
     const owner = blocked === 'getData' ? bitable.bridge : bitable.base;
     const original = owner[blocked];
@@ -154,14 +157,14 @@ for (const blocked of ['getData', 'getSelection']) {
     assert.equal(f.label(), '恢复任务');
     assert.match(f.messages.at(-1), /超时.*恢复任务/);
     assert.doesNotMatch(f.messages.at(-1), /关闭|重新(?:打开|进入)/);
-    assert.deepEqual(saved, snapshot);
+    assert.deepEqual(storage.current(), snapshot);
     assert.equal(engine.getActiveTask(), null);
     assert.equal(timers.size, 0);
     release(blocked === 'getData' ? snapshot : { baseId: 'base' });
     for (let i = 0; i < 30; i++) await Promise.resolve();
     assert.equal(statusReads, 0);
     assert.equal(writes, 0);
-    assert.deepEqual(saved, snapshot);
+    assert.deepEqual(storage.current(), snapshot);
     owner[blocked] = original;
     await f.action();
     assert.equal(statusReads, 1, '显式恢复后读取原任务，迟到的旧读取不能自行启动');
@@ -345,11 +348,12 @@ test('后台创建失败不保存任务、不显示恢复入口，仍可重新�
 });
 
 test('真实任务清理超时后不能新建，旧清理晚返回仍保持保护', async () => {
-  const f = fixture(); let saved = { taskId: 'old-task', cursor: 'last', writtenCount: 4 }, release;
+  const f = fixture(); let release;
+  const storage = createTaskStorage('test', { taskId: 'old-task', cursor: 'last', writtenCount: 4 });
   const timers = new Map(); let timerId = 0;
   const bitable = { base: { getSelection: async () => ({ baseId: 'base' }) }, bridge: {
-    getData: async () => structuredClone(saved),
-    setData: async (_, value) => { if (!value.taskId) await new Promise(resolve => { release = resolve; }); saved = structuredClone(value); },
+    getData: storage.getData,
+    setData: async (key, value) => { if (value.finished) await new Promise(resolve => { release = resolve; }); await storage.setData(key, value); },
   } };
   const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
     .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');

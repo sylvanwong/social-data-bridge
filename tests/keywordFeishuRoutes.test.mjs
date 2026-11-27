@@ -1,5 +1,6 @@
 import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
 import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
+import { createTaskStorage } from './helpers/taskStorage.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -98,9 +99,10 @@ test('关键词恢复保留来源与游标，停止确认后写完剩余结果�
   const first = fixture();
   await first.create('target-table');
   let saved, timerId = 0;
+  const storage = createTaskStorage('keyword-test');
   const timers = new Map(), rows = [], finished = [];
   const sdk = { base: { getSelection: async () => ({ baseId: 'base' }) },
-    bridge: { getData: async () => structuredClone(saved), setData: async (_, value) => { saved = structuredClone(value); } } };
+    bridge: { getData: storage.getData, setData: async (key, value) => { await storage.setData(key, value); saved = storage.current(); } } };
   const source = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
     .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
   const createEngine = new Function('bitable', 'setTimeout', 'clearTimeout', `${source}; return useIncrementalTask;`)(sdk,
