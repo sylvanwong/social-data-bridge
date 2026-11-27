@@ -26,7 +26,7 @@ function load(name, scope) {
 }
 function fixture() {
   const messages = []; let created = 0, resumed = 0, cancelled = 0;
-  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, commentSubmission: { pending: null }, componentUnmounted: false,
+  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, componentUnmounted: false,
     clearing: { value: false }, loading: { value: true }, isSubmitting: { value: false }, isCancelling: { value: false },
     activeCommentTaskId: { value: 'old-task' }, hasRecoverableTask: { value: false }, recoveryRequiresReopen: { value: false },
     props: { api_key: '' }, selectedFieldKeys: { value: ['cid'] },
@@ -35,13 +35,14 @@ function fixture() {
     commit: () => { created++; }, cancelCommentTask: () => { cancelled++; },
   };
   const callbacks = declarations.find(node => node.id.name === 'commentStreamTask').init.arguments[0].properties;
-  const onError = evaluate(callbacks.find(node => node.key.name === 'onError').value, scope);
+  const reportError = evaluate(callbacks.find(node => node.key.name === 'onError').value, scope);
+  const onError = (error, task = { taskId: 'old-task' }) => reportError(error, task);
   const onFinish = evaluate(callbacks.find(node => node.key.name === 'onFinish').value, scope);
   scope.commentStreamTask = { resume: async restore => { resumed++; await restore({ taskId: 'old-task' }); return true; } };
   scope.taskActionState = load('taskActionState', scope);
   scope.resumeCommentTask = (...args) => load('resumeCommentTask', scope)(...args);
   const action = load('handleTaskAction', scope);
-  const labelExpression = descriptor.template.content.match(/\{\{ (taskActionState[^\n]+?) \}\}/)[1];
+  const labelExpression = descriptor.template.content.match(/\{\{ (feedback\.endingMissingTarget[^\n]+?) \}\}/)[1];
   return { scope, onError, onFinish, action, messages,
     label: () => new Function('taskActionState', 'recoveryRequiresReopen', 'feedback', `return (${labelExpression});`)(
       scope.taskActionState.value, scope.recoveryRequiresReopen.value, scope.feedback ?? {}),
@@ -182,7 +183,7 @@ test('页面初始化等待期间卸载，晚返回不会再发起任务恢复',
   const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, loadFieldOptions: () => new Promise(resolve => { release = resolve; }),
     loadSelectedFieldKeys: async () => {}, loadTableOutputConfigs: async () => {},
     fieldSelectionReady: { value: false }, isSubmitting: { value: true },
-    commentSubmission: { pending: null }, resumeCommentTask: async () => { resumes++; }, commentStreamTask: { stop: () => { stops++; }, resume: async () => { resumes++; } },
+    resumeCommentTask: async () => { resumes++; }, commentStreamTask: { stop: () => { stops++; }, resume: async () => { resumes++; } },
     closeNoteInterval() {}, toastTimer: null,
   };
   const lifecycle = new Function(...Object.keys(scope), `let componentUnmounted = false; return {
@@ -193,75 +194,75 @@ test('页面初始化等待期间卸载，晚返回不会再发起任务恢复',
   assert.equal(resumes, 0);
 });
 
-test('提交接口在页面卸载后返回，保存任务但不在旧页面启动', async () => {
-  const ast = parseJS(source, { sourceType: 'module' }).program.body;
-  const unmounted = ast.find(node => node.type === 'ExpressionStatement'
-    && node.expression.type === 'CallExpression' && node.expression.callee.name === 'onUnmounted').expression.arguments[0];
-  const submit = declarations.find(node => node.id.name === 'postNoteTask').init;
-  let release, releaseSave, starts = 0, saved;
-  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, ...loadRequestModule(), request: () => new Promise(resolve => { release = resolve; }), showToast() {},
-    props: { api_key: 'test' }, formData: { value: { pages: 1, reply_pages: -1 } },
-    selectedFieldKeys: { value: ['cid'] }, mappingDraft: { value: [] }, activeCommentTaskId: { value: '' },
-    commentSubmission: { pending: null },
-    commentStreamTask: { stop() {}, saveForResume: async task => { await new Promise(resolve => { releaseSave = resolve; }); saved = task; }, resume: async () => { starts++; }, start: () => { starts++; } }, closeNoteInterval() {}, toastTimer: null,
+function commentSubmissionFixture({ status = 3, operationTimeoutMs = 0 } = {}) {
+  const storage = createTaskStorage('comment-submit');
+  const timers = new Map(); let timerId = 0, write = storage.setData, creates = 0, reads = 0;
+  let create = async () => ({ data: { sta: 0, data: { task_id: 'created-task' } } });
+  const bitable = { base: { getSelection: async () => ({ baseId: 'base' }) }, bridge: {
+    getData: storage.getData, setData: (...args) => write(...args),
+  } };
+  const source = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
+    .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
+  const useIncrementalTask = new Function('bitable', 'setTimeout', 'clearTimeout', `${source};return useIncrementalTask;`)(bitable,
+    (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; }, id => timers.delete(id));
+  const open = () => {
+    const f = fixture();
+    f.scope.loading.value = false;
+    Object.assign(f.scope, {
+      request: async () => { creates++; return create(); },
+      formData: { value: { pages: 1, reply_pages: -1 } }, mappingDraft: { value: [] },
+      commentStreamTask: useIncrementalTask({ storageKey: 'comment-submit', operationTimeoutMs,
+        getStatus: async () => { reads++; return { status }; },
+        isTerminal: status => status.status === 3,
+        getResults: async () => ({ items: [] }), writeBatch: async () => assert.fail('本次夹具没有写入结果'),
+        requestStop: async () => ({ status: 3 }), onError: f.onError, onFinish: f.onFinish,
+      }),
+    });
+    return { ...f, submit: load('postNoteTask', f.scope), engine: f.scope.commentStreamTask };
   };
-  scope.feishuRequest = config => scope.request(config);
-  const page = new Function(...Object.keys(scope), `let componentUnmounted = false; return {
-    submit: (${source.slice(submit.start, submit.end)}), unmount: (${source.slice(unmounted.start, unmounted.end)})
-  };`)(...Object.values(scope));
-  const pending = page.submit('table', 'https://example.test'); page.unmount();
-  let resumed = 0;
-  const mounted = ast.find(node => node.type === 'ExpressionStatement'
-    && node.expression.type === 'CallExpression' && node.expression.callee.name === 'onMounted').expression.arguments[0];
-  const nextPage = { componentUnmounted: false, commentSubmission: scope.commentSubmission,
-    loadFieldOptions: async () => {}, loadSelectedFieldKeys: async () => {}, loadTableOutputConfigs: async () => {},
-    fieldSelectionReady: { value: false }, isSubmitting: { value: true },
-    resumeCommentTask: async () => { assert.equal(saved?.taskId, 'late-task'); resumed++; },
-  };
-  const mounting = evaluate(mounted, nextPage)();
-  release({ data: { sta: 0, data: { task_id: 'late-task' } } });
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(nextPage.isSubmitting.value, true);
-  assert.equal(resumed, 0, '接口已返回但身份未保存时，新页面仍不能恢复或新建');
-  releaseSave(); await pending; await mounting;
-  assert.equal(resumed, 1);
-  assert.equal(starts, 0);
-  assert.equal(saved?.taskId, 'late-task');
-  assert.equal(saved.targetTableId, 'table');
-  assert.equal(saved.pendingCommentWrite, false);
+  return { open, storage, timers, setWrite: value => { write = value; }, setCreate: value => { create = value; },
+    creates: () => creates, reads: () => reads };
+}
+
+test('评论离开后创建响应迟到，新页面等首次保存结束才恢复同一任务', async () => {
+  const f = commentSubmissionFixture();
+  const first = f.open();
+  const created = Promise.withResolvers(), writing = Promise.withResolvers(), ready = Promise.withResolvers();
+  f.setCreate(() => created.promise);
+  f.setWrite(async (key, value) => {
+    if (key === 'comment-submit') {
+      ready.resolve(value);
+      await writing.promise;
+    }
+    return f.storage.setData(key, value);
+  });
+  const pending = first.submit('original', 'url');
+  first.engine.stop();
+  const next = f.open();
+  const resumed = next.scope.resumeCommentTask();
+  created.resolve({ data: { sta: 0, data: { task_id: 'created-task' } } });
+  const snapshot = await ready.promise;
+  assert.equal(snapshot.taskId, 'created-task');
+  assert.equal(snapshot.targetTableId, 'original');
+  assert.equal(snapshot.pendingCommentWrite, false);
+  assert.equal(f.reads(), 0);
+  assert.equal(next.scope.isSubmitting.value, true);
+  writing.resolve();
+  await Promise.all([pending, resumed]);
+  assert.equal(f.creates(), 1);
+  assert.equal(f.reads(), 1);
+  assert.equal(next.label(), '立即执行');
 });
-
-
-test('重新进入页面先等待旧提交保存，再恢复同一任务，等待期间不能新建', async () => {
-  const ast = parseJS(source, { sourceType: 'module' }).program.body;
-  const mounted = ast.find(node => node.type === 'ExpressionStatement'
-    && node.expression.type === 'CallExpression' && node.expression.callee.name === 'onMounted').expression.arguments[0];
-  let release, resumes = 0;
-  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, componentUnmounted: false,
-    commentSubmission: { pending: new Promise(resolve => { release = resolve; }) },
-    loadFieldOptions: async () => {}, loadSelectedFieldKeys: async () => {}, loadTableOutputConfigs: async () => {},
-    fieldSelectionReady: { value: false }, isSubmitting: { value: true },
-    resumeCommentTask: async () => { resumes++; },
-  };
-  const pending = evaluate(mounted, scope)();
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  assert.equal(resumes, 0);
-  assert.equal(scope.isSubmitting.value, true);
-  release(); await pending;
-  assert.equal(resumes, 1);
-  assert.equal(scope.isSubmitting.value, false);
-});
-
 
 for (const outcome of ['error', 'missing']) {
-  test(`新任务已保存但恢复读取${outcome}时保留恢复入口，不能新建覆盖`, async () => {
+  test(`评论新任务已保存但恢复读取${outcome}时保留恢复入口`, async () => {
     const f = fixture();
     Object.assign(f.scope, {
-      commentSubmission: { pending: null },
-      request: async () => ({ data: { sta: 0, data: { task_id: 'saved-task' } } }),
       formData: { value: { pages: 1, reply_pages: -1 } }, mappingDraft: { value: [] },
-      commentStreamTask: { saveForResume: async () => {}, resume: async () => {
-        if (outcome === 'error') throw new Error('读取恢复进度失败');
+      request: async () => ({ data: { sta: 0, data: { task_id: 'saved-task' } } }),
+      commentStreamTask: { submit: async create => {
+        const task = await create();
+        if (outcome === 'error') return f.onError(new Error('读取恢复进度失败'), task);
         return false;
       } },
     });
@@ -272,79 +273,63 @@ for (const outcome of ['error', 'missing']) {
   });
 }
 
-
-test('保存任务身份超时后保留恢复保护，不能新建任务等待旧写入覆盖', async () => {
-  const f = fixture();
-  const error = Object.assign(new Error('保存写入进度超时'), { requiresReopen: true });
-  Object.assign(f.scope, {
-    commentSubmission: { pending: null },
-    request: async () => ({ data: { sta: 0, data: { task_id: 'created-task' } } }),
-    formData: { value: { pages: 1 } }, mappingDraft: { value: [] },
-    commentStreamTask: { saveForResume: async () => { throw error; } },
+test('评论首次保存持续失败仍可结束原任务，成功后清除提交保护', async () => {
+  const f = commentSubmissionFixture();
+  f.setWrite(async (key, value) => {
+    if (key === 'comment-submit') throw new Error('保存失败');
+    return f.storage.setData(key, value);
   });
-  await load('postNoteTask', f.scope)('table', 'url');
-  assert.equal(f.label(), '请重新进入插件恢复');
-  assert.equal(f.scope.recoveryRequiresReopen.value, true);
-  assert.ok(f.scope.commentSubmission.pending, '保存失败不能被新页面当成无待处理任务');
-  const mounted = parseJS(source, { sourceType: 'module' }).program.body.find(node => node.type === 'ExpressionStatement'
-    && node.expression.type === 'CallExpression' && node.expression.callee.name === 'onMounted').expression.arguments[0];
-  const reopened = fixture();
-  reopened.scope.loading.value = false;
-  reopened.scope.isSubmitting.value = true;
-  Object.assign(reopened.scope, {
-    commentSubmission: f.scope.commentSubmission,
-    loadFieldOptions: async () => {}, loadSelectedFieldKeys: async () => {}, loadTableOutputConfigs: async () => {},
-    fieldSelectionReady: { value: false },
-  });
-  await evaluate(mounted, reopened.scope)();
-  assert.equal(reopened.label(), '请重新进入插件恢复');
-  assert.equal(reopened.scope.recoveryRequiresReopen.value, true);
-  assert.equal(reopened.resumed(), 0);
-  await reopened.action();
-  assert.equal(reopened.created(), 0);
-  assert.equal(reopened.resumed(), 0);
+  const page = f.open();
+  const next = f.open();
+  await page.submit('table', 'url');
+  assert.equal(page.label(), '恢复任务');
+  assert.equal(f.reads(), 0);
+  const retry = await next.engine.resume().catch(error => error);
+  const end = retry.endPausedTask;
+  assert.match(retry.message, /保存失败/);
+  assert.equal(typeof end, 'function');
+  assert.equal(await end(), true);
+  assert.equal(await next.engine.resume(), false);
+  assert.equal(f.creates(), 1);
+  assert.equal(f.reads(), 1);
 });
 
-for (const timeout of [false, true]) {
-  test(`补存再次失败仍保留原任务信息${timeout ? '并保护未结束的保存' : '，再次恢复可继续'}`, async () => {
-    const f = fixture(); f.scope.loading.value = false;
-    const task = { taskId: 'created-task', targetTableId: 'table', writeMode: 'append',
-      pendingCommentWrite: false, fieldMappings: [{ source_key: 'cid', target_field_id: 'custom-id' }] };
-    const initial = Object.assign(new Error('initial save failed'), { taskCreated: true, createdTask: task });
-    f.scope.commentSubmission.pending = Promise.reject(initial);
-    let saves = 0, resumes = 0;
-    f.scope.commentStreamTask = {
-      saveForResume: async saved => {
-        assert.deepEqual(saved, task); saves++;
-        if (saves === 1) throw Object.assign(new Error('save failed again'), { requiresReopen: timeout });
-      },
-      resume: async () => { resumes++; return true; },
-    };
-    await f.scope.resumeCommentTask();
-    assert.equal(resumes, 0);
-    assert.equal(f.label(), timeout ? '请重新进入插件恢复' : '恢复任务');
-    assert.equal(f.scope.recoveryRequiresReopen.value, timeout);
-    const error = await f.scope.commentSubmission.pending.catch(error => error);
-    assert.deepEqual(error.createdTask, task);
-    await f.action();
-    assert.equal(saves, timeout ? 1 : 2);
-    assert.equal(resumes, timeout ? 0 : 1);
-    if (!timeout) assert.equal(f.scope.commentSubmission.pending, null);
-    assert.equal(f.created(), 0);
+test('评论首次保存超时保持在途保护，迟到成功后重进恢复原任务', async () => {
+  const f = commentSubmissionFixture({ operationTimeoutMs: 180000 });
+  const ready = Promise.withResolvers(), save = Promise.withResolvers();
+  f.setWrite(async (key, value) => {
+    ready.resolve();
+    await save.promise;
+    return f.storage.setData(key, value);
   });
-}
+  const first = f.open();
+  const pending = first.submit('table', 'url');
+  await ready.promise;
+  [...f.timers.values()].find(timer => timer.delay === 180000).fn();
+  await pending;
+  assert.equal(first.label(), '请重新进入插件恢复');
+  const next = f.open();
+  await next.scope.resumeCommentTask();
+  assert.equal(next.label(), '请重新进入插件恢复');
+  assert.equal(f.reads(), 0);
+  assert.equal(f.creates(), 1);
+  save.resolve();
+  await new Promise(setImmediate);
+  const recovered = f.open();
+  await recovered.scope.resumeCommentTask();
+  assert.equal(recovered.label(), '立即执行');
+  assert.equal(f.reads(), 1);
+  assert.equal(f.creates(), 1);
+});
 
-test('后台创建失败不保存任务、不显示恢复入口，仍可重新提交', async () => {
-  const f = fixture();
-  Object.assign(f.scope, {
-    request: async () => ({ data: { sta: 1, msg: '创建失败' } }),
-    formData: { value: { pages: 1 } }, mappingDraft: { value: [] },
-    commentStreamTask: { saveForResume: async () => assert.fail('未创建任务不能保存') },
-  });
-  await load('postNoteTask', f.scope)('table', 'url');
-  assert.equal(f.label(), '立即执行');
-  assert.equal(f.scope.commentSubmission.pending, null);
-  assert.equal(f.scope.hasRecoverableTask.value, false);
+test('评论后台创建失败可直接重新执行', async () => {
+  const f = commentSubmissionFixture();
+  f.setCreate(async () => ({ data: { sta: 1, msg: '创建失败' } }));
+  const page = f.open();
+  await page.submit('table', 'url');
+  assert.equal(page.label(), '立即执行');
+  assert.equal(page.scope.hasRecoverableTask.value, false);
+  assert.equal(await f.storage.getData('comment-submit'), undefined);
 });
 
 test('真实任务清理超时后不能新建，旧清理晚返回仍保持保护', async () => {

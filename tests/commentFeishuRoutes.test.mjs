@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import { parse } from '@vue/compiler-sfc';
 import { parse as parseJS } from '@babel/parser';
 import { loadRequestModule } from './helpers/requestService.mjs';
+import { getPendingWriteLimit } from '../src/utils/taskWriteState.mjs';
 
 const source = parse(fs.readFileSync(new URL('../src/components/CommentFetch.vue', import.meta.url), 'utf8')).descriptor.scriptSetup.content;
 const declarations = parseJS(source, { sourceType: 'module' }).program.body
@@ -23,8 +24,8 @@ function fixture(task = { taskId: 'old-task' }, env = production) {
     return { config, status: 200, data: await reply(call) };
   };
   const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult,
+    getPendingWriteLimit, RESULT_BATCH_SIZE: 20,
     ...api, request: api.service, props: { api_key: 'test-only' }, componentUnmounted: false,
-    commentSubmission: { pending: null },
     selectedFieldKeys: { value: ['cid', 'text'] },
     mappingDraft: { value: [{ source_key: 'text', target_field_id: 'body-field' }] },
     formData: { value: { pages: 2, reply_pages: -1, writeMode: 'append' } },
@@ -33,12 +34,13 @@ function fixture(task = { taskId: 'old-task' }, env = production) {
     stoppedCommentProgress: () => '正在停止', showToast() {},
     showErrorMsg: message => errors.push(message), feedback: { fail: message => errors.push(message) }, console: { error() {}, log() {} },
     commentStreamTask: { getActiveTask: () => task,
-      saveForResume: async created => { submitted = structuredClone(created); }, resume: async () => true },
+      submit: async create => { submitted = structuredClone(await create()); return true; } },
   };
   const handler = name => {
     const node = declarations.find(item => item.id.name === name).init;
     return new Function(...Object.keys(bindings), `return (${source.slice(node.start, node.end)});`)(...Object.values(bindings));
   };
+  bindings.getCommentResultLimit = handler('getCommentResultLimit');
   if (declarations.some(node => node.id.name === 'commentTaskApiPath')) bindings.commentTaskApiPath = handler('commentTaskApiPath');
   const callbacks = Object.fromEntries(declarations.find(node => node.id.name === 'commentStreamTask').init.arguments[0].properties
     .filter(node => ['getStatus', 'getResults', 'isTerminal'].includes(node.key.name))

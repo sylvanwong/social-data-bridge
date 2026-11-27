@@ -912,16 +912,24 @@ const stopStreamTask = () => { profileStreamTask.stop(); activeStreamTask = null
 const resumeSavedStreamTask = async (endMissingTarget = false, expectedTask) => {
   if (componentUnmounted || isSubmitting.value || loading.value) return;
   if (recoveryRequiresReopen.value) return;
+  if (endMissingTarget === 'paused') {
+    if (!feedback.endPausedAction.value) return;
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, recoveryRequiresReopen, undefined, () => { pausedWriteCount.value = 0; }, feedback.endPausedAction);
+  }
   if (endMissingTarget && feedback.missingTargetAction?.value) {
     return feedback.endMissingTargetTask(loading, hasRecoverableTask, recoveryRequiresReopen, task => resumeSavedStreamTask(false, task));
   }
   pausedWriteCount.value = 0;
   isSubmitting.value = true;
   loading.value = true;
+  let fallbackEndAction = feedback.endPausedAction?.value;
   feedback.begin('正在检查未完成任务…');
   await nextTick();
   try {
-    const resumed = await profileStreamTask.resume(restoreProfileTask, expectedTask);
+    const resumed = await profileStreamTask.resume(task => {
+      fallbackEndAction = null;
+      return restoreProfileTask(task);
+    }, expectedTask, () => { hasRecoverableTask.value = false; });
     if (!componentUnmounted && !resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -932,7 +940,7 @@ const resumeSavedStreamTask = async (endMissingTarget = false, expectedTask) => 
     if (componentUnmounted) return;
     hasRecoverableTask.value = true; recoveryRequiresReopen.value = !!error.requiresReopen;
     loading.value = false;
-    feedback.fail(error, { persist: true, requiresReopen: recoveryRequiresReopen.value });
+    feedback.fail(error, { persist: true, requiresReopen: recoveryRequiresReopen.value, fallbackEndAction });
   } finally { if (!componentUnmounted) isSubmitting.value = false; }
 };
 
@@ -2210,7 +2218,11 @@ watch(
           :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
           :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || recoveryRequiresReopen"
           @click="handleTaskAction"
-        >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : pausedWriteCount ? '继续写入' : '恢复任务') : '立即执行' }}</el-button>
+        >{{ feedback.endingMissingTarget?.value ? '正在结束任务…' : taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : pausedWriteCount ? '继续写入' : '恢复任务') : '立即执行' }}</el-button>
+        <template v-if="taskActionState === 'recoverable' && feedback.endPausedAction?.value">
+          <el-button class="append-end-write-btn" @click="resumeSavedStreamTask('paused')">结束本次任务</el-button>
+          <p class="sub-hint">已写入的数据会保留，未写入的结果将无法继续写入。</p>
+        </template>
       </div>
 
       <div v-else class="schedule-inline-panel">

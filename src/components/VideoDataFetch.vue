@@ -1360,65 +1360,57 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
 
   const getFieldId = (key) => options.fieldMappings?.find(item => item.source_key === key && item.target_field_id)?.target_field_id
     || fieldMetaMap.get(FIELD_CONFIG.find(field => field.key === key)?.name);
-  if (typeof props !== 'undefined' && props.productDetail) {
-    const idFieldId = getFieldId('product_id');
-    if (!idFieldId) throw new Error('更新或新增需要“商品ID”字段');
-    const keyOf = value => Array.isArray(value) ? value.map(keyOf).join('') : String(value?.text ?? value ?? '').trim();
-    const existing = new Map();
-    let token;
-    do {
-      const page = await table.getRecordsByPage({ pageSize: 200, pageToken: token });
-      for (const row of page.records || []) {
-        const key = keyOf(row.fields?.[idFieldId]);
-        if (key) existing.set(key, row.recordId);
-      }
-      token = page.hasMore ? page.pageToken : undefined;
-    } while (token !== undefined);
-    const updates = [], creates = [];
-    list.forEach((item, index) => {
-      const recordId = existing.get(keyOf(item.product_id));
-      if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
-      else creates.push(records[index]);
-    });
-    if (updates.length) {
-      try { await table.setRecords(updates); } catch (error) { error.writeUncertain = true; throw error; }
-    }
-    if (creates.length) {
-      try { await table.addRecords(creates); } catch (error) { error.writeUncertain = true; throw error; }
-    }
-    return records.length;
+  const productDetail = typeof props !== 'undefined' && props.productDetail;
+  const idFieldId = getFieldId(productDetail ? 'product_id' : 'social_id');
+  const platformFieldId = productDetail ? null : getFieldId('social_type');
+  if (!idFieldId || (!productDetail && !platformFieldId)) {
+    throw new Error(productDetail ? '更新或新增需要“商品ID”字段' : '更新或新增需要“平台”和“作品ID”字段');
   }
-  const platformFieldId = getFieldId('social_type');
-  const videoIdFieldId = getFieldId('social_id');
-  if (!platformFieldId || !videoIdFieldId) throw new Error('更新或新增需要“平台”和“作品ID”字段');
-  const normalizeKeyPart = (value) => Array.isArray(value) ? value.map(normalizeKeyPart).join(',') : String(value?.text ?? value?.name ?? value ?? '').trim().toLowerCase();
-  const buildUniqueKey = (item) => {
-    const platform = normalizeKeyPart(item?.social_type);
-    const videoId = normalizeKeyPart(item?.social_id);
-    return platform && videoId ? `${platform}::${videoId}` : '';
+  const productKey = value => Array.isArray(value) ? value.map(productKey).join('') : String(value?.text ?? value ?? '').trim();
+  const normalizeKeyPart = value => Array.isArray(value) ? value.map(normalizeKeyPart).join(',') : String(value?.text ?? value?.name ?? value ?? '').trim().toLowerCase();
+  const keyOf = (id, platform) => {
+    if (productDetail) return productKey(id);
+    const type = normalizeKeyPart(platform);
+    const videoId = normalizeKeyPart(id);
+    return type && videoId ? `${type}::${videoId}` : '';
   };
-  const existingByKey = new Map();
-  let pageToken;
-  do {
-    const result = await table.getRecordsByPage({ pageSize: 200, pageToken });
-    for (const record of result.records || []) {
-      const key = buildUniqueKey({ social_type: record.fields?.[platformFieldId], social_id: record.fields?.[videoIdFieldId] });
-      if (key) existingByKey.set(key, record.recordId);
-    }
-    pageToken = result.hasMore ? result.pageToken : undefined;
-  } while (pageToken !== undefined);
+
+  const cacheKey = JSON.stringify([tableId, idFieldId, platformFieldId]);
+  let existingByKey = options.upsertIndex?.get(cacheKey);
+  if (!existingByKey) {
+    existingByKey = new Map();
+    let pageToken;
+    do {
+      const result = await table.getRecordsByPage({ pageSize: 200, pageToken });
+      for (const record of result.records || []) {
+        const key = keyOf(record.fields?.[idFieldId], record.fields?.[platformFieldId]);
+        if (key) existingByKey.set(key, record.recordId);
+      }
+      pageToken = result.hasMore ? result.pageToken : undefined;
+    } while (pageToken !== undefined);
+    options.upsertIndex?.set(cacheKey, existingByKey);
+  }
+
   const updates = [];
   const creates = [];
   list.forEach((item, index) => {
-    const recordId = existingByKey.get(buildUniqueKey(item));
+    const key = keyOf(productDetail ? item.product_id : item.social_id, item.social_type);
+    const recordId = existingByKey.get(key);
     if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
-    else creates.push(records[index]);
+    else creates.push({ key, cells: records[index] });
   });
-  if (updates.length) {
-    try { await table.setRecords(updates); } catch (error) { error.writeUncertain = true; throw error; }
-  }
-  if (creates.length) {
-    try { await table.addRecords(creates); } catch (error) { error.writeUncertain = true; throw error; }
+  try {
+    if (updates.length) await table.setRecords(updates);
+    if (creates.length) {
+      const ids = await table.addRecords(creates.map(item => item.cells));
+      if (Array.isArray(ids) && ids.length === creates.length && ids.every(Boolean)) {
+        creates.forEach(({ key }, index) => { if (key) existingByKey.set(key, ids[index]); });
+      } else options.upsertIndex?.delete(cacheKey);
+    }
+  } catch (error) {
+    options.upsertIndex?.delete(cacheKey);
+    error.writeUncertain = true;
+    throw error;
   }
   return records.length;
 };
@@ -2270,10 +2262,11 @@ const handleTableModeSubmit = async () => {
       return;
     }
 
+    const upsertIndex = new Map();
     const { successCount, failCount, stopped } = await fetchVideoDataByRows(rowList, {
       activeFieldConfigs,
       selectedFieldKeys: executionSelectedFieldKeys,
-      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, { fieldMappings: executionMappings, writeMode: executionWriteMode }),
+      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, { upsertIndex, fieldMappings: executionMappings, writeMode: executionWriteMode }),
     });
 
     finishToast(
@@ -2331,10 +2324,11 @@ const handleManualModeSubmit = async () => {
       return;
     }
 
+    const upsertIndex = new Map();
     const { successCount, failCount, stopped } = await fetchVideoDataByRows(rowList, {
       activeFieldConfigs,
       selectedFieldKeys: executionSelectedFieldKeys,
-      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, { fieldMappings: executionMappings, writeMode: executionWriteMode }),
+      onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, { upsertIndex, fieldMappings: executionMappings, writeMode: executionWriteMode }),
     });
 
     finishToast(

@@ -33,6 +33,7 @@ function fixture(t, page, taskName, overrides = {}) {
     getFirstKeyword: text => String(text).split(',')[0], auth: () => ({}),
     request: async () => ({ data: { sta: 0, data: { task_id: 'task-1' } } }),
     validateTableFields: async () => true,
+    saveKeywordHistory: async () => {},
     bitable: { bridge: { setData() {} } },
     showErrorMsg: message => notifications.push({ message, type: 'error', plain: true, duration: 3000 }),
     ElMessage: message => notifications.push(message), console: { error() {} },

@@ -990,37 +990,45 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs, options =
   if (keyEntries.some(item => !item?.fieldId)) {
     throw new Error('更新或新增需要“平台”和“作者ID”字段');
   }
-  const existingByKey = new Map();
-  let pageToken;
-  do {
-    const result = await table.getRecordsByPage({ pageSize: 200, pageToken });
-    for (const record of result.records || []) {
-      const key = buildBloggerUniqueKey({
-        social_type: record.fields?.[keyEntries[0].fieldId],
-        user_id: record.fields?.[keyEntries[1].fieldId],
-      });
-      if (key) existingByKey.set(key, record.recordId);
-    }
-    pageToken = result.hasMore ? result.pageToken : undefined;
-  } while (pageToken !== undefined);
+  const cacheKey = JSON.stringify([tableId, ...keyEntries.map(entry => entry.fieldId)]);
+  let existingByKey = options.upsertIndex?.get(cacheKey);
+  if (!existingByKey) {
+    existingByKey = new Map();
+    let pageToken;
+    do {
+      const result = await table.getRecordsByPage({ pageSize: 200, pageToken });
+      for (const record of result.records || []) {
+        const key = buildBloggerUniqueKey({
+          social_type: record.fields?.[keyEntries[0].fieldId],
+          user_id: record.fields?.[keyEntries[1].fieldId],
+        });
+        if (key) existingByKey.set(key, record.recordId);
+      }
+      pageToken = result.hasMore ? result.pageToken : undefined;
+    } while (pageToken !== undefined);
+    options.upsertIndex?.set(cacheKey, existingByKey);
+  }
 
   const updates = [];
   const creates = [];
   list.forEach((item, index) => {
     const key = buildBloggerUniqueKey(item);
-    if (!key) {
-      creates.push(records[index]);
-      return;
-    }
-    const recordId = existingByKey.get(key);
+    const recordId = key && existingByKey.get(key);
     if (recordId) updates.push({ recordId, fields: normalizedRecords[index] });
-    else creates.push(records[index]);
+    else creates.push({ key, cells: records[index] });
   });
-  if (updates.length) {
-    try { await table.setRecords(updates); } catch (error) { error.writeUncertain = true; throw error; }
-  }
-  if (creates.length) {
-    try { await table.addRecords(creates); } catch (error) { error.writeUncertain = true; throw error; }
+  try {
+    if (updates.length) await table.setRecords(updates);
+    if (creates.length) {
+      const ids = await table.addRecords(creates.map(item => item.cells));
+      if (Array.isArray(ids) && ids.length === creates.length && ids.every(Boolean)) {
+        creates.forEach(({ key }, index) => { if (key) existingByKey.set(key, ids[index]); });
+      } else options.upsertIndex?.delete(cacheKey);
+    }
+  } catch (error) {
+    options.upsertIndex?.delete(cacheKey);
+    error.writeUncertain = true;
+    throw error;
   }
   return records.length;
 };
@@ -1832,9 +1840,11 @@ const handleTableModeSubmit = async () => {
       return;
     }
 
+    const upsertIndex = new Map();
     const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
       selectedFieldKeys: fields,
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, {
+        upsertIndex,
         writeMode: executionWriteMode,
         fieldMappings: executionMappings,
       }),
@@ -1888,9 +1898,11 @@ const handleManualModeSubmit = async () => {
       return;
     }
 
+    const upsertIndex = new Map();
     const { successCount, failCount, stopped } = await fetchBloggerInfoByRows(rowList, {
       selectedFieldKeys: fields,
       onSuccess: (item) => appendRecordsToTable(targetTableId, [item], activeFieldConfigs, {
+        upsertIndex,
         writeMode: executionWriteMode,
         fieldMappings: executionMappings,
       }),

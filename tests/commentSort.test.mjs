@@ -47,13 +47,13 @@ for (const targetTableId of ['', 'existing-table']) {
     const requests = [];
     const saved = [];
     const scope = {
-      componentUnmounted: false, commentSubmission: { pending: null }, props: { api_key: 'test-key' },
+      componentUnmounted: false, props: { api_key: 'test-key' },
       formData: { value: { pages: 2, reply_pages: -1, sortType: 'default', writeMode: 'upsert' } },
       selectedFieldKeys: { value: ['cid'] }, mappingDraft: { value: [] }, loading: { value: false }, hasRecoverableTask: { value: false },
       activeCommentTaskId: { value: '' }, recoveryRequiresReopen: { value: false },
       showToast() {}, showCompletionToast() {}, showErrorMsg() {},
       request: async config => { requests.push(config); return { data: { sta: 0, data: { task_id: 'created' } } }; },
-      commentStreamTask: { saveForResume: async task => saved.push(task), resume: async () => true },
+      commentStreamTask: { submit: async create => { saved.push(await create()); return true; } },
     };
     scope.postNoteTask = load('postNoteTask', scope);
     const submit = load('getNoteData', scope);

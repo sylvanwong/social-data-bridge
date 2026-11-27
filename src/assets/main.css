@@ -138,3 +138,29 @@ html {
   :root .el-button.commit-btn { transition: none; }
   :root .el-button.commit-btn .el-icon.is-loading { animation: none; }
 }
+
+:root .el-button.append-end-write-btn {
+  --el-button-text-color:#4e5969;
+  --el-button-bg-color:#fff;
+  --el-button-border-color:#c9cdd4;
+  --el-button-hover-text-color:#4e5969;
+  --el-button-hover-bg-color:#f7f8fa;
+  --el-button-hover-border-color:#86909c;
+  --el-button-active-text-color:#4e5969;
+  --el-button-active-bg-color:#f2f3f5;
+  --el-button-active-border-color:#86909c;
+  --el-button-disabled-text-color:#86909c;
+  --el-button-disabled-bg-color:#fafafa;
+  --el-button-disabled-border-color:#e5e6eb;
+  display:block;
+  box-sizing:border-box;
+  width:100%;
+  height:36px;
+  margin:8px 0 0;
+  border-radius:6px;
+}
+:root .el-button.append-end-write-btn:focus-visible:enabled {
+  border:2px solid #86909c;
+  outline:none;
+  box-shadow:none;
+}

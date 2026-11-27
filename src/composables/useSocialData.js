@@ -1,4 +1,5 @@
 import { nextTableName } from '../utils/tableNames.mjs';
+import { matchWrittenAppendRows, readTableRecords } from '../utils/taskWriteState.mjs';
 import { resolveWritableField } from "../utils/tableFields.js";
 import { bitable, DateFormatter, FieldType, NumberFormatter } from "@lark-base-open/js-sdk";
 import { ElMessage } from "element-plus";
@@ -478,21 +479,6 @@ const chunkRecords = (records, size = 200) => {
     chunks.push(records.slice(index, index + size));
   }
   return chunks;
-};
-
-const readTableRecords = async (table, assertActive) => {
-  const records = [];
-  let pageToken;
-  do {
-    const page = await table.getRecordsByPage({ pageSize: 200, pageToken });
-    assertActive?.();
-    records.push(...page.records);
-    if (page.hasMore && (!page.pageToken || page.pageToken === pageToken)) {
-      throw new Error('读取目标表时未返回有效分页游标，无法核对写入结果');
-    }
-    pageToken = page.hasMore ? page.pageToken : undefined;
-  } while (pageToken !== undefined);
-  return records;
 };
 
 export const showErrorMsg = (message) => {
@@ -1005,9 +991,9 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       }
       let recordIds = [];
       let writePrepared = false;
-      const writeBatch = async (write) => {
+      const writeBatch = async (write, saveCheckpoint = false) => {
         options.assertActive?.();
-        if (!writePrepared) {
+        if (!writePrepared || saveCheckpoint) {
           await options.onBeforeWrite?.();
           writePrepared = true;
         } else if (options.assertCanWrite) {
@@ -1089,20 +1075,25 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
       } else if (options.appendState) {
         const state = options.appendState;
         const fieldIds = availableFieldList.map(({ field }) => field.id);
-        if (state && !state.knownRecordIds) {
-          // 保留正常追加语义：历史同内容记录不能抵扣本次失败批次。
-          state.knownRecordIds = (await readTableRecords(activeTable, options.assertActive)).map(record => record.recordId);
-          state.fieldIds = fieldIds;
-        }
-        const knownRecordIds = new Set(state.knownRecordIds);
         options.assertActive?.();
-        if (state?.pendingCount && JSON.stringify(state.fieldIds) !== JSON.stringify(fieldIds)) {
+        if (state.pendingCount && JSON.stringify(state.fieldIds) !== JSON.stringify(fieldIds)) {
           throw new Error('目标字段已变化，无法核对上次写入，请恢复原字段后继续');
         }
+        if (state.pendingCount && !Array.isArray(state.knownRecordIds) && !(state.knownRecordIds instanceof Set)) {
+          throw new Error('无法区分历史行和本批新增结果，已暂停自动恢复');
+        }
         state.fieldIds = fieldIds;
-        // 有稳定标识时只用标识核对新增行，重传附件的 token 不稳定。
-        const matchFields = keyConfigs.length
+        // 有稳定标识的任务保留本批已确认的记录 ID；推荐词沿用原内容核对。
+        const rememberConfirmed = keyConfigs.length > 0;
+        // 重传附件的 token 不稳定，有稳定标识时只用标识核对新增行。
+        const matchFields = rememberConfirmed
           ? availableFieldList.filter(({ config }) => keyConfigs.some(key => key.key === config.key)) : availableFieldList;
+        // 有稳定文本标识的任务按批使用 SDK 筛选，无稳定标识的推荐词沿用原核对方式。
+        const scopedBaseline = keyConfigs.length > 0 && matchFields.length === keyConfigs.length
+          && matchFields.every(({ fieldType }) => fieldType === FieldType.Text);
+        if (!scopedBaseline && !state.knownRecordIds) {
+          state.knownRecordIds = (await readTableRecords(activeTable, options.assertActive)).map(record => record.recordId);
+        }
         const recordKey = fields => JSON.stringify(matchFields.map(({ field, fieldType }) => {
           const value = fields[field.id];
           if (fieldType === FieldType.Text) {
@@ -1112,43 +1103,62 @@ export const useSocialData = (getTableName, api_key, fieldMapping = FIELD_MAPPIN
           if (fieldType === FieldType.Url && Array.isArray(value)) return value.map(part => ({ type: part.type, text: part.text ?? '', link: part.link ?? '' }));
           return value ?? null;
         }));
+        const readMatches = async keys => {
+          const expected = new Set(keys);
+          if (!scopedBaseline) {
+            return (await readTableRecords(activeTable, options.assertActive)).filter(record => expected.has(recordKey(record.fields)));
+          }
+          const conditions = new Map();
+          for (const key of expected) {
+            const values = JSON.parse(key);
+            // 作者备用标识只在主 ID 为空时参与筛选，读回后仍按完整标识核对。
+            const index = values.findIndex(value => typeof value === 'string' && value !== '');
+            if (index < 0) throw new Error('本批写入标识为空，无法核对追加结果');
+            const fieldId = matchFields[index].field.id;
+            const value = values[index];
+            conditions.set(JSON.stringify([fieldId, value]), { fieldId, operator: 'is', value });
+          }
+          const filter = { conjunction: 'or', conditions: [...conditions.values()] };
+          const matches = await readTableRecords(activeTable, options.assertActive, filter);
+          return matches.filter(record => expected.has(recordKey(record.fields)));
+        };
         let offset = 0;
         for (const batch of chunkRecords(records)) {
           let pending = batch;
           const recoveredIds = [];
-          if (state?.pendingCount) {
+          const keys = normalizedRecords.slice(offset, offset + batch.length).map(recordKey);
+          if (state.pendingCount) {
             if (state.pendingCount !== batch.length) throw new Error('待核对批次与原结果不一致');
-            const keys = normalizedRecords.slice(offset, offset + batch.length).map(recordKey);
-            const expected = new Map();
-            keys.forEach(key => expected.set(key, (expected.get(key) || 0) + 1));
-            const matches = new Map();
-            for (const record of await readTableRecords(activeTable, options.assertActive)) {
-              if (knownRecordIds.has(record.recordId)) continue;
-              const key = recordKey(record.fields);
-              if (!expected.has(key)) continue;
-              const ids = matches.get(key) || [];
-              ids.push(record.recordId);
-              if (ids.length > expected.get(key)) throw new Error('核对到多于预期的相同记录，请检查目标表后再继续');
-              matches.set(key, ids);
+            if (state.matchKeys && JSON.stringify(state.matchKeys) !== JSON.stringify(keys)) {
+              throw new Error('待核对批次与原结果不一致');
             }
+            const confirmed = rememberConfirmed ? state.confirmedRecordIds : undefined;
+            const matches = matchWrittenAppendRows(keys, await readMatches(keys), state.knownRecordIds, recordKey, confirmed);
+            options.assertActive?.();
+            if (rememberConfirmed && matches.some(Boolean)) state.confirmedRecordIds = matches.map(id => id ?? null);
             pending = batch.filter((_, index) => {
-              const ids = matches.get(keys[index]);
-              if (!ids?.length) return true;
-              recoveredIds.push(ids.shift());
+              if (!matches[index]) return true;
+              recoveredIds.push(matches[index]);
               return false;
             });
+          } else if (scopedBaseline) {
+            state.knownRecordIds = (await readMatches(keys)).map(record => record.recordId);
+            state.matchKeys = keys;
           }
           options.assertActive?.();
-          if (state) state.pendingCount = batch.length;
-          const created = pending.length ? await writeBatch(() => activeTable.addRecords(pending)) : [];
+          state.pendingCount = batch.length;
+          const created = pending.length ? await writeBatch(() => activeTable.addRecords(pending), rememberConfirmed) : [];
           if (created.length !== pending.length) throw new Error('写入未完成，请检查目标表格后重试');
           options.assertActive?.();
           const completedIds = recoveredIds.concat(created);
-          if (state) {
-            completedIds.forEach(id => knownRecordIds.add(id));
-            state.knownRecordIds = [...knownRecordIds];
-            state.pendingCount = 0;
+          if (scopedBaseline) {
+            delete state.knownRecordIds;
+            delete state.matchKeys;
+          } else {
+            state.knownRecordIds = [...new Set([...state.knownRecordIds, ...completedIds])];
           }
+          if (rememberConfirmed) delete state.confirmedRecordIds;
+          state.pendingCount = 0;
           recordIds = recordIds.concat(completedIds);
           await options.onBatchWritten?.(batch.length);
           offset += batch.length;

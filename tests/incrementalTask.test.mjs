@@ -44,6 +44,133 @@ test('未配置等待时间的入口仍在 10 分钟无进度后暂停', async t
   } finally { h.task.stop(); }
 });
 
+test('暂停且尚未选定输出表也能结束，后台仍在执行时先等待停止确认', async () => {
+  let status = { status: 0 };
+  const cancelled = [];
+  const h = harness({
+    getStatus: async () => status,
+    isTerminal: value => [1, 2, 3].includes(value.status),
+    writeBatch: async () => { throw new Error('保存任务进度失败'); },
+    requestStop: async task => {
+      cancelled.push(task.taskId);
+      status = { status: 0, cancel_requested: true };
+      return status;
+    },
+  });
+  await h.task.start({ taskId: 'old', targetTableId: '' });
+  const end = h.errors[0].endPausedTask;
+  assert.equal(typeof end, 'function');
+  await assert.rejects(end(), /任务正在停止/);
+  assert.deepEqual(cancelled, ['old']);
+  assert.equal(h.saved().taskId, 'old');
+  await assert.rejects(end(), /任务正在停止/);
+  assert.deepEqual(cancelled, ['old'], '确认停止前不重复发取消请求');
+  status = { status: 3 };
+  assert.equal(await end(), true);
+  assert.equal(await h.task.resume(), false);
+  assert.deepEqual(h.saved(), {});
+});
+
+test('新建表后第一次保存返回失败，结束仍认领原任务并保护其他任务', async () => {
+  let status = { status: 0 };
+  const cancelled = [];
+  const h = harness({
+    getStatus: async () => status,
+    isTerminal: value => [1, 2, 3].includes(value.status),
+    writeBatch: async (_, task, { saveProgress }) => {
+      // 聚合评论只记录 targetTableId，其他入口可能还记录 initializingTableId。
+      task.targetTableId = 'new-table';
+      await saveProgress();
+      assert.fail('写前保存失败不可写入');
+    },
+    requestStop: async task => {
+      cancelled.push(task.taskId);
+      return { status: 0, cancel_requested: true };
+    },
+  });
+  const setData = h.bitable.bridge.setData;
+  h.bitable.bridge.setData = (key, value) => key === 'test:progress:base:old:0' && value.targetTableId === 'new-table'
+    ? false : setData(key, value);
+  await h.task.submit(async () => ({ taskId: 'old', targetTableId: '' }));
+  assert.match(h.errors[0]?.message, /保存任务进度失败/);
+  const end = h.errors[0].endPausedTask;
+  const initial = await h.bitable.bridge.getData('test');
+  assert.equal(initial.targetTableId, '');
+  for (const change of [{ taskId: 'other' }, { baseId: 'other' }, { retryGeneration: 1 }, { targetTableId: 'other-table' }]) {
+    await setData('test', { ...initial, ...change });
+    await assert.rejects(end(), /任务进度已变化/);
+    assert.deepEqual(await h.bitable.bridge.getData('test'), { ...initial, ...change });
+  }
+  assert.deepEqual(cancelled, []);
+  await setData('test', initial);
+  await assert.rejects(end(), /任务正在停止/);
+  assert.deepEqual(cancelled, ['old']);
+  status = { status: 3 };
+  assert.equal(await end(), true);
+  assert.equal(await h.task.resume(), false);
+  assert.deepEqual(h.saved(), {});
+});
+
+for (const [entry, checkpoint] of Object.entries({
+  作品搜索: { pendingWrite: true, pendingWriteCount: 2 },
+  作品评论: { pendingCommentWrite: true, pendingWriteCount: 2 },
+  商品评价: { appendState: { pendingCount: 2 } },
+})) {
+  test(`聚合${entry}待核对批次返回空列表，保留原进度并允许结束`, async () => {
+    const h = harness({
+      getStatus: async () => ({ status: 1 }),
+      isTerminal: status => status.status === 1,
+      getResults: async task => ({ items: [], next_cursor: task.cursor }),
+      writeBatch: async () => assert.fail('空列表不可写表'),
+      requestStop: async () => assert.fail('已确认结束的后台任务无需再次停止'),
+    });
+    const original = { taskId: 'old', baseId: 'base', targetTableId: 'table', cursor: 'last', writtenCount: 4, ...checkpoint };
+    await h.bitable.bridge.setData('test', original);
+    assert.equal(await h.task.resume(), true);
+    assert.deepEqual(h.finished, []);
+    assert.deepEqual(h.saved(), original);
+    assert.match(h.errors[0]?.message, /未返回待核对的结果/);
+    assert.equal(await h.errors[0].endPausedTask(), true);
+    assert.equal(await h.task.resume(), false);
+  });
+}
+
+test('聚合任务执行中暂未返回待核对批次时继续轮询，后续可恢复写入', async () => {
+  let reads = 0;
+  const h = harness({
+    getStatus: async () => ({ status: 0 }),
+    getResults: async () => ++reads === 1 ? { items: [] } : { items: [{ id: 'next' }], next_cursor: 'next' },
+    writeBatch: async (_, task) => {
+      h.calls.push(task.cursor);
+      task.pendingWrite = false;
+      delete task.pendingWriteCount;
+    },
+  });
+  await h.bitable.bridge.setData('test', { taskId: 'old', baseId: 'base', cursor: 'last', writtenCount: 4,
+    pendingWrite: true, pendingWriteCount: 1 });
+  try {
+    assert.equal(await h.task.resume(), true);
+    assert.deepEqual(h.errors, []);
+    assert.equal(h.saved().pendingWrite, true);
+    await h.tick();
+    assert.deepEqual(h.calls, ['last']);
+    assert.equal(h.saved().cursor, 'next');
+    assert.equal(h.saved().writtenCount, 5);
+  } finally {
+    h.task.stop();
+  }
+});
+
+test('暂停任务结束前发现进度已被其他窗口换成新任务，保留新任务', async () => {
+  const h = harness({ writeBatch: async () => { throw new Error('保存失败'); },
+    requestStop: async () => assert.fail('不可停止其他窗口的新任务') });
+  await h.task.start({ taskId: 'old', targetTableId: 'table' });
+  const end = h.errors[0].endPausedTask;
+  await h.bitable.bridge.setData('test', { taskId: 'new', baseId: 'base', targetTableId: 'other' });
+  await assert.rejects(end(), /任务进度已变化/);
+  assert.equal(h.saved().taskId, 'new');
+});
+
 const flush = async () => { for (let i = 0; i < 80; i++) await Promise.resolve(); };
 const releaseSaveRetry = async h => {
   const retry = [...h.timers].find(([, timer]) => timer.delay === 1000);
@@ -812,6 +939,50 @@ test('提交成功身份在页面卸载后仍保存，新页面等待后恢复�
   next.stop();
 });
 
+for (const waitFor of ['任务创建', '当前表格']) {
+  test(`首次保存等待${waitFor}时已有新任务，保留原游标并可恢复`, async () => {
+    const entered = Promise.withResolvers(), release = Promise.withResolvers();
+    const reads = [];
+    const h = harness({
+      getStatus: async task => { reads.push([task.taskId, task.cursor]); return { status: 0 }; },
+      getResults: async () => ({ items: [] }),
+      requestStop: async () => assert.fail('不得取消任一后台任务'),
+      writeBatch: async () => assert.fail('本次没有待写结果'),
+    });
+    const wait = async () => { entered.resolve(); await release.promise; };
+    if (waitFor === '当前表格') {
+      h.bitable.base.getSelection = async () => { await wait(); return { baseId: 'base' }; };
+    }
+    const submit = h.task.submit(async () => {
+      if (waitFor === '任务创建') await wait();
+      return { taskId: 'original', targetTableId: 'original-table' };
+    });
+    await entered.promise;
+    await h.bitable.bridge.setData('test', { baseId: 'base', taskId: 'newer', targetTableId: 'other', cursor: 'keep' });
+    release.resolve();
+    await submit;
+    assert.equal(h.saved().taskId, 'newer');
+    assert.equal(h.saved().cursor, 'keep');
+    assert.deepEqual(reads, []);
+    assert.match(h.errors[0].message, /恢复任务/);
+    assert.equal(h.errors[0].endPausedTask, undefined);
+    assert.equal(await h.task.resume(), true);
+    assert.deepEqual(reads, [['newer', 'keep']]);
+    h.task.stop();
+  });
+}
+
+test('首次保存仍可替换已完成的历史任务', async () => {
+  const h = harness({ getStatus: async () => ({ status: 0 }), getResults: async () => ({ items: [] }) });
+  await h.bitable.bridge.setData('test', { baseId: 'base', taskId: 'finished', targetTableId: 'old-table' });
+  await h.bitable.bridge.setData('test:progress:base:finished:0:finished', { finished: true });
+  await h.task.submit(async () => ({ taskId: 'original', targetTableId: 'original-table' }));
+  assert.equal(h.saved().taskId, 'original');
+  assert.equal(h.task.getActiveTask().targetTableId, 'original-table');
+  assert.deepEqual(h.errors, []);
+  h.task.stop();
+});
+
 test('提交成功但保存失败：新实例补存原任务，不重新创建', async () => {
   const h = harness(); const save = h.bitable.bridge.setData; let creates = 0;
   h.bitable.bridge.setData = async () => { throw new Error('save failed'); };
@@ -825,6 +996,66 @@ test('提交成功但保存失败：新实例补存原任务，不重新创建',
   assert.equal(h.saved().taskId, 'created');
   assert.equal(h.saved().targetTableId, 'table');
   assert.equal(creates, 1); next.stop();
+});
+
+test('首次保存失败可结束已创建任务，结束标记保存成功才退出恢复', async () => {
+  let creates = 0, status = 0, stops = 0;
+  const stopStarted = Promise.withResolvers(), stopReply = Promise.withResolvers();
+  const h = harness({
+    getStatus: async task => { assert.equal(task.taskId, 'created'); return { status }; },
+    requestStop: async task => {
+      assert.equal(task.taskId, 'created');
+      stops++;
+      stopStarted.resolve();
+      return stopReply.promise;
+    },
+  });
+  const save = h.bitable.bridge.setData;
+  let rejectMarker = true;
+  h.bitable.bridge.setData = async (key, value) => {
+    if (key === 'test' || rejectMarker) throw new Error('save failed');
+    return save(key, value);
+  };
+  await h.task.submit(async () => { creates++; return { taskId: 'created', targetTableId: 'table' }; });
+  const end = h.errors[0].endPausedTask;
+  assert.equal(typeof end, 'function');
+  const retryError = await h.task.resume().catch(error => error);
+  assert.match(retryError.message, /save failed/);
+  assert.equal(typeof retryError.endPausedTask, 'function');
+  const ending = end();
+  await stopStarted.promise;
+  await assert.rejects(h.task.resume(), /正在结束原任务/);
+  stopReply.resolve({ status: 0 });
+  await assert.rejects(ending, /正在停止/);
+  assert.equal(stops, 1);
+  status = 3;
+  await assert.rejects(end(), /save failed/);
+  rejectMarker = false;
+  await end();
+  assert.equal(await h.task.resume(), false);
+  assert.equal(creates, 1);
+  assert.deepEqual(h.calls, []);
+});
+
+test('首次保存失败后已有新任务，旧结束入口不停止它，重进从新任务的游标恢复', async () => {
+  const h = harness({ requestStop: async () => assert.fail('不得停止任务') });
+  const save = h.bitable.bridge.setData;
+  h.bitable.bridge.setData = async () => { throw new Error('save failed'); };
+  await h.task.submit(async () => ({ taskId: 'created', targetTableId: 'table' }));
+  await save('test', { baseId: 'base', taskId: 'newer', targetTableId: 'other', cursor: 'keep' });
+  const end = h.errors[0].endPausedTask;
+  assert.equal(typeof end, 'function');
+  await assert.rejects(end(), /任务进度已变化/);
+  h.bitable.bridge.setData = save;
+  const resumed = [];
+  const next = h.create({ storageKey: 'test',
+    getStatus: async task => { resumed.push([task.taskId, task.cursor]); return { status: 0 }; },
+    getResults: async () => ({ items: [] }), writeBatch: async () => assert.fail('不得补写旧任务') });
+  assert.equal(await next.resume(), true);
+  assert.deepEqual(resumed, [['newer', 'keep']]);
+  assert.equal(h.saved().cursor, 'keep');
+  await assert.rejects(end(), /任务进度已变化/);
+  next.stop();
 });
 
 test('旧页面SDK写入尚未返回，新实例不能恢复重复写入', async () => {
@@ -863,6 +1094,160 @@ test('新实例进入时提交正在保存身份，等待保存后自动恢复',
   const next=h.create({storageKey:'test',getStatus:async()=>({status:0}),getResults:async()=>({items:[]}),writeBatch:async()=>{}});
   const restoring=next.resume();release();await pending;assert.equal(await restoring,true);
   assert.equal(h.saved().taskId,'created');next.stop();
+});
+
+for (const lateSaveSucceeded of [true, false]) {
+  test(`首次保存超时后最终${lateSaveSucceeded ? '成功' : '失败'}，同一会话重进恢复原任务`, async () => {
+    const h = harness({ operationTimeoutMs: 180000 });
+    const save = h.bitable.bridge.setData;
+    const entered = Promise.withResolvers(), release = Promise.withResolvers();
+    let creates = 0, initialSaves = 0;
+    h.bitable.bridge.setData = async (key, value) => {
+      if (key !== 'test' || ++initialSaves > 1) return save(key, value);
+      entered.resolve();
+      await release.promise;
+      if (!lateSaveSucceeded) throw new Error('迟到的首次保存失败');
+      return save(key, value);
+    };
+    const submit = h.task.submit(async () => { creates++; return { taskId: 'original', targetTableId: 'table' }; });
+    await entered.promise;
+    [...h.timers.values()].find(timer => timer.delay === 180000).fn();
+    await submit;
+    const statuses = [];
+    const next = h.create({ storageKey: 'test', operationTimeoutMs: 180000,
+      getStatus: async task => { statuses.push([task.taskId, task.cursor]); return { status: 0 }; },
+      getResults: async () => ({ items: [] }), writeBatch: async () => assert.fail('本次没有待写结果') });
+    await assert.rejects(next.resume(), error => error.requiresReopen && /保存写入进度超时/.test(error.message));
+    assert.equal(initialSaves, 1);
+    assert.deepEqual(statuses, []);
+    release.resolve();
+    await new Promise(setImmediate);
+    if (lateSaveSucceeded) {
+      await save('test:progress:base:original:0', { ...h.saved(), cursor: 'confirmed-cursor' });
+    }
+    assert.equal(await next.resume(), true);
+    assert.deepEqual(statuses, [['original', lateSaveSucceeded ? 'confirmed-cursor' : '']]);
+    assert.equal(initialSaves, lateSaveSucceeded ? 1 : 2);
+    assert.equal(creates, 1);
+    next.stop();
+  });
+}
+
+test('首次保存超时且迟到失败后，补存等表格时保留并恢复其他窗口的新任务', async () => {
+  const resumed = [];
+  const h = harness({ operationTimeoutMs: 180000,
+    getStatus: async task => { resumed.push([task.taskId, task.cursor]); return { status: 0 }; },
+    getResults: async () => ({ items: [] }) });
+  const save = h.bitable.bridge.setData;
+  const writeStarted = Promise.withResolvers(), writeReply = Promise.withResolvers();
+  h.bitable.bridge.setData = async () => { writeStarted.resolve(); await writeReply.promise; throw new Error('迟到的保存失败'); };
+  const submit = h.task.submit(async () => ({ taskId: 'original' }));
+  await writeStarted.promise;
+  [...h.timers.values()].find(timer => timer.delay === 180000).fn();
+  await submit;
+  writeReply.resolve();
+  await new Promise(setImmediate);
+  const readingBase = Promise.withResolvers(), baseReply = Promise.withResolvers();
+  h.bitable.base.getSelection = () => { readingBase.resolve(); return baseReply.promise; };
+  h.bitable.bridge.setData = save;
+  const retry = h.task.resume();
+  await readingBase.promise;
+  await save('test', { baseId: 'base', taskId: 'newer', targetTableId: 'other', cursor: 'keep' });
+  baseReply.resolve({ baseId: 'base' });
+  assert.equal(await retry, true);
+  assert.deepEqual(resumed, [['newer', 'keep']]);
+  assert.equal(h.saved().taskId, 'newer');
+  assert.equal(h.saved().cursor, 'keep');
+  h.task.stop();
+});
+
+test('首次保存等待自动重试的 1 秒期间已有新任务，不再发布旧任务', async () => {
+  const resumed = [];
+  const h = harness({ getStatus: async task => { resumed.push([task.taskId, task.cursor]); return { status: 0 }; },
+    getResults: async () => ({ items: [] }) });
+  const save = h.bitable.bridge.setData;
+  let initialWrites = 0;
+  h.bitable.bridge.setData = async (key, value) => {
+    if (key === 'test' && ++initialWrites === 1) throw new Error('set data error, msg: set block entity error');
+    return save(key, value);
+  };
+  const submit = h.task.submit(async () => ({ taskId: 'original' }));
+  await new Promise(setImmediate);
+  await save('test', { baseId: 'base', taskId: 'newer', targetTableId: 'other', cursor: 'keep' });
+  await h.tick();
+  await submit;
+  assert.equal(initialWrites, 1);
+  assert.deepEqual(resumed, []);
+  assert.match(h.errors[0].message, /恢复任务/);
+  assert.equal(await h.task.resume(), true);
+  assert.deepEqual(resumed, [['newer', 'keep']]);
+  assert.equal(h.saved().cursor, 'keep');
+  h.task.stop();
+});
+
+test('首次保存已生效但返回临时错误，自动恢复原进度且不重复保存', async () => {
+  const resumed = [];
+  const h = harness({ getStatus: async task => { resumed.push([task.taskId, task.cursor]); return { status: 0 }; },
+    getResults: async () => ({ items: [] }) });
+  const save = h.bitable.bridge.setData;
+  let initialWrites = 0;
+  h.bitable.bridge.setData = async (key, value) => {
+    await save(key, value);
+    if (key === 'test' && ++initialWrites === 1) throw new Error('set data error, msg: set block entity error');
+  };
+  const submit = h.task.submit(async () => ({ taskId: 'original', targetTableId: 'table' }));
+  await new Promise(setImmediate);
+  await save('test:progress:base:original:0', { ...h.saved(), cursor: 'keep' });
+  await h.tick();
+  await submit;
+  assert.equal(initialWrites, 1);
+  assert.deepEqual(resumed, [['original', 'keep']]);
+  assert.deepEqual(h.errors, []);
+  h.task.stop();
+});
+
+test('补存检查发现原记录已完成时，仍可保存新任务并继续原配置', async () => {
+  const h = harness({ getStatus: async () => ({ status: 0 }), getResults: async () => ({ items: [] }) });
+  const save = h.bitable.bridge.setData;
+  await save('test', { baseId: 'base', taskId: 'finished', targetTableId: 'old-table' });
+  await save('test:progress:base:finished:0:finished', { finished: true });
+  h.bitable.bridge.setData = async () => { throw new Error('首次保存失败'); };
+  await h.task.submit(async () => ({ taskId: 'original', targetTableId: 'original-table' }));
+  h.bitable.bridge.setData = save;
+  assert.equal(await h.task.resume(), true);
+  assert.equal(h.saved().taskId, 'original');
+  assert.equal(h.saved().targetTableId, 'original-table');
+  h.task.stop();
+});
+
+test('补存核对旧记录的结束标记时收到新任务，继续使用新任务的检查点', async () => {
+  const resumed = [];
+  const h = harness({ getStatus: async task => { resumed.push([task.taskId, task.cursor]); return { status: 0 }; },
+    getResults: async () => ({ items: [] }) });
+  const save = h.bitable.bridge.setData;
+  const read = h.bitable.bridge.getData;
+  const previousMarker = 'test:progress:base:finished:0:finished';
+  await save('test', { baseId: 'base', taskId: 'finished', targetTableId: 'old-table' });
+  await save(previousMarker, { finished: true });
+  h.bitable.bridge.setData = async () => { throw new Error('首次保存失败'); };
+  await h.task.submit(async () => ({ taskId: 'original', targetTableId: 'original-table' }));
+  h.bitable.bridge.setData = save;
+  const markerRead = Promise.withResolvers(), markerReply = Promise.withResolvers();
+  h.bitable.bridge.getData = async key => {
+    if (key === previousMarker) {
+      markerRead.resolve();
+      await markerReply.promise;
+    }
+    return read(key);
+  };
+  const retry = h.task.resume();
+  await markerRead.promise;
+  await save('test', { baseId: 'base', taskId: 'newer', targetTableId: 'other', cursor: 'keep' });
+  markerReply.resolve();
+  assert.equal(await retry, true);
+  assert.deepEqual(resumed, [['newer', 'keep']]);
+  assert.equal(h.saved().cursor, 'keep');
+  h.task.stop();
 });
 
 test('创建后只读表格信息超时：保留身份并允许补存，晚返回不覆盖新进度', async () => {
@@ -1154,3 +1539,102 @@ for (const beforeWrite of [false, true]) {
     }
   });
 }
+
+test('超限的手动输入和历史同 ID 基线分块保存，重进仍恢复原值', async () => {
+  const h = harness({ getResults: async () => ({ items: [] }), getStatus: async () => ({ status: 0 }) });
+  const original = {
+    taskId: 'large-task', targetTableId: 'table',
+    sourceSnapshot: { manualUrls: Array.from({ length: 2800 }, (_, i) => `https://example.test/商品/${i}/"`).join('\n') },
+    appendState: { pendingCount: 20, knownRecordIds: Array.from({ length: 20000 }, (_, i) => `rec${String(i).padStart(14, '0')}`) },
+  };
+  const save = h.bitable.bridge.setData;
+  let maxBytes = 0;
+  const initialParts = [];
+  h.bitable.bridge.setData = async (key, value) => {
+    const size = Buffer.byteLength(JSON.stringify(value));
+    if (size > 102400) { maxBytes = size; return false; }
+    maxBytes = Math.max(maxBytes, size);
+    if (key.startsWith('test:part:') && typeof value.data === 'string') initialParts.push(key);
+    await save(key, value);
+    return true;
+  };
+  const options = {
+    storageKey: 'test', getStatus: async () => ({ status: 0 }), getResults: async () => ({ items: [] }),
+  };
+  try {
+    await h.task.start(original);
+    assert.deepEqual(h.errors, []);
+    const published = await h.bitable.bridge.getData('test');
+    const progress = await h.bitable.bridge.getData('test:progress:base:large-task:0');
+    assert.deepEqual(progress.checkpointParts.sourceSnapshot, published.checkpointParts.sourceSnapshot);
+    assert.ok(initialParts.length > 1);
+    h.task.stop();
+    const next = h.create(options);
+    try {
+      assert.equal(await next.resume(task => {
+        assert.deepEqual(task.sourceSnapshot, original.sourceSnapshot);
+        assert.deepEqual(task.appendState, original.appendState);
+      }), true);
+      assert.ok(maxBytes <= 80 * 1024);
+    } finally { next.stop(); }
+  } finally { h.task.stop(); }
+});
+
+test('写前分块中途失败时保留原游标，恢复后只写入一次', async () => {
+  let writes = 0;
+  const historicalIds = Array.from({ length: 20000 }, (_, i) => `rec${String(i).padStart(14, '0')}`);
+  const h = harness({
+    getResults: async task => task.cursor ? { items: [] } : { items: [{ id: 'one' }], next_cursor: 'next' },
+    writeBatch: async (_, task, { saveProgress }) => {
+      task.pendingWrite = true;
+      task.appendState = { pendingCount: 1, knownRecordIds: historicalIds };
+      await saveProgress();
+      writes++;
+      task.pendingWrite = false;
+      delete task.appendState;
+    },
+  });
+  const save = h.bitable.bridge.setData;
+  let fail = true;
+  let stagedKey;
+  h.bitable.bridge.setData = async (key, value) => {
+    if (key.includes(':part:') && typeof value.data === 'string' && fail) {
+      if (stagedKey) return false;
+      stagedKey = key;
+    }
+    return save(key, value);
+  };
+  await h.task.start({ taskId: 'task', targetTableId: 'table' });
+  assert.equal(writes, 0);
+  assert.equal(h.saved().cursor, '');
+  assert.equal(h.saved().appendState, undefined);
+  assert.deepEqual(await h.bitable.bridge.getData(stagedKey), {});
+  assert.match(h.errors[0]?.message, /飞书未保存任务进度/);
+  fail = false;
+  try {
+    assert.equal(await h.task.resume(), true);
+    assert.equal(writes, 1);
+    assert.equal(h.saved().cursor, 'next');
+    assert.equal(h.saved().checkpointParts, undefined);
+  } finally { h.task.stop(); }
+});
+
+test('保存写前进度返回 false 时暂停，不能继续新增或覆盖上一份游标', async () => {
+  let writes = 0;
+  const h = harness({
+    writeBatch: async (_, task, { saveProgress }) => {
+      task.pendingWrite = true;
+      await saveProgress();
+      writes++;
+    },
+  });
+  const save = h.bitable.bridge.setData;
+  h.bitable.bridge.setData = async (key, value) => {
+    if (key.includes(':progress:') && value.pendingWrite) return false;
+    return save(key, value);
+  };
+  await h.task.start({ taskId: 'task', targetTableId: 'table' });
+  assert.equal(writes, 0);
+  assert.equal(h.saved().cursor, '');
+  assert.match(h.errors[0]?.message, /保存任务进度失败.*飞书未保存任务进度/);
+});

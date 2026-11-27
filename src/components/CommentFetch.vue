@@ -1,14 +1,10 @@
-<script>
-// 跨页面实例等待正在提交的任务落盘，避免新页面抢先创建并覆盖恢复进度。
-const commentSubmission = { pending: null };
-</script>
-
 <script setup>
 import TaskExecutionResult from './TaskExecutionResult.vue';
 import { buildTaskExecutionResult } from '../utils/taskExecutionResult.mjs';
 import { nextTableName } from '../utils/tableNames.mjs';
 import { parseManualUrls } from '../utils/sourceLinks.mjs';
 import { readRecordIds, readUniqueSourceLinks } from '../utils/sourceTableRows.mjs';
+import { getPendingWriteLimit, matchWrittenAppendRows, readTableRecords } from '../utils/taskWriteState.mjs';
 import { resolveWritableField } from "../utils/tableFields.js";
 import { createTableConfigSaver, parseTableConfigList } from '@/utils/tableOutputConfig.mjs';
 import TaskFeedback from './TaskFeedback.vue';
@@ -78,6 +74,7 @@ const page_size = 20;
 let total = 0;
 const FIELD_SELECTION_STORAGE_KEY = 'comment_fetch_selected_fields_v1';
 const STREAM_TASK_STORAGE_KEY = 'comment_fetch_stream_task_v1';
+const RESULT_BATCH_SIZE = 20;
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
 const feedback = useTaskFeedback({ executionResult: latestExecutionResult });
@@ -345,17 +342,6 @@ onMounted(async () => {
     await loadTableOutputConfigs();
     fieldSelectionReady.value = true;
   } finally {
-    try {
-      await commentSubmission.pending;
-    } catch (error) {
-      if (!componentUnmounted && error.taskCreated && error.requiresReopen) {
-        hasRecoverableTask.value = true;
-        recoveryRequiresReopen.value = !!error.requiresReopen;
-        isSubmitting.value = false;
-        feedback.fail(error, { persist: true, requiresReopen: recoveryRequiresReopen.value });
-        return;
-      }
-    }
     if (!componentUnmounted) {
       isSubmitting.value = false;
       await resumeCommentTask();
@@ -718,8 +704,42 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
         records.push(record);
         normalizedRecords.push(fieldsById);
       }
-      await options.onBeforeWrite?.();
-      if (options.writeMode === 'upsert' || options.reconcile) {
+      if (options.appendState) {
+        const state = options.appendState;
+        const keyFieldId = mappingBySource.get('cid') || existingFieldMap.get('评论ID')?.id;
+        const fieldIds = Object.keys(normalizedRecords[0]);
+        const keyOf = fields => {
+          const value = fields[keyFieldId];
+          return Array.isArray(value) ? value.map(part => part.text).join('') : String(value ?? '');
+        };
+        const keys = normalizedRecords.map(keyOf);
+        if (!keyFieldId || keys.some(key => !key.trim())) throw new Error('评论ID缺失，无法核对追加写入');
+        if (options.reconcile && (state.pendingCount !== keys.length
+          || JSON.stringify(state.fieldIds) !== JSON.stringify(fieldIds)
+          || JSON.stringify(state.matchKeys) !== JSON.stringify(keys))) {
+          throw new Error('待核对评论批次或目标字段已变化，已保留原进度');
+        }
+        const expected = new Set(keys);
+        const conditions = [...expected].map(value => ({ fieldId: keyFieldId, operator: 'is', value }));
+        const candidates = await readTableRecords(activeTable, options.assertActive, { conjunction: 'or', conditions });
+        let pending = records;
+        if (options.reconcile) {
+          const matches = matchWrittenAppendRows(keys, candidates, state.knownRecordIds, keyOf, state.confirmedRecordIds);
+          if (matches.some(Boolean)) state.confirmedRecordIds = matches.map(id => id ?? null);
+          pending = records.filter((_, index) => !matches[index]);
+        } else {
+          Object.assign(state, { fieldIds, matchKeys: keys, pendingCount: keys.length,
+            knownRecordIds: candidates.filter(row => expected.has(keyOf(row.fields))).map(row => row.recordId) });
+        }
+        if (pending.length) {
+          await options.onBeforeWrite?.();
+          await options.assertCanWrite?.();
+          options.assertActive?.();
+          const created = await activeTable.addRecords(pending);
+          if (created.length !== pending.length) throw new Error('评论写入未完成，请恢复任务重试');
+        }
+      } else if (options.writeMode === 'upsert' || options.reconcile) {
+        await options.onBeforeWrite?.();
         const keyFieldId = mappingBySource.get('cid') || existingFieldMap.get('评论ID')?.id;
         if (!keyFieldId) throw new Error('更新或新增需要“评论ID”字段');
 
@@ -779,6 +799,7 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
           created.forEach((recordId, index) => existingByCid.set(creates[index].cid, recordId));
         }
       } else {
+        await options.onBeforeWrite?.();
         options.assertActive?.();
         await activeTable.addRecords(records);
       }
@@ -825,6 +846,8 @@ const createAndWriteData = async (list, type, task_id, targetTableId = "", optio
 const commentTaskApiPath = (task, path) => buildFeishuApiPath(path,
   task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX);
 
+const getCommentResultLimit = task => getPendingWriteLimit({ ...task, pendingWrite: task.pendingCommentWrite }, RESULT_BATCH_SIZE) ?? RESULT_BATCH_SIZE;
+
 const commentStreamTask = useIncrementalTask({
   requestStop: task => cancelCommentTask(task),
   storageKey: STREAM_TASK_STORAGE_KEY,
@@ -839,24 +862,26 @@ const commentStreamTask = useIncrementalTask({
     url: commentTaskApiPath(task, '/v1/feishu/comment/list'),
     method: 'post', baseURL: task.apiBaseUrl ?? API_BASE_URL,
     headers: { authorization: `Bearer ${props.api_key}` },
-    data: { task_id: task.taskId, after_id: task.cursor || '', limit: 20, include_count: Number(task.latestStatus?.status) === 3 },
+    data: { task_id: task.taskId, after_id: task.cursor || '', limit: getCommentResultLimit(task), include_count: Number(task.latestStatus?.status) === 3 },
   })).data,
   writeBatch: async (items, task, controls) => {
     if (items.some(item => !normalizeCommentId(item?.cid))) {
       throw new Error('评论ID缺失，已暂停写入，剩余结果仍保留');
     }
-    // 旧任务没有标记：已有目标表时首批核对；尚未建表则可以正常初始化。
+    // 旧更新任务没有标记时仍可按评论 ID 核对。追加任务已在取数前校验原批次。
     const reconcile = task.pendingCommentWrite ?? !!task.targetTableId;
+    const appendState = task.writeMode === 'append' ? (task.appendState ||= {}) : undefined;
     task.pendingCommentWrite = reconcile;
     if (reconcile) showFieldProgress('正在按评论ID核对已写入结果...');
     const result = await createAndWriteData(items, task.targetTableId ? 'stream' : '', task.taskId, task.targetTableId || '', {
       stopAfterCurrentBatch: true,
       writeMode: task.writeMode || 'upsert',
-      reconcile,
+      reconcile, appendState,
       onBeforeWrite: async () => {
         // 字段准备完成后、写记录前保存；成功后随结果游标一起清除。
         controls.assertActive();
         task.pendingCommentWrite = true;
+        if (appendState) task.pendingWriteCount = items.length;
         await controls.saveProgress();
       },
       fieldMappings: task.fieldMappings || [],
@@ -873,6 +898,7 @@ const commentStreamTask = useIncrementalTask({
     });
     task.targetTableId = result?.tableId || task.targetTableId;
     task.pendingCommentWrite = false;
+    if (appendState) { delete task.appendState; delete task.pendingWriteCount; }
   },
   onProgress: (status, task, phase) => {
     clearing.value = phase === 'clearing';
@@ -916,7 +942,7 @@ const commentStreamTask = useIncrementalTask({
   onError: async (error, task) => {
     latestExecutionResult.value = { ...buildTaskExecutionResult(task?.latestStatus, task || {}, { kind: 'comment' }), status: task?.taskId || error.taskCreated || error.requiresReopen ? 'paused' : 'interrupted', reason: error?.response?.data?.msg || error.message || '任务已暂停' };
     clearing.value = false;
-    hasRecoverableTask.value = true;
+    hasRecoverableTask.value = !!(task?.taskId || error.taskCreated || error.requiresReopen);
     recoveryRequiresReopen.value = !!error.requiresReopen;
     loading.value = false;
     isCancelling.value = false;
@@ -930,44 +956,30 @@ const resumeCommentTask = async (endMissingTarget = false, expectedTask) => {
   if (recoveryRequiresReopen.value) {
     return;
   }
+  if (endMissingTarget === 'paused') {
+    if (!feedback.endPausedAction.value) return;
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, recoveryRequiresReopen, undefined, undefined, feedback.endPausedAction);
+  }
   if (endMissingTarget && feedback.missingTargetAction?.value) {
     return feedback.endMissingTargetTask(loading, hasRecoverableTask, recoveryRequiresReopen, task => resumeCommentTask(false, task));
   }
   isSubmitting.value = true;
   loading.value = true;
   latestExecutionResult.value = null;
+  let fallbackEndAction = feedback.endPausedAction?.value;
   feedback.begin('正在检查未完成任务…');
   await nextTick();
   try {
-    let unsavedTask;
-    try {
-      await commentSubmission.pending;
-    } catch (error) {
-      if (error.requiresReopen) throw error;
-      unsavedTask = error.createdTask;
-    }
     if (componentUnmounted) return;
-    if (unsavedTask) {
-      hasRecoverableTask.value = true;
-      // 其他页面实例也等待本次补存，不能同时恢复或创建新任务。
-      const saving = commentStreamTask.saveForResume(unsavedTask).catch(error => {
-        error.taskCreated = true;
-        error.createdTask = unsavedTask;
-        throw error;
-      });
-      commentSubmission.pending = saving;
-      await saving;
-      if (commentSubmission.pending === saving) commentSubmission.pending = null;
-      if (componentUnmounted) return;
-    }
     const resumed = await commentStreamTask.resume((task) => {
+      fallbackEndAction = null;
       hasRecoverableTask.value = true;
       activeCommentTaskId.value = task.taskId;
       loading.value = true;
       const status = task.latestStatus;
       isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
       showToast(isCancelling.value ? stoppedCommentProgress(task) : '正在恢复未完成的评论数据获取任务...', true);
-    }, expectedTask);
+    }, expectedTask, () => { hasRecoverableTask.value = false; });
     if (!componentUnmounted && !resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -979,7 +991,7 @@ const resumeCommentTask = async (endMissingTarget = false, expectedTask) => {
     hasRecoverableTask.value = true;
     recoveryRequiresReopen.value = !!error.requiresReopen;
     loading.value = false;
-    feedback.fail(error, { persist: true, requiresReopen: recoveryRequiresReopen.value });
+    feedback.fail(error, { persist: true, requiresReopen: recoveryRequiresReopen.value, fallbackEndAction });
   } finally {
     if (!componentUnmounted) isSubmitting.value = false;
   }
@@ -1023,7 +1035,7 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
   if (componentUnmounted) return;
   const fields = [...selectedFieldKeys.value];
   showToast('正在提交评论数据获取任务...请勿关闭插件，关闭将中断任务', true);
-  const pending = (async () => {
+  const resumed = await commentStreamTask.submit(async () => {
     const response = await feishuRequest({
       url: buildFeishuApiPath('/v1/feishu/comment/task'),
       method: "post",
@@ -1037,7 +1049,7 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
     const res = response.data;
     if (res.sta != 0) throw new Error(res.msg || '提交任务失败');
     const data = res.data;
-    const task = {
+    return {
       taskId: data.task_id,
       targetTableId,
       pendingCommentWrite: false,
@@ -1047,45 +1059,15 @@ const postNoteTask = async (targetTableId = "", urlText = "", extraPayload = {})
       writeMode: formData.value.writeMode,
       fieldMappings: mappingDraft.value.map(item => ({ ...item })),
     };
-    try {
-      await commentStreamTask.saveForResume(task);
-    } catch (error) {
-      // 保留完整身份，页面重新进入后可补存同一任务，无需再次创建。
-      error.taskCreated = true;
-      error.createdTask = task;
-      throw error;
-    }
-    return data;
-  })();
-  commentSubmission.pending = pending;
-  let preserveSubmission = false;
-  try {
-    const data = await pending;
-    if (componentUnmounted) return;
+  }, task => {
     hasRecoverableTask.value = true;
-    activeCommentTaskId.value = data.task_id;
-    const resumed = await commentStreamTask.resume();
-    if (!componentUnmounted && !resumed) {
-      loading.value = false;
-      activeCommentTaskId.value = '';
-      feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
-    }
-  } catch (error) {
-    preserveSubmission = !!error.taskCreated;
-    if (componentUnmounted) return;
-    if (error.taskCreated) {
-      hasRecoverableTask.value = true;
-      recoveryRequiresReopen.value = !!error.requiresReopen;
-    }
+    activeCommentTaskId.value = task.taskId;
+  });
+  if (!componentUnmounted && resumed === false) {
+    hasRecoverableTask.value = true;
     loading.value = false;
     activeCommentTaskId.value = '';
-    console.log(error);
-    const message = error.taskCreated
-      ? `任务已创建，保存恢复信息失败：${error.message || '请稍后恢复任务'}`
-      : (error.message || '提交任务失败');
-    feedback.fail(message, { persist: !!error.taskCreated, requiresReopen: !!error.requiresReopen });
-  } finally {
-    if (!preserveSubmission && commentSubmission.pending === pending) commentSubmission.pending = null;
+    feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
   }
 };
 
@@ -1481,7 +1463,11 @@ watch(selectedFieldKeys, (keys) => {
         :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
         :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || recoveryRequiresReopen"
         @click="handleTaskAction"
-      >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : '立即执行' }}</el-button>
+      >{{ feedback.endingMissingTarget?.value ? '正在结束任务…' : taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : recoveryRequiresReopen ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : '立即执行' }}</el-button>
+        <template v-if="taskActionState === 'recoverable' && feedback.endPausedAction?.value">
+          <el-button class="append-end-write-btn" @click="resumeCommentTask('paused')">结束本次任务</el-button>
+          <p class="sub-hint">已写入的数据会保留，未写入的结果将无法继续写入。</p>
+        </template>
     </div>
 
     <TaskExecutionResult :result="latestExecutionResult" />

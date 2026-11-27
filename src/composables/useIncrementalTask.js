@@ -2,6 +2,16 @@ import { bitable } from '@lark-base-open/js-sdk';
 
 const ACTIVE_INTERVAL = 2000;
 const MAX_INTERVAL = 30000;
+// 验收表实测 100 KiB 可保存，104 KiB 已失败，预留宿主序列化余量。
+const CHECKPOINT_MAX_BYTES = 80 * 1024;
+const CHECKPOINT_PART_LENGTH = 26000;
+const CHECKPOINT_FIELDS = [
+  ['sourceSnapshot', 'manualUrls'],
+  ['appendState', 'knownRecordIds'],
+  ['formData', 'keyword'],
+];
+const checkpointBytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
+const partKeys = ({ prefix, count }) => Array.from({ length: count }, (_, index) => `${prefix}:${index}`);
 // SDK 清理不会随页面卸载或超时取消；同一存储键的其他实例也必须等待它结束。
 const pendingClears = new Map();
 const pendingMutations = new Map();
@@ -18,8 +28,9 @@ const unwrapApiData = (responseData) => {
 };
 
 const isTaskNotFound = error => error?.apiStatus === -1 && error.message === '任务不存在';
-const isSameTask = (saved, expected) => saved?.taskId === expected.taskId
-  && saved.baseId === expected.baseId && saved.targetTableId === expected.targetTableId
+const isSameTask = (saved, expected, allowUnboundTarget = false) => saved?.taskId === expected.taskId
+  && saved.baseId === expected.baseId
+  && (saved.targetTableId === expected.targetTableId || (allowUnboundTarget && !saved.targetTableId))
   && (saved.retryGeneration ?? 0) === (expected.retryGeneration ?? 0);
 
 export const useIncrementalTask = ({
@@ -34,6 +45,88 @@ export const useIncrementalTask = ({
   let inFlightTask = null;
   let lifecycleVersion = 0;
   let finishingTask = null;
+  const storedParts = new Map();
+  let initialSource;
+
+  const setProgressData = async (key, value) => {
+    if (await bitable.bridge.setData(key, value) === false) throw new Error('飞书未保存任务进度');
+  };
+  const forgetParts = parts => Promise.allSettled(parts.flatMap(partKeys)
+    .map(async key => bitable.bridge.setData(key, {})));
+  const isInitialPart = part => part.prefix.startsWith(`${storageKey}:part:`);
+  const writeCheckpoint = async (key, snapshot, canPublish, canStage = () => true) => {
+    let value = snapshot;
+    const staged = [];
+    const references = {};
+    let previous = storedParts.get(key);
+    let published = false;
+    try {
+      if (checkpointBytes(value) > CHECKPOINT_MAX_BYTES) {
+        if (!previous) previous = (await bitable.bridge.getData(key))?.checkpointParts;
+        value = { ...snapshot, checkpointParts: references };
+        for (const [group, field] of CHECKPOINT_FIELDS) {
+          if (checkpointBytes(value) <= CHECKPOINT_MAX_BYTES) break;
+          const data = snapshot[group]?.[field];
+          if (data == null) continue;
+          const serialized = JSON.stringify(data);
+          if (serialized.length < 256) continue;
+          if (key !== storageKey && group === 'sourceSnapshot'
+            && initialSource?.taskKey === key && initialSource.serialized === serialized) {
+            references[group] = initialSource.part;
+          } else {
+            const prefix = `${key}:part:${crypto.randomUUID()}`;
+            const part = { prefix, count: Math.ceil(serialized.length / CHECKPOINT_PART_LENGTH) };
+            staged.push({ part, serialized });
+            references[group] = part;
+          }
+          value[group] = { ...snapshot[group] };
+          delete value[group][field];
+        }
+        if (checkpointBytes(value) > CHECKPOINT_MAX_BYTES) throw new Error('恢复进度过大，飞书无法保存');
+        for (const { part, serialized } of staged) {
+          for (const [index, partKey] of partKeys(part).entries()) {
+            if (!canStage()) return false;
+            const start = index * CHECKPOINT_PART_LENGTH;
+            // 每块以 JSON 字符串保存，包含转义后的内容仍低于 80 KiB。
+            await setProgressData(partKey, { data: serialized.slice(start, start + CHECKPOINT_PART_LENGTH) });
+          }
+        }
+        if (!await canPublish()) return false;
+      }
+      // 只有所有分块都已写入，才切换恢复记录。保存响应丢失时保留可能已引用的分块。
+      published = true;
+      await setProgressData(key, value);
+      if (key === storageKey) {
+        // 手动输入在任务期间固定，后续检查点复用初始分块，只更新写入进度。
+        initialSource = references.sourceSnapshot && {
+          taskKey: taskProgressKey(snapshot), part: references.sourceSnapshot,
+          serialized: JSON.stringify(snapshot.sourceSnapshot.manualUrls),
+        };
+      }
+      if (value.checkpointParts) storedParts.set(key, references);
+      else storedParts.delete(key);
+      void forgetParts(Object.values(previous || {}).filter(part => key === storageKey || !isInitialPart(part)));
+    } finally {
+      if (!published) void forgetParts(staged.map(({ part }) => part));
+    }
+  };
+  const readCheckpoint = async (value) => {
+    if (!value.checkpointParts) return value;
+    const snapshot = { ...value };
+    delete snapshot.checkpointParts;
+    for (const [group, field] of CHECKPOINT_FIELDS) {
+      const part = value.checkpointParts[group];
+      if (!part) continue;
+      const chunks = await Promise.all(partKeys(part).map(key => bitable.bridge.getData(key)));
+      if (chunks.some(chunk => typeof chunk?.data !== 'string')) throw new Error('恢复进度不完整，请重试');
+      const serialized = chunks.map(chunk => chunk.data).join('');
+      snapshot[group] = { ...value[group], [field]: JSON.parse(serialized) };
+      if (group === 'sourceSnapshot' && isInitialPart(part)) {
+        initialSource = { taskKey: taskProgressKey(value), part, serialized };
+      }
+    }
+    return snapshot;
+  };
 
   const bounded = async (operation, label, { readOnly = false, retryable = false } = {}) => {
     if (!operationTimeoutMs) return operation();
@@ -46,6 +139,7 @@ export const useIncrementalTask = ({
             : `${label}超时，请关闭当前插件后重新打开并核对写入结果，勿重复启动任务`);
           error.stopPolling = !retryable;
           error.requiresReopen = !readOnly;
+          error.mutationTimedOut = !readOnly;
           reject(error);
         }, operationTimeoutMs);
       })]);
@@ -78,7 +172,7 @@ export const useIncrementalTask = ({
       if (!pending.size) pendingMutations.delete(storageKey);
     }
   };
-  const save = async (task, { initial = false } = {}) => {
+  const save = async (task, { initial = false, verifyOwner = false } = {}) => {
     assertNoPendingClear();
     const version = lifecycleVersion;
     const owner = activeTask;
@@ -87,15 +181,24 @@ export const useIncrementalTask = ({
     if (snapshot.latestStatus) {
       delete snapshot.latestStatus.failed_items;
       delete snapshot.latestStatus.invalid_items;
+      // 作者搜索的原关键词已经由表单快照保存。
+      delete snapshot.latestStatus.keywords;
     }
     let saving = true;
-    const persistSnapshot = async () => {
+    const persistSnapshot = async (retrying = false) => {
       if (!initial) {
         await assertTaskNotEnded(snapshot);
         if (!saving || version !== lifecycleVersion || activeTask !== owner) return;
+      } else if ((verifyOwner || retrying) && (!await canPublishSubmission(snapshot) || !saving)) {
+        return false;
       }
       // 只有发起新任务才发布初始快照，后续进度由任务自己保存。
-      return bitable.bridge.setData(initial ? storageKey : taskProgressKey(snapshot), snapshot);
+      const canStage = () => saving && ((initial && verifyOwner) || (version === lifecycleVersion && activeTask === owner));
+      return writeCheckpoint(initial ? storageKey : taskProgressKey(snapshot), snapshot, async () => {
+        if (!initial) await assertTaskNotEnded(snapshot, true);
+        if (initial && verifyOwner && !await canPublishSubmission(snapshot)) return false;
+        return canStage();
+      }, canStage);
     };
     try {
       return await bounded(() => trackMutation(async () => {
@@ -109,7 +212,7 @@ export const useIncrementalTask = ({
           await new Promise(resolve => setTimeout(resolve, 1000));
           if (!saving || version !== lifecycleVersion || activeTask !== owner) throw error;
           assertNoPendingClear();
-          return await persistSnapshot();
+          return await persistSnapshot(true);
         }
       }), '保存写入进度');
     } catch (error) {
@@ -138,8 +241,9 @@ export const useIncrementalTask = ({
           await assertTaskNotEnded(task);
           if (activeTask === task) {
             // 另一窗口已发出的旧进度保存可能更晚生效，完成状态必须独立保存。
-            await bitable.bridge.setData(taskFinishedKey(task), { finished: true });
-            await bitable.bridge.setData(taskProgressKey(task), { finished: true });
+            await setProgressData(taskFinishedKey(task), { finished: true });
+            await writeCheckpoint(taskProgressKey(task), { finished: true });
+            void releaseTaskParts(task);
           }
         } finally {
           pendingClears.delete(storageKey);
@@ -165,25 +269,81 @@ export const useIncrementalTask = ({
   const taskProgressKey = task => `${storageKey}:progress:${[task.baseId || '', task.taskId, task.retryGeneration ?? 0].map(encodeURIComponent).join(':')}`;
   const taskFinishedKey = task => `${taskProgressKey(task)}:finished`;
   const wasFinished = async task => (await bounded(() => bitable.bridge.getData(taskFinishedKey(task)), '读取任务完成状态', { readOnly: true }))?.finished === true;
-  const readSavedTask = async isCurrent => {
-    const read = key => bounded(() => bitable.bridge.getData(key), '读取恢复进度', { readOnly: true });
-    const initial = await read(storageKey);
+  const readProgress = async key => {
+    const value = await bounded(() => bitable.bridge.getData(key), '读取恢复进度', { readOnly: true });
+    if (value?.checkpointParts) storedParts.set(key, value.checkpointParts);
+    else storedParts.delete(key);
+    return value;
+  };
+  const releaseTaskParts = async task => {
+    const key = taskProgressKey(task);
+    const currentParts = storedParts.get(key);
+    storedParts.delete(key);
+    if (currentParts) void forgetParts(Object.values(currentParts).filter(part => !isInitialPart(part)));
+    const initialParts = storedParts.get(storageKey);
+    if (!initialParts) return;
+    const initial = await Promise.resolve().then(() => bitable.bridge.getData(storageKey)).catch(() => null);
+    if (initial?.checkpointParts && taskProgressKey(initial) === taskProgressKey(task)) {
+      void forgetParts(Object.values(initial.checkpointParts));
+      if (storedParts.get(storageKey) === initialParts) {
+        storedParts.delete(storageKey);
+      }
+    }
+    if (initialSource?.taskKey === key) initialSource = undefined;
+  };
+  const readSavedTask = async (isCurrent, onFinished) => {
+    const initial = await readProgress(storageKey);
     if (!isCurrent() || !initial?.taskId) return initial;
     const key = taskProgressKey(initial);
-    const progress = await read(key);
-    if (progress?.finished === true || await wasFinished(initial)) return {};
+    const progress = await readProgress(key);
+    if (progress?.finished === true || await wasFinished(initial)) {
+      onFinished?.(initial);
+      return {};
+    }
     // 首次读取旧版快照时，还没有按任务保存的进度。
     return progress?.taskId && taskProgressKey(progress) === key ? progress : initial;
   };
   const endedTaskKey = task => `${storageKey}:ended:${[task.baseId, task.targetTableId, task.taskId, task.retryGeneration ?? 0].map(encodeURIComponent).join(':')}`;
   const wasEnded = async task => !!(task.baseId && task.targetTableId
     && await bounded(() => bitable.bridge.getData(endedTaskKey(task)), '读取任务结束状态', { readOnly: true }) === true);
+  const canPublishSubmission = async task => {
+    if (await wasEnded(task) || await wasFinished(task)) return false;
+    let finished;
+    const saved = await readSavedTask(() => true, previous => { finished = previous; });
+    const key = taskProgressKey(task);
+    if (saved?.taskId) {
+      if (taskProgressKey(saved) === key || !await wasEnded(saved)) return false;
+      finished = saved;
+    }
+    if (!finished) return true;
+    const previousKey = taskProgressKey(finished);
+    if (previousKey === key) return false;
+    // 核对结束标记期间，共用恢复入口仍可能被另一窗口更新。
+    const current = await readProgress(storageKey);
+    return !current?.taskId || taskProgressKey(current) === previousKey;
+  };
   const assertTaskNotEnded = async (task, checkFinished = false) => {
     if (await wasEnded(task) || (checkFinished && await wasFinished(task))) {
       throw Object.assign(new Error('本次任务已在其他窗口结束，请重新进入插件'), {
         taskEnded: true, stopPolling: true, requiresReopen: true,
       });
     }
+  };
+  const pausedEndAction = (task, taskMissing = false, submission, allowUnboundTarget = false) => Object.assign(
+    () => endPausedTask(task, taskMissing, submission, allowUnboundTarget),
+    { notice: taskMissing
+      ? '当前授权查不到原任务，无法确认后台是否已停止。再次点击只会结束这条恢复进度。'
+      : undefined },
+  );
+  const addPausedEndAction = (error, task, submission) => {
+    if (requestStop && task?.taskId && task.baseId && !error.endMissingTarget
+      && !error.requiresReopen && !error.cause?.requiresReopen && !error.taskEnded) {
+      error.endPausedTask = pausedEndAction(task, false, submission, error.unconfirmedNewTarget);
+    }
+  };
+  const reportPaused = (error, task) => {
+    addPausedEndAction(error, task);
+    return onError?.(error, task);
   };
   const missingTargetError = (task, cause, taskMissing = false) => {
     const message = taskMissing
@@ -212,6 +372,8 @@ export const useIncrementalTask = ({
       if (activeTask !== task) return wroteData;
       onWriting?.(items, task);
       let writeActive = true;
+      let savedTargetTableId = task.targetTableId;
+      let savingNewTarget = false;
       const assertActive = () => {
         if (!writeActive || activeTask !== task) {
           const error = new Error('写入操作已结束，请核对结果后恢复任务');
@@ -229,7 +391,10 @@ export const useIncrementalTask = ({
           assertActive, assertCanWrite,
           saveProgress: async () => {
             assertActive();
+            savingNewTarget = !savedTargetTableId && !!task.targetTableId;
             await save(task);
+            savedTargetTableId = task.targetTableId;
+            savingNewTarget = false;
             await assertCanWrite();
           },
         })), '写入表格');
@@ -242,7 +407,11 @@ export const useIncrementalTask = ({
           if (activeTask !== task) return wroteData;
           if (exists === false) throw missingTargetError(task, error);
         }
-        if (error?.stopPolling) throw error;
+        if (error?.stopPolling) {
+          // 新表首次保存失败时，旧检查点仍可能是同一任务的空目标表。
+          if (savingNewTarget) error.unconfirmedNewTarget = true;
+          throw error;
+        }
         // SDK 报错时写入结果可能未知，不能自动重发同一批数据。
         const writeError = new Error(`${error?.message || '写入表格失败'}；已暂停写入，已写入的数据会保留，请点击「恢复任务」继续。`, { cause: error });
         writeError.stopPolling = true;
@@ -309,6 +478,9 @@ export const useIncrementalTask = ({
       }
 
       if (hasFinished(status) && !wroteData) {
+        if (task.pendingWrite === true || task.pendingCommentWrite === true || task.appendState?.pendingCount > 0) {
+          throw Object.assign(new Error('待核对批次与原结果不一致，本次未返回待核对的结果。可重试恢复或结束本次任务。'), { stopPolling: true });
+        }
         await finishTask(task);
         return;
       }
@@ -332,7 +504,7 @@ export const useIncrementalTask = ({
       const canRetryStatus = stalled && readingStatus && !retryingStatusRead && shouldRetryStalledStatusRead?.(error);
       if (error.stopPolling || invalidAuth || (stalled && !canRetryStatus)) {
         stop();
-        await onError?.(error, task);
+        await reportPaused(error, task);
       } else {
         try {
           await save(task);
@@ -340,7 +512,7 @@ export const useIncrementalTask = ({
         } catch (saveError) {
           if (activeTask === task) {
             stop();
-            await onError?.(saveError, task);
+            await reportPaused(saveError, task);
           }
         }
       }
@@ -350,14 +522,16 @@ export const useIncrementalTask = ({
   };
 
   // 提交成功后先保留恢复入口；页面是否仍在运行不影响这一步。
-  const saveForResume = async (task) => {
+  const saveForResume = async task => {
     assertNoPendingMutation();
     const selection = await bounded(() => bitable.base.getSelection(), '读取当前表格', { readOnly: true });
     assertNoPendingMutation();
-    await save({
+    if (task.baseId && task.baseId !== selection.baseId) throw new Error('请回到原多维表格后恢复任务');
+    task.baseId ||= selection.baseId || '';
+    return save({
       cursor: '', writtenCount: 0, lastProcessed: -1, lastHeartbeatAt: 0,
-      lastActivityAt: Date.now(), pollInterval: ACTIVE_INTERVAL, baseId: selection.baseId || '', ...task,
-    }, { initial: true });
+      lastActivityAt: Date.now(), pollInterval: ACTIVE_INTERVAL, ...task,
+    }, { initial: true, verifyOwner: true });
   };
 
   const start = async (task) => {
@@ -386,6 +560,18 @@ export const useIncrementalTask = ({
   };
 
   // 保存创建成功的身份与页面执行分开；新实例先等待或补存，不再创建任务。
+  const saveSubmission = async entry => {
+    entry.saving = true;
+    try {
+      return await saveForResume(entry.task);
+    } catch (error) {
+      error.taskCreated = true;
+      addPausedEndAction(error, entry.task, entry);
+      throw error;
+    } finally {
+      entry.saving = false;
+    }
+  };
   const submit = async (createTask, onRestore) => {
     const version = lifecycleVersion;
     const entry = { task: null, promise: null };
@@ -395,33 +581,61 @@ export const useIncrementalTask = ({
       entry.promise = (async () => {
         entry.task = await createTask();
         if (!entry.task?.taskId) throw new Error('创建任务未返回任务 ID');
-        try { await saveForResume(entry.task); }
-        catch (error) { error.taskCreated = true; throw error; }
+        return saveSubmission(entry);
       })();
       submissions.set(storageKey, entry);
-      await entry.promise;
+      const published = await entry.promise;
       if (submissions.get(storageKey) === entry) submissions.delete(storageKey);
-      if (version === lifecycleVersion) await resume(onRestore);
+      if (version !== lifecycleVersion) return;
+      if (published === false) {
+        const saved = await readSavedTask(() => version === lifecycleVersion);
+        if (version !== lifecycleVersion) return;
+        if (!saved?.taskId || taskProgressKey(saved) !== taskProgressKey(entry.task)) {
+          const error = Object.assign(new Error('任务进度已变化，请点击「恢复任务」继续。'), { taskCreated: true });
+          await onError?.(error);
+          return;
+        }
+      }
+      return await resume(onRestore);
     } catch (error) {
       if (!entry.task?.taskId && submissions.get(storageKey) === entry) submissions.delete(storageKey);
       if (version === lifecycleVersion) {
         stop();
+        if (entry.task?.taskId && !error.endPausedTask && !submissions.has(storageKey)) addPausedEndAction(error, entry.task);
         await onError?.(error, entry.task);
       }
     }
   };
 
-  const resume = async (onRestore, expected) => {
+  const resume = async (onRestore, expected, onEnded) => {
     const version = lifecycleVersion;
+    const isCurrent = () => version === lifecycleVersion && !activeTask;
+    const reportEnded = async task => {
+      if (!onEnded || !task.baseId || !isCurrent()) return false;
+      const selection = await bounded(() => bitable.base.getSelection(), '读取当前表格', { readOnly: true });
+      if (!isCurrent() || task.baseId !== selection.baseId) return false;
+      // 读取当前表格期间，其他窗口可能已保存了新任务。
+      const initial = await bounded(() => bitable.bridge.getData(storageKey), '读取恢复进度', { readOnly: true });
+      if (isCurrent() && !submissions.has(storageKey) && initial?.taskId && taskProgressKey(initial) === taskProgressKey(task)) {
+        await onEnded();
+      }
+      return false;
+    };
     try {
       const entry = submissions.get(storageKey);
       if (expected && entry) throw new Error('任务进度已变化，请重新进入插件');
+      if (entry?.ending) throw new Error('正在结束原任务，请稍后重试');
       if (entry) {
-        try { await entry.promise; }
+        const pending = entry.promise;
+        try { await pending; }
         catch (error) {
+          if (submissions.get(storageKey) !== entry) return false;
+          if (entry.ending) throw new Error('正在结束原任务，请稍后重试');
           if (entry.task?.taskId) {
-            if (error.requiresReopen) throw error;
-            entry.promise = saveForResume(entry.task).catch(error => { error.taskCreated = true; throw error; });
+            if (entry.promise === pending) {
+              if (error.requiresReopen && (!error.mutationTimedOut || pendingMutations.get(storageKey)?.size)) throw error;
+              entry.promise = saveSubmission(entry);
+            }
             await entry.promise;
           }
         }
@@ -429,25 +643,36 @@ export const useIncrementalTask = ({
       }
       if (version !== lifecycleVersion) return false;
       assertNoPendingMutation();
-      if (expected && await wasEnded(expected)) return false;
+      if (expected && await wasEnded(expected)) return await reportEnded(expected);
       if (version !== lifecycleVersion || activeTask) return false;
       const expectedSelection = expected ? await bounded(() => bitable.base.getSelection(), '读取当前表格', { readOnly: true }) : null;
       if (version !== lifecycleVersion || activeTask) return false;
-      const saved = await readSavedTask(() => version === lifecycleVersion && !activeTask);
-      if (version !== lifecycleVersion || activeTask) return false;
-      if (expected && (submissions.has(storageKey) || !isSameTask(saved, expected))) {
+      let finished;
+      const saved = await readSavedTask(isCurrent, task => { finished = task; });
+      if (!isCurrent()) return false;
+      if (expected && (submissions.has(storageKey) || !isSameTask(finished || saved, expected))) {
         throw new Error('任务进度已变化，请重新进入插件');
       }
-      const pendingFinish = finishingTask && (!saved?.taskId || saved.taskId === finishingTask.taskId) ? finishingTask : null;
+      const storedTask = finished || saved;
+      const pendingFinish = finishingTask && (!storedTask?.taskId || taskProgressKey(storedTask) === taskProgressKey(finishingTask)) ? finishingTask : null;
+      if (finished && !pendingFinish) return await reportEnded(finished);
       const taskData = pendingFinish || saved;
       if (!taskData?.taskId) return false;
-      if (!expected && await wasEnded(taskData)) return false;
+      if (!expected && await wasEnded(taskData)) return await reportEnded(taskData);
       if (version !== lifecycleVersion || activeTask) return false;
       const selection = expected ? expectedSelection : await bounded(() => bitable.base.getSelection(), '读取当前表格', { readOnly: true });
       if (version !== lifecycleVersion || activeTask) return false;
       if (taskData.baseId && (expected || selection.baseId) && taskData.baseId !== selection.baseId) return false;
       assertNoPendingMutation();
-      const taskToResume = { ...taskData, lastActivityAt: taskData.lastActivityAt || Date.now(), pollInterval: taskData.pollInterval || ACTIVE_INTERVAL };
+      let snapshot;
+      try {
+        snapshot = await bounded(() => readCheckpoint(taskData), '读取恢复进度', { readOnly: true });
+      } catch (error) {
+        addPausedEndAction(error, taskData);
+        throw error;
+      }
+      if (!isCurrent()) return false;
+      const taskToResume = { ...snapshot, lastActivityAt: snapshot.lastActivityAt || Date.now(), pollInterval: snapshot.pollInterval || ACTIVE_INTERVAL };
       activeTask = taskToResume;
       finishingTask = pendingFinish ? taskToResume : null;
       await onRestore?.(taskToResume);
@@ -460,20 +685,30 @@ export const useIncrementalTask = ({
     }
   };
 
-  const endSavedTask = async (expected, allowMissingTask) => {
+  const endPausedTask = async (task, taskMissing, submission, allowUnboundTarget) => {
+    if (!submission) return endSavedTask(task, taskMissing, false, undefined, allowUnboundTarget);
+    if (submissions.get(storageKey) !== submission || submission.saving || submission.ending) {
+      throw new Error('任务进度已变化，请重新进入插件');
+    }
+    submission.ending = true;
+    try { return await endSavedTask(task, taskMissing, false, submission); }
+    finally { submission.ending = false; }
+  };
+
+  const endSavedTask = async (expected, allowMissingTask, onlyMissingTarget = true, submission, allowUnboundTarget = false) => {
     const version = lifecycleVersion;
     const assertCanEndSavedTask = () => {
       assertNoPendingMutation();
-      if (activeTask || submissions.has(storageKey)) throw new Error('任务进度已变化，请重新进入插件');
+      if (activeTask || submissions.get(storageKey) !== submission) throw new Error('任务进度已变化，请重新进入插件');
     };
     const readOwnedTask = async () => {
       const saved = await readSavedTask(() => version === lifecycleVersion);
       if (version !== lifecycleVersion) return null;
       assertCanEndSavedTask();
-      if (saved?.taskId && !isSameTask(saved, expected)) {
+      if (saved?.taskId && !isSameTask(saved, expected, allowUnboundTarget)) {
         throw new Error('任务进度已变化，请重新进入插件');
       }
-      return saved?.taskId ? saved : {};
+      return saved?.taskId ? saved : submission ? expected : {};
     };
 
     const selection = await bounded(() => bitable.base.getSelection(), '读取当前表格', { readOnly: true });
@@ -481,7 +716,7 @@ export const useIncrementalTask = ({
     if (!expected.baseId || selection.baseId !== expected.baseId) throw new Error('请回到原多维表格后结束任务');
     const task = await readOwnedTask();
     if (!task?.taskId) return !!task;
-    if (await wasEnded(task)) return version === lifecycleVersion;
+    if (!submission && await wasEnded(task)) return version === lifecycleVersion;
     if (version !== lifecycleVersion) return false;
 
     const continueIfRestored = () => version === lifecycleVersion ? { restoredTask: task } : false;
@@ -491,12 +726,13 @@ export const useIncrementalTask = ({
       if (exists !== false) throw new Error('无法确认原输出表已删除，请稍后重试');
       return true;
     };
-    if (!await canEnd()) return continueIfRestored();
+    if (onlyMissingTarget && !await canEnd()) return continueIfRestored();
 
     const recheckBeforeEnding = async () => {
       // 原表可能在进度读取期间恢复，进度也可能在查表期间被替换。
       const saved = await readOwnedTask();
       if (!saved?.taskId) return { result: !!saved };
+      if (!onlyMissingTarget) return { current: saved };
       if (!await canEnd()) return { result: continueIfRestored() };
       const current = await readOwnedTask();
       if (!current?.taskId) return { result: !!current };
@@ -519,7 +755,12 @@ export const useIncrementalTask = ({
       if (!current) return result;
       if (status.status !== 0 && status.status !== '0') throw new Error('暂未确认任务已结束，请稍后重试');
       // 上一次说明只清理进度，当前已能查到运行中的任务，先重新说明结束操作。
-      if (allowMissingTask) throw missingTargetError(task);
+      if (allowMissingTask) {
+        if (onlyMissingTarget) throw missingTargetError(task);
+        throw Object.assign(new Error('原任务仍在运行，再次点击将先停止任务。'), {
+          endPausedTask: pausedEndAction(expected, false, submission, allowUnboundTarget),
+        });
+      }
       if (status.cancel_requested || status.status_text === 'cancel_requested') {
         throw new Error('任务正在停止，请稍后再点击「结束本次任务」');
       }
@@ -537,14 +778,23 @@ export const useIncrementalTask = ({
     if (!current) return result;
     if (stopError) throw stopError;
     if (statusError) {
-      if (!isTaskNotFound(statusError)) throw statusError;
-      if (!allowMissingTask) throw missingTargetError(task, statusError, true);
+      if (submission || !isTaskNotFound(statusError)) throw statusError;
+      if (!allowMissingTask) {
+        if (onlyMissingTarget) throw missingTargetError(task, statusError, true);
+        const end = pausedEndAction(expected, true, submission, allowUnboundTarget);
+        throw Object.assign(new Error(end.notice, { cause: statusError }), { endPausedTask: end });
+      }
     }
     if (waitingForStop) throw new Error('任务正在停止，请稍后再点击「结束本次任务」');
     // 单独记录旧任务，结束操作不能清空其他窗口刚保存的恢复进度。
-    if (await bounded(() => bitable.bridge.setData(endedTaskKey(current), true), '保存任务结束状态') === false) {
+    const key = onlyMissingTarget ? endedTaskKey(current) : taskFinishedKey(current);
+    const marker = onlyMissingTarget ? true : { finished: true };
+    if (await bounded(() => trackMutation(() => bitable.bridge.setData(key, marker)), '保存任务结束状态') === false) {
       throw new Error('保存任务结束状态失败，请重试');
     }
+    void releaseTaskParts(current);
+    if (submission) submissions.delete(storageKey);
+    if (isSameTask(finishingTask, current)) finishingTask = null;
     return version === lifecycleVersion;
   };
 

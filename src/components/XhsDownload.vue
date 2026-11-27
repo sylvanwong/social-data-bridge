@@ -1,5 +1,6 @@
 <script setup>
 import TaskExecutionResult from './TaskExecutionResult.vue';
+import { useAppendWriteRecovery } from '../composables/useAppendWriteRecovery.mjs';
 import { useTaskExecutionResult } from '../composables/useTaskExecutionResult.mjs';
 import { useToolOutputConfig } from '../composables/useToolOutputConfig.js';
 import { parseManualUrls } from '../utils/sourceLinks.mjs';
@@ -148,6 +149,7 @@ const stopRequested = ref(false);
 const taskFeedback = useTaskFeedback();
 const executionResult = useTaskExecutionResult({ inputUnit: '条', outputUnit: '内容' });
 const latestExecutionResult = executionResult.result;
+const { appendWithRecovery, appendPaused, appendRetrying, resumeAppend, endAppend } = useAppendWriteRecovery(taskFeedback, executionResult);
 const { toastVisible, toastText, toastType, taskNotice, noticeRequiresReopen } = taskFeedback;
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
@@ -546,11 +548,7 @@ const appendRecordsToTable = async (tableId, list, activeFieldConfigs) => {
     }
   }
 
-  if (records.length > 0) {
-    try { assertMounted(await table.addRecords(records)); }
-    catch (error) { error.writeUncertain = true; throw error; }
-    executionResult.written(records.length);
-  }
+  return records.length ? appendWithRecovery(table, records) : { writtenCount: 0, ended: false };
 };
 
 const extractXhsLink = (value) => {
@@ -799,13 +797,19 @@ const handleManualModeSubmit = async () => {
       return;
     }
 
-    assertMounted(await appendRecordsToTable(targetTableId, successList, activeFieldConfigs));
+    const { writtenCount, ended } = assertMounted(await appendRecordsToTable(targetTableId, successList, activeFieldConfigs));
+    executionResult.written(writtenCount);
+    if (ended) {
+      finishToast('已结束本次写入', { stopped: true, successCount, failCount });
+      return;
+    }
 
+    const finalStopped = stopped || stopRequested.value;
     finishToast(
-      stopped
+      finalStopped
         ? `任务已停止：成功 ${successCount} 条，失败 ${failCount} 条`
         : `处理完成：成功 ${successCount} 条，失败 ${failCount} 条`,
-      { stopped, successCount, failCount, empty: successCount === 0 && failCount === 0 }
+      { stopped: finalStopped, successCount, failCount, empty: successCount === 0 && failCount === 0 }
     );
   } catch (error) {
     if (componentUnmounted) return;
@@ -819,7 +823,9 @@ const handleManualModeSubmit = async () => {
 };
 
 const handleTaskAction = () => {
-  if (stopRequested.value || noticeRequiresReopen.value) return;
+  if (noticeRequiresReopen.value) return;
+  if (appendPaused.value) return resumeAppend();
+  if (appendRetrying.value || stopRequested.value) return;
   if (loading.value) {
     requestStop();
     return;
@@ -1092,12 +1098,13 @@ watch(
       <div class="task-actions">
         <el-button
           class="commit-btn"
-          :class="{ 'is-running': loading }"
-          :loading="stopRequested"
-          :disabled="stopRequested || noticeRequiresReopen || (!loading && (!fieldSelectionReady || (formData.mode === 'table' && sourceFieldLoading)))"
+          :class="{ 'is-running': loading && !appendPaused && !appendRetrying }"
+          :loading="!appendPaused && (stopRequested || appendRetrying)"
+          :disabled="noticeRequiresReopen || (!appendPaused && (stopRequested || appendRetrying || (!loading && (!fieldSelectionReady || (formData.mode === 'table' && sourceFieldLoading)))))"
           @click="handleTaskAction"
-        >{{ stopRequested ? '正在停止…' : loading ? '停止任务' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
-      <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
+        >{{ appendPaused ? '继续写入' : appendRetrying ? '正在核对写入…' : stopRequested ? '正在停止…' : loading ? '停止任务' : noticeRequiresReopen ? '请重新进入插件' : '立即执行' }}</el-button>
+        <el-button v-if="appendPaused" class="append-end-write-btn" @click="endAppend">结束本次写入</el-button>
+        <p v-if="taskNotice" class="sub-hint">{{ taskNotice }}</p>
       </div>
     </div>
 

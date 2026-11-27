@@ -286,14 +286,25 @@ const searchTask = useIncrementalTask({
 });
 const resumeSavedTask = async (endMissingTarget = false, expectedTask) => {
   if (disposed || loading.value || requiresReopen.value) return;
+  if (endMissingTarget === 'paused') {
+    if (!feedback.endPausedAction.value) return;
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, requiresReopen, undefined, restoreUserOutputSelection, feedback.endPausedAction);
+  }
   if (endMissingTarget && feedback.missingTargetAction?.value) {
     return feedback.endMissingTargetTask(loading, hasRecoverableTask, requiresReopen, task => resumeSavedTask(false, task), restoreUserOutputSelection);
   }
   loading.value = true;
   latestExecutionResult.value = null;
+  let fallbackEndAction = feedback.endPausedAction?.value;
   feedback.begin('正在检查未完成任务…');
   try {
-    const resumed = await searchTask.resume(task => restoreTask(task, true), expectedTask);
+    const resumed = await searchTask.resume(task => {
+      fallbackEndAction = null;
+      return restoreTask(task, true);
+    }, expectedTask, async () => {
+      await restoreUserOutputSelection();
+      hasRecoverableTask.value = false;
+    });
     if (!resumed && !disposed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -302,7 +313,7 @@ const resumeSavedTask = async (endMissingTarget = false, expectedTask) => {
   } catch (error) {
     if (disposed) return;
     loading.value = false; hasRecoverableTask.value = true; requiresReopen.value = !!error.requiresReopen;
-    feedback.fail(error, { persist: true, requiresReopen: requiresReopen.value });
+    feedback.fail(error, { persist: true, requiresReopen: requiresReopen.value, fallbackEndAction });
   }
 };
 const handleSubmit = async () => {
@@ -364,7 +375,7 @@ const cancelTask = async (savedTask) => {
   }
 };
 const actionState = computed(() => requiresReopen.value ? 'reopen' : clearing.value ? 'clearing' : stopping.value ? 'stopping' : loading.value && activeTaskId.value ? 'running' : loading.value || submitting.value || !ready.value ? 'submitting' : hasRecoverableTask.value ? 'recoverable' : 'idle');
-const actionText = computed(() => ({ reopen: '请重新进入插件恢复', clearing: '执行中…', stopping: '正在停止…', running: '停止任务', submitting: '准备中…', recoverable: feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务', idle: '立即执行' })[actionState.value]);
+const actionText = computed(() => feedback.endingMissingTarget?.value ? '正在结束任务…' : ({ reopen: '请重新进入插件恢复', clearing: '执行中…', stopping: '正在停止…', running: '停止任务', submitting: '准备中…', recoverable: feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务', idle: '立即执行' })[actionState.value]);
 const handleAction = () => actionState.value === 'running' ? cancelTask() : actionState.value === 'recoverable' ? resumeSavedTask(true) : actionState.value === 'idle' ? handleSubmit() : undefined;
 </script>
 
@@ -449,7 +460,13 @@ const handleAction = () => actionState.value === 'running' ? cancelTask() : acti
         </el-form>
       </div>
       <div v-if="taskNotice" class="task-notice" role="status">{{ taskNotice }}</div>
-      <div class="action-group"><el-button class="commit-btn" :class="{ 'is-running': actionState === 'running' || actionState === 'stopping' }" :loading="['submitting', 'stopping', 'clearing'].includes(actionState)" :disabled="['submitting', 'stopping', 'clearing', 'reopen'].includes(actionState)" @click="handleAction">{{ actionText }}</el-button></div>
+      <div class="action-group">
+        <el-button class="commit-btn" :class="{ 'is-running': actionState === 'running' || actionState === 'stopping' }" :loading="['submitting', 'stopping', 'clearing'].includes(actionState)" :disabled="['submitting', 'stopping', 'clearing', 'reopen'].includes(actionState)" @click="handleAction">{{ actionText }}</el-button>
+        <template v-if="actionState === 'recoverable' && feedback.endPausedAction?.value">
+          <el-button class="append-end-write-btn" @click="resumeSavedTask('paused')">结束本次任务</el-button>
+          <p class="sub-hint">已写入的数据会保留，未写入的结果将无法继续写入。</p>
+        </template>
+      </div>
     </div>
     <TaskExecutionResult :result="latestExecutionResult" />
 

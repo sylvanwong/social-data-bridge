@@ -2,6 +2,7 @@ import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResul
 import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
 import { createTaskStorage } from './helpers/taskStorage.mjs';
 import { resolveWritableField } from '../src/utils/tableFields.js';
+import { getPendingWriteLimit, matchWrittenAppendRows, readTableRecords } from '../src/utils/taskWriteState.mjs';
 import { nextTick } from 'vue';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,7 +39,7 @@ const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalT
 function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapped = false, newTable = false, operationTimeoutMs = 0 } = {}) {
   const storage = createTaskStorage();
   let hangWrite = false, failWrite = true, failSave = false, failScan = false, failUpdate = false, failSetup = newTable, createdTables = 0, id = 0, scans = 0;
-  const rows = [], writes = [], updates = [], errors = [], finished = [];
+  const rows = [], writes = [], updates = [], errors = [], finished = [], filters = [];
   const cidField = mapped ? 'custom-cid' : 'cid';
   const configs = [
     { key: 'cid', name: '评论ID', type: 'text', required: true, getValue: item => item.cid },
@@ -60,14 +61,16 @@ function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapp
         createCell: async value => ({ fieldId: key, getValue: async () => value }) });
       return key;
     },
-    getRecordsByPage: async ({ pageToken }) => {
+    getRecordsByPage: async ({ pageToken, filter }) => {
       scans++;
+      filters.push(filter);
       if (failScan) throw new Error('scan failed');
       const offset = Number(pageToken || 0);
       // 多页返回，评论 ID 使用 SDK 富文本形态。
-      const records = rows.slice(offset, offset + 1).map(row => ({ ...row,
+      const candidates = filter ? rows.filter(row => filter.conditions.some(({ fieldId, value }) => row.fields[fieldId] === value)) : rows;
+      const records = candidates.slice(offset, offset + 1).map(row => ({ ...row,
         fields: { ...row.fields, [cidField]: [{ text: row.fields[cidField] }] } }));
-      return { records, hasMore: offset + 1 < rows.length, pageToken: String(offset + 1) };
+      return { records, hasMore: offset + 1 < candidates.length, pageToken: String(offset + 1) };
     },
     addRecords: async records => {
       writes.push(records.length);
@@ -99,6 +102,7 @@ function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapp
     getTable: async () => { if (failSetup) { failSetup = false; throw new Error('setup failed'); } return table; },
   } };
   const bindings = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, getActiveFieldConfigs: load('getActiveFieldConfigs', { FIELD_CONFIG: configs, selectedFieldKeys }), buildFieldPayload: config => config,
+    matchWrittenAppendRows, readTableRecords,
     getFieldInstanceMapByConfigs: load('getFieldInstanceMapByConfigs'), bitable,
     createSequentialTable: async () => { createdTables++; fields.clear(); return { tableId: 'table' }; },
     mappingDraft: { value: [] }, normalizeCommentId: load('normalizeCommentId'), normalizeFieldValue: value => value,
@@ -106,16 +110,19 @@ function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapp
     console: { error() {} }, ElMessage() {}, resetParams() {},
   };
   const items = ['a', 'b', 'c', 'd'].map(cid => ({ cid, text: `内容${cid}` }));
+  const submissions = new Map();
   function open(callbacks = {}) {
     const timers = new Map(); let timerId = 0;
-    const create = new Function('bitable', 'setTimeout', 'clearTimeout', `${engineSource}; return useIncrementalTask;`)(bitable,
-      (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; }, key => timers.delete(key));
+    const create = new Function('bitable', 'setTimeout', 'clearTimeout', 'submissions',
+      `${engineSource.replace('const submissions = new Map();', '')}; return useIncrementalTask;`)(bitable,
+      (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; }, key => timers.delete(key), submissions);
     const writeBatch = new Function('createAndWriteData', 'showFieldProgress', 'normalizeCommentId', `return (${source.slice(batchNode.start, batchNode.end)});`)(
       load('createAndWriteData', bindings), () => {}, bindings.normalizeCommentId);
+    const getCommentResultLimit = load('getCommentResultLimit', { getPendingWriteLimit, RESULT_BATCH_SIZE: 20 });
     const task = create({ storageKey: 'test', writeBatch, operationTimeoutMs,
       getStatus: async () => ({ status }), isTerminal: result => [1, 2, 3].includes(result.status),
-      getResults: async task => { const start = Number(task.cursor || 0); return {
-        items: items.slice(start, start + 2), next_cursor: String(Math.min(start + 2, items.length)), has_more: start + 2 < items.length,
+      getResults: async task => { const start = Number(task.cursor || 0), size = Math.min(getCommentResultLimit(task), 2); return {
+        items: items.slice(start, start + size), next_cursor: String(Math.min(start + size, items.length)), has_more: start + size < items.length,
       }; },
       onError: (error, task) => { errors.push(error); return callbacks.onError?.(error, task); },
       onFinish: (status, task) => { finished.push(task.writtenCount); return callbacks.onFinish?.(status, task); },
@@ -125,7 +132,7 @@ function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapp
       expireWrite: () => { const [key, timer] = [...timers].find(([, timer]) => timer.delay >= 60000); timers.delete(key); timer.fn(); },
     };
   }
-  return { open, table, rows, writes, updates, errors, finished, items, fields, selectedFieldKeys, scans: () => scans,
+  return { open, table, rows, writes, updates, errors, finished, items, fields, filters, selectedFieldKeys, scans: () => scans,
     saved: () => structuredClone(storage.current()), seedSaved: storage.seed, failSave: value => { failSave = value; }, failScan: value => { failScan = value; },
     succeedWrites: () => { failWrite = false; }, failAgain: () => { failWrite = true; },
     hangWrite: () => { hangWrite = true; }, failUpdate: () => { failUpdate = true; }, createdTables: () => createdTables,
@@ -135,11 +142,48 @@ function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapp
   };
 }
 
+test('评论追加在两万行表只核对本批评论 ID，历史同 ID 不抵扣，补写再次超时不重复', async () => {
+  const f = fixture({ committedBeforeFailure: 1, mapped: true });
+  f.rows.push({ recordId: 'historical-b', fields: { 'custom-cid': 'b', text: '保留历史内容' } });
+  for (let i = 0; i < 19999; i++) f.rows.push({ recordId: `old-${i}`, fields: { 'custom-cid': `unrelated-${i}` } });
+  await f.open().task.start(f.initial);
+  assert.equal(f.saved().pendingWriteCount, 2);
+  assert.deepEqual(f.saved().appendState.knownRecordIds, ['historical-b']);
+  f.failAgain();
+  await f.open().task.resume();
+  assert.equal(f.saved().cursor, '');
+  assert.deepEqual(f.ids().slice(20000), ['a', 'b']);
+  const restored = f.open(); await restored.task.resume(); await restored.tick();
+  assert.deepEqual(f.ids().slice(20000), ['a', 'b', 'c', 'd']);
+  assert.equal(f.rows[0].fields.text, '保留历史内容');
+  assert.deepEqual(f.writes, [2, 1, 2]);
+  assert.deepEqual(f.finished, [4]);
+  assert.ok(f.filters.every(filter => filter?.conditions.every(condition => condition.fieldId === 'custom-cid')));
+  assert.deepEqual([...new Set(f.filters.map(filter => filter.conditions.map(condition => condition.value).join(',')))], ['a,b', 'c,d']);
+});
+
+test('聚合评论补写再次超时后编辑已核对行，重进仍只补未落表评论', async () => {
+  const f = fixture({ committedBeforeFailure: 1, mapped: true });
+  await f.open().task.start(f.initial);
+  f.failAgain();
+  await f.open().task.resume();
+  assert.equal(f.saved().cursor, '');
+  const confirmed = f.rows[0];
+  confirmed.fields['custom-cid'] = '修订';
+  const reopened = f.open();
+  await reopened.task.resume(); await reopened.tick();
+  assert.deepEqual(f.ids(), ['修订', 'b', 'c', 'd']);
+  assert.equal(f.rows[0], confirmed);
+  assert.deepEqual(f.writes, [2, 1, 2]);
+  assert.deepEqual(f.finished, [4]);
+});
+
 for (const mode of ['upsert', 'append']) {
   test(`评论 ${mode} 查表晚返回时，另一窗口已完成则旧窗口不再写表`, async () => {
     const f = fixture({ mode });
     f.succeedWrites();
-    if (mode === 'append') f.initial.pendingCommentWrite = true;
+    if (mode === 'append') Object.assign(f.initial, { pendingCommentWrite: true, pendingWriteCount: 2,
+      appendState: { pendingCount: 2, fieldIds: ['cid', 'text'], matchKeys: ['a', 'b'], knownRecordIds: [] } });
     const old = f.open(), current = f.open();
     const started = Promise.withResolvers(), release = Promise.withResolvers();
     const getRecords = f.table.getRecordsByPage;
@@ -261,12 +305,12 @@ test('核对查询失败保持暂停，不写、不推进游标；再次恢复�
   assert.deepEqual(f.ids(), ['a', 'b', 'c', 'd']);
 });
 
-test('正常新增不核对历史 ID，后续批次仍遵循原始新增模式', async () => {
+test('正常新增按本批建立基线，历史同 ID 仍按始终新增写入', async () => {
   const f = fixture(); f.succeedWrites();
   f.items[2].cid = 'a';
   const engine = f.open(); await engine.task.start(f.initial); await engine.tick();
   assert.deepEqual(f.ids(), ['a', 'b', 'a', 'd']);
-  assert.equal(f.scans(), 0);
+  assert.ok(f.filters.length > 0 && f.filters.every(Boolean));
 });
 
 test('异常恢复时评论 ID 字段被删除，不自动新建空 ID 列并重复写入', async () => {
@@ -346,24 +390,25 @@ test('SDK 写入一直不返回：超时后重开仍核对已落表数据并写�
 });
 
 
-test('升级前旧任务缺少标记：首批核对，后续仍按始终新增模式写完', async () => {
+test('升级前旧追加任务缺少原批次和历史行基线：保留进度并暂停', async () => {
   const f = fixture(); f.succeedWrites();
   f.rows.push({ recordId: 'old-a', fields: { cid: 'a', text: '内容a' } });
   f.items[2].cid = 'a';
   f.seedSaved({ taskId: 'old-task', baseId: 'base', targetTableId: 'table',
     writeMode: 'append', cursor: '', writtenCount: 0 });
-  const reopened = f.open(); await reopened.task.resume(); await reopened.tick();
-  assert.deepEqual(f.ids(), ['a', 'b', 'a', 'd']);
-  assert.equal(f.scans(), 1);
-  assert.deepEqual(f.finished, [4]);
-  assert.deepEqual(f.saved(), {});
+  const reopened = f.open(); await reopened.task.resume();
+  assert.deepEqual(f.ids(), ['a']);
+  assert.equal(f.scans(), 0);
+  assert.deepEqual(f.finished, []);
+  assert.equal(f.saved().taskId, 'old-task');
+  assert.match(f.errors.at(-1).message, /无法确认原写入批次范围/);
 });
 
-test('旧任务已有游标：核对失败不推进，重开继续核对并写完剩余批次', async () => {
-  const f = fixture(); f.succeedWrites();
+test('旧更新任务已有游标：核对失败不推进，重开继续核对并写完剩余批次', async () => {
+  const f = fixture({ mode: 'upsert' }); f.succeedWrites();
   for (const cid of ['a', 'b', 'c']) f.rows.push({ recordId: `old-${cid}`, fields: { cid, text: `内容${cid}` } });
   f.seedSaved({ taskId: 'old-task', baseId: 'base', targetTableId: 'table',
-    writeMode: 'append', cursor: '2', writtenCount: 2 });
+    writeMode: 'upsert', cursor: '2', writtenCount: 2 });
   f.failScan(true);
   const failed = f.open(); await failed.task.resume();
   assert.equal(failed.timers.size, 0);
@@ -380,17 +425,17 @@ test('真实创建入口的新任务不被误判为旧任务，正常新增不�
   const f = fixture(); f.succeedWrites();
   f.rows.push({ recordId: 'old-a', fields: { cid: 'a', text: '历史内容' } });
   let initial;
-  const submit = load('postNoteTask', { componentUnmounted: false, commentSubmission: { pending: null }, hasRecoverableTask: { value: false },
+  const submit = load('postNoteTask', { componentUnmounted: false, hasRecoverableTask: { value: false },
     showToast() {}, request: async () => ({ data: { sta: 0, data: { task_id: 'new-task' } } }),
     props: { api_key: 'test' }, formData: { value: { pages: 1, reply_pages: -1, writeMode: 'append' } },
     selectedFieldKeys: { value: ['cid', 'text'] }, mappingDraft: { value: [] }, activeCommentTaskId: { value: '' },
-    commentStreamTask: { saveForResume: async task => { initial = task; }, resume: async () => true },
+    commentStreamTask: { submit: async create => { initial = await create(); return true; } },
   });
   await submit('table', 'https://example.test');
   assert.ok(initial, '必须经真实提交入口创建任务');
   const engine = f.open(); await engine.task.start(initial); await engine.tick();
   assert.deepEqual(f.ids(), ['a', 'a', 'b', 'c', 'd']);
-  assert.equal(f.scans(), 0);
+  assert.ok(f.filters.length > 0 && f.filters.every(Boolean));
   assert.deepEqual(f.finished, [4]);
 });
 
@@ -410,7 +455,7 @@ test('旧任务尚未建表：初始化失败后仍可在原表补字段，不�
 
 test('实际恢复按钮与任务引擎联动：继续原任务、核对首批并写完剩余结果', async () => {
   const f = fixture(); let created = 0;
-  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, clearing: { value: false }, commentSubmission: { pending: null }, componentUnmounted: false, loading: { value: true }, isSubmitting: { value: false }, isCancelling: { value: false },
+  const scope = { executionResult: useTaskExecutionResult(), latestExecutionResult: { value: null }, buildTaskExecutionResult, clearing: { value: false }, componentUnmounted: false, loading: { value: true }, isSubmitting: { value: false }, isCancelling: { value: false },
     activeCommentTaskId: { value: 'task' }, hasRecoverableTask: { value: false }, recoveryRequiresReopen: { value: false },
     showToast() {}, showCompletionToast() {}, showErrorMsg() {},
     computed: fn => ({ get value() { return fn(); } }), commit: () => { created++; }, cancelCommentTask() {},
@@ -443,8 +488,7 @@ for (const targetTableId of ['table', '']) {
   test(`创建成功后保存失败，重新进入自动补存并写完所有结果：${targetTableId || '新建表'}`, async () => {
     const f = fixture(); f.succeedWrites(); f.failSave(() => true);
     let creates = 0;
-    const shared = { pending: null };
-    const page = () => ({ componentUnmounted: false, commentSubmission: shared,
+    const page = () => ({ componentUnmounted: false,
       props: { api_key: 'test' }, formData: { value: { pages: 1, writeMode: 'append' } }, selectedFieldKeys: { value: ['cid', 'text'] }, mappingDraft: { value: [] },
       request: async () => { creates++; return { data: { sta: 0, data: { task_id: 'created-task' } } }; },
       loading: { value: false }, isSubmitting: { value: false }, activeCommentTaskId: { value: '' },
@@ -453,7 +497,8 @@ for (const targetTableId of ['table', '']) {
       loadFieldOptions: async () => {}, loadSelectedFieldKeys: async () => {}, loadTableOutputConfigs: async () => {},
       fieldSelectionReady: { value: false },
     });
-    const first = page(); first.commentStreamTask = f.open().task;
+    const first = page();
+    first.commentStreamTask = f.open({ onError: () => { first.hasRecoverableTask.value = true; } }).task;
     await load('postNoteTask', first)(targetTableId, 'url');
     assert.equal(first.hasRecoverableTask.value, true);
     assert.equal(f.saved(), undefined);
@@ -464,10 +509,9 @@ for (const targetTableId of ['table', '']) {
     const mounted = parseJS(source, { sourceType: 'module' }).program.body.find(node => node.type === 'ExpressionStatement'
       && node.expression.type === 'CallExpression' && node.expression.callee.name === 'onMounted').expression.arguments[0];
     await new Function(...Object.keys(next), `return (${source.slice(mounted.start, mounted.end)});`)(...Object.values(next))();
-    assert.deepEqual(f.errors.map(error => error.message), []);
+    assert.equal(f.errors.length, 1);
     assert.deepEqual(f.ids(), ['a', 'b', 'c', 'd']);
     assert.equal(f.saved().taskId, 'created-task');
-    assert.equal(shared.pending, null);
     assert.equal(creates, 1);
     await engine.tick();
     assert.deepEqual(f.finished, [4]);
@@ -499,12 +543,12 @@ test('评论任务保存创建请求发出时的输出字段，不引用后续�
   let release, initial;
   const selectedFieldKeys = { value: ['cid', 'text'] };
   const submit = load('postNoteTask', {
-    componentUnmounted: false, commentSubmission: { pending: null }, selectedFieldKeys,
+    componentUnmounted: false, selectedFieldKeys,
     hasRecoverableTask: { value: false }, activeCommentTaskId: { value: '' },
     props: { api_key: 'test-only' }, formData: { value: { pages: 1, writeMode: 'upsert' } },
     mappingDraft: { value: [] }, showToast() {},
     request: () => new Promise(resolve => { release = resolve; }),
-    commentStreamTask: { saveForResume: async task => { initial = task; }, resume: async () => true },
+    commentStreamTask: { submit: async create => { initial = await create(); return true; } },
   });
   const pending = submit('table', 'https://example.test');
   selectedFieldKeys.value.splice(1, 1, 'nickname');

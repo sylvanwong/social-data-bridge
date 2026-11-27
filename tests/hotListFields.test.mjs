@@ -285,6 +285,7 @@ for (const existing of [false, true]) {
       bitable: { base: { getTableById: async () => table } },
       isFieldTypeCompatible: (actual, config) => actual === config.type,
       normalizeValue: value => value, showToast() {},
+      appendWithRecovery: (target, records) => target.addRecords(records),
     };
     const api = new Function(...Object.keys(bindings), nodes.map(node => source.slice(node.start, node.end)).join('\n') + '\nreturn {setupTableFields,writeDataToTable};')(...Object.values(bindings));
     await api.setupTableFields('target', !existing);
