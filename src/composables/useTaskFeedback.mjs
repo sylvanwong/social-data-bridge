@@ -6,17 +6,20 @@ const errorText = error => String(error?.response?.data?.msg || error?.message |
 const resultText = text => String(text || '').replace(/[，。]?\s*请勿关闭插件，关闭(?:将中断任务|会中断数据写入)[。！!]?$/, '');
 
 // 只管理页面反馈；任务、写入进度、恢复和互斥仍由调用方拥有。
-export function useTaskFeedback() {
+export function useTaskFeedback({ executionResult } = {}) {
   const toastVisible = ref(false);
   const toastText = ref('');
   const toastType = ref('loading');
   const toastLoading = computed(() => toastType.value === 'loading');
   const taskNotice = ref('');
+  const missingTargetAction = ref(null);
+  const endingMissingTarget = ref(false);
+  let disposed = false;
   const noticeRequiresReopen = ref(false);
   let timer = null;
 
   const cancelTimer = () => { if (timer !== null) clearTimeout(timer); timer = null; };
-  const clearNotice = () => { taskNotice.value = ''; noticeRequiresReopen.value = false; };
+  const clearNotice = () => { missingTargetAction.value = null; taskNotice.value = ''; noticeRequiresReopen.value = false; };
   const hide = () => { cancelTimer(); toastVisible.value = false; };
   const progress = (text, { stopping = false } = {}) => {
     cancelTimer();
@@ -42,6 +45,7 @@ export function useTaskFeedback() {
   const fail = (error, { persist = false, requiresReopen = !!error?.requiresReopen } = {}) => {
     const text = errorText(error);
     finish(text, { type: 'error' });
+    missingTargetAction.value = error?.endMissingTarget || null;
     if (persist || requiresReopen || error?.stopPolling) {
       taskNotice.value = text;
       noticeRequiresReopen.value = requiresReopen;
@@ -52,6 +56,46 @@ export function useTaskFeedback() {
     noticeRequiresReopen.value = false;
   };
 
-  onUnmounted(() => { hide(); clearNotice(); });
-  return { toastVisible, toastText, toastType, toastLoading, taskNotice, noticeRequiresReopen, begin, progress, finish, fail, recordFailure, hide, clearNotice };
+  const endMissingTargetTask = async (loading, recoverable, requiresReopen, onRestored, onEnded) => {
+    const end = missingTargetAction.value;
+    if (!end || loading.value) return;
+    const pausedResult = executionResult?.value?.status === 'paused' ? executionResult.value : null;
+    const pausedReason = pausedResult?.reason;
+    endingMissingTarget.value = true;
+    loading.value = true;
+    begin('正在结束任务…');
+    if (pausedResult) pausedResult.reason = '';
+    let restoredTask;
+    try {
+      const result = await end();
+      if (disposed) return;
+      restoredTask = result?.restoredTask;
+      if (result === true) {
+        recoverable.value = false;
+        hide();
+        if (pausedResult && executionResult.value === pausedResult) executionResult.value = null;
+        await onEnded?.();
+      } else if (!restoredTask && pausedResult && executionResult.value === pausedResult) {
+        pausedResult.reason = pausedReason;
+      }
+    } catch (error) {
+      if (disposed) return;
+      if (requiresReopen) requiresReopen.value = !!error.requiresReopen;
+      fail(error, { persist: true });
+      if (!missingTargetAction.value) {
+        missingTargetAction.value = end;
+        if (end.notice) taskNotice.value = `${taskNotice.value} ${end.notice}`;
+      }
+      if (pausedResult && executionResult.value === pausedResult) pausedResult.reason = taskNotice.value;
+    } finally {
+      if (!disposed) {
+        endingMissingTarget.value = false;
+        loading.value = false;
+      }
+    }
+    if (!disposed && restoredTask) return onRestored(restoredTask);
+  };
+
+  onUnmounted(() => { disposed = true; hide(); clearNotice(); });
+  return { missingTargetAction, endingMissingTarget, endMissingTargetTask, toastVisible, toastText, toastType, toastLoading, taskNotice, noticeRequiresReopen, begin, progress, finish, fail, recordFailure, hide, clearNotice };
 }

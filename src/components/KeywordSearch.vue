@@ -66,7 +66,7 @@ const FIELD_SELECTION_STORAGE_KEY = 'keyword_search_selected_fields_v1';
 const STREAM_TASK_STORAGE_KEY = 'keyword_search_stream_task_v1';
 const selectedFieldKeys = ref([]);
 const fieldSelectionReady = ref(false);
-const feedback = useTaskFeedback();
+const feedback = useTaskFeedback({ executionResult: latestExecutionResult });
 const { toastVisible, toastText, toastLoading, toastType, taskNotice } = feedback;
 const currentTableName = ref('');
 const isSubmitting = ref(false);
@@ -374,14 +374,17 @@ const restoreTask = async (task, progressText = '正在恢复未完成的数据�
     loadMappingFields(formData1.value.radio === 2 ? formData1.value.table_id : '', task);
   }
 };
-const resumeSavedTask = async () => {
+const resumeSavedTask = async (endMissingTarget = false, expectedTask) => {
   if (requiresReopen.value || componentUnmounted || loading.value) return;
+  if (endMissingTarget && feedback.missingTargetAction?.value) {
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, requiresReopen, task => resumeSavedTask(false, task));
+  }
   loading.value = true;
   latestExecutionResult.value = null;
   feedback.begin('正在检查未完成任务…');
   try {
     await nextTick();
-    const resumed = await keywordStreamTask.resume(task => restoreTask(task, undefined, true));
+    const resumed = await keywordStreamTask.resume(task => restoreTask(task, undefined, true), expectedTask);
     if (!resumed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -399,6 +402,7 @@ const keywordTaskApiPath = (task, path) => buildFeishuApiPath(path,
   task.apiPathPrefix ?? LEGACY_FEISHU_API_PATH_PREFIX);
 
 const keywordStreamTask = useIncrementalTask({
+  requestStop: task => cancelKeywordTask(task),
   storageKey: STREAM_TASK_STORAGE_KEY,
   operationTimeoutMs: 180000,
   isTerminal: (status) => [1, 2, 3].includes(Number(status.status)),
@@ -431,6 +435,7 @@ const keywordStreamTask = useIncrementalTask({
       uniqueKey: 'aweme_id',
       reconcile, appendState,
       assertActive: controls.assertActive,
+      assertCanWrite: controls.assertCanWrite,
       onBeforeWrite: async () => {
         controls.assertActive();
         task.pendingWrite = true;
@@ -498,12 +503,14 @@ const keywordStreamTask = useIncrementalTask({
   },
 });
 
-const cancelKeywordTask = async () => {
-  const task = keywordStreamTask.getActiveTask();
-  if (!task?.taskId || isCancelling.value || clearing.value) return;
+const cancelKeywordTask = async (savedTask) => {
+  const task = savedTask || keywordStreamTask.getActiveTask();
+  if (!task?.taskId || (!savedTask && (isCancelling.value || clearing.value))) return;
 
-  isCancelling.value = true;
-  showToast(getStoppingText(task), true);
+  if (!savedTask) {
+    isCancelling.value = true;
+    showToast(getStoppingText(task), true);
+  }
   try {
     const response = await feishuRequest({
       url: keywordTaskApiPath(task, '/v1/feishu/keyword/task/cancel'),
@@ -514,7 +521,9 @@ const cancelKeywordTask = async () => {
     });
     const res = response.data;
     if (res?.sta !== 0) throw new Error(res?.msg || '停止任务失败');
+    return res.data;
   } catch (error) {
+    if (savedTask) throw error;
     if (keywordStreamTask.getActiveTask() !== task || clearing.value) return;
     const status = task.latestStatus;
     isCancelling.value = Number(status?.status) === 3 || status?.status_text === 'cancel_requested' || !!status?.cancel_requested;
@@ -909,7 +918,7 @@ const taskActionState = computed(() => {
 });
 
 const handleTaskAction = () => {
-  if (taskActionState.value === 'recoverable') return resumeSavedTask();
+  if (taskActionState.value === 'recoverable') return resumeSavedTask(true);
   if (taskActionState.value === 'running') {
     return cancelKeywordTask();
   }
@@ -1286,7 +1295,7 @@ watch(selectedFieldKeys, (keys) => {
         :loading="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing'"
         :disabled="taskActionState === 'submitting' || taskActionState === 'stopping' || taskActionState === 'clearing' || taskActionState === 'reopen' || (taskActionState === 'idle' && formData1.radio === 2 && (tableConfigApplying || !!tableConfigLoadError))"
         @click="handleTaskAction"
-      >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? '恢复任务' : '立即执行' }}</el-button>
+      >{{ taskActionState === 'clearing' ? '执行中…' : taskActionState === 'submitting' ? '准备中…' : taskActionState === 'stopping' ? '正在停止…' : taskActionState === 'running' ? '停止任务' : taskActionState === 'reopen' ? '请重新进入插件恢复' : taskActionState === 'recoverable' ? (feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务') : '立即执行' }}</el-button>
     </div>
 
     <TaskExecutionResult :result="latestExecutionResult" />

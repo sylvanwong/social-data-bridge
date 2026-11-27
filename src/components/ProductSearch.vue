@@ -58,7 +58,7 @@ const handleBack = event => {
   }
   emit('back');
 };
-const feedback = useTaskFeedback();
+const feedback = useTaskFeedback({ executionResult: latestExecutionResult });
 const { toastVisible, toastText, toastType, taskNotice } = feedback;
 const { createAndWriteData, validateTableFields } = useSocialData(() => '商品搜索', '', FIELD_CONFIG);
 let disposed = false, readId = 0, applying = false;
@@ -224,7 +224,15 @@ const restoreTask = async (task, restoring = false) => {
   }
   if (!disposed) feedback.progress(stopping.value ? stopText(task) : restoring ? '正在恢复未完成的商品搜索任务…' : '任务已创建，正在准备获取商品…');
 };
+const restoreUserOutputSelection = async () => {
+  if (!selectedKeysBeforeRecovery) return;
+  selectedKeys.value = selectedKeysBeforeRecovery;
+  selectedKeysBeforeRecovery = undefined;
+  // 先恢复勾选再解锁，避免把任务回显或收尾当成用户编辑。
+  await nextTick();
+};
 const searchTask = useIncrementalTask({
+  requestStop: task => cancelTask(task),
   storageKey: 'product_search_stream_task_v1', operationTimeoutMs: 180000,
   isTerminal: status => [1, 2, 3].includes(Number(status.status)),
   getStatus: async task => (await feishuRequest({ url: path(task, `/task?task_id=${encodeURIComponent(task.taskId)}`), method: 'get', baseURL: task.apiBaseUrl ?? FEISHU_API_BASE_URL, headers: headers() })).data,
@@ -240,6 +248,7 @@ const searchTask = useIncrementalTask({
       initializingTableId: task.initializingTableId, reconcile, skipFieldDisplayConfig: !resumingInitialization,
       ...(appendState ? { appendState, fieldOrder: task.selectedFieldKeys } : {}),
       assertActive: controls.assertActive, fieldMappings: task.fieldMappings || [], upsertCacheKey: task.taskId,
+      assertCanWrite: controls.assertCanWrite,
       onProgress: message => { if (!disposed) feedback.progress(stopping.value ? stopText(task) : message, { stopping: stopping.value }); },
       onTableInitialized: async () => { controls.assertActive(); task.initializingTableId = ''; await controls.saveProgress(); },
       onBeforeWrite: async () => { controls.assertActive(); task.pendingWrite = true; task.pendingWriteCount = rows.length; await controls.saveProgress(); },
@@ -260,13 +269,8 @@ const searchTask = useIncrementalTask({
   onFinish: async (status, task) => {
     if (disposed) return;
     latestExecutionResult.value = buildTaskExecutionResult(status, task, { kind: 'productSearch' });
-    if (selectedKeysBeforeRecovery) {
-      selectedKeys.value = selectedKeysBeforeRecovery;
-      selectedKeysBeforeRecovery = undefined;
-      // 先恢复勾选再解锁，避免把任务回显或收尾当成用户编辑。
-      await nextTick();
-      if (disposed) return;
-    }
+    await restoreUserOutputSelection();
+    if (disposed) return;
     clearing.value = false; loading.value = false; stopping.value = false; activeTaskId.value = ''; hasRecoverableTask.value = false;
     if (form.value.targetType === 'existing') void loadTarget();
     if (Number(status.status) === 2) feedback.fail(`商品搜索失败，已写入 ${task.writtenCount || 0} 条商品：${status.reason || '获取失败'}`);
@@ -280,13 +284,16 @@ const searchTask = useIncrementalTask({
     feedback.fail(error, { persist: hasRecoverableTask.value, requiresReopen: requiresReopen.value });
   },
 });
-const resumeSavedTask = async () => {
+const resumeSavedTask = async (endMissingTarget = false, expectedTask) => {
   if (disposed || loading.value || requiresReopen.value) return;
+  if (endMissingTarget && feedback.missingTargetAction?.value) {
+    return feedback.endMissingTargetTask(loading, hasRecoverableTask, requiresReopen, task => resumeSavedTask(false, task), restoreUserOutputSelection);
+  }
   loading.value = true;
   latestExecutionResult.value = null;
   feedback.begin('正在检查未完成任务…');
   try {
-    const resumed = await searchTask.resume(task => restoreTask(task, true));
+    const resumed = await searchTask.resume(task => restoreTask(task, true), expectedTask);
     if (!resumed && !disposed) {
       loading.value = false;
       if (hasRecoverableTask.value) feedback.fail('未读取到当前表格的恢复进度，请核对当前多维表格和已写入结果后重试恢复', { persist: true });
@@ -338,14 +345,18 @@ const handleSubmit = async () => {
   }
   finally { if (!disposed) submitting.value = false; }
 };
-const cancelTask = async () => {
-  const task = searchTask.getActiveTask();
-  if (!task?.taskId || stopping.value || clearing.value) return;
-  stopping.value = true; feedback.progress(stopText(task), { stopping: true });
+const cancelTask = async (savedTask) => {
+  const task = savedTask || searchTask.getActiveTask();
+  if (!task?.taskId || (!savedTask && (stopping.value || clearing.value))) return;
+  if (!savedTask) {
+    stopping.value = true; feedback.progress(stopText(task), { stopping: true });
+  }
   try {
     const response = await feishuRequest({ url: path(task, '/task/cancel'), method: 'post', baseURL: task.apiBaseUrl ?? FEISHU_API_BASE_URL, headers: headers(), data: { task_id: task.taskId } });
     if (response.data?.sta !== 0) throw new Error(response.data?.msg || '停止任务失败');
+    return response.data.data;
   } catch (error) {
+    if (savedTask) throw error;
     if (disposed || searchTask.getActiveTask() !== task || clearing.value) return;
     stopping.value = Number(task.latestStatus?.status) === 3 || !!task.latestStatus?.cancel_requested;
     ElMessage({ type: 'error', message: error.message || '停止任务失败' });
@@ -353,8 +364,8 @@ const cancelTask = async () => {
   }
 };
 const actionState = computed(() => requiresReopen.value ? 'reopen' : clearing.value ? 'clearing' : stopping.value ? 'stopping' : loading.value && activeTaskId.value ? 'running' : loading.value || submitting.value || !ready.value ? 'submitting' : hasRecoverableTask.value ? 'recoverable' : 'idle');
-const actionText = computed(() => ({ reopen: '请重新进入插件恢复', clearing: '执行中…', stopping: '正在停止…', running: '停止任务', submitting: '准备中…', recoverable: '恢复任务', idle: '立即执行' })[actionState.value]);
-const handleAction = () => actionState.value === 'running' ? cancelTask() : actionState.value === 'recoverable' ? resumeSavedTask() : actionState.value === 'idle' ? handleSubmit() : undefined;
+const actionText = computed(() => ({ reopen: '请重新进入插件恢复', clearing: '执行中…', stopping: '正在停止…', running: '停止任务', submitting: '准备中…', recoverable: feedback.missingTargetAction?.value ? '结束本次任务' : '恢复任务', idle: '立即执行' })[actionState.value]);
+const handleAction = () => actionState.value === 'running' ? cancelTask() : actionState.value === 'recoverable' ? resumeSavedTask(true) : actionState.value === 'idle' ? handleSubmit() : undefined;
 </script>
 
 <template>

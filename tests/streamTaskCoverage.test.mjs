@@ -1,3 +1,4 @@
+import { createTaskStorage } from './helpers/taskStorage.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,6 +15,7 @@ for (const [component, engineName, key] of [['ProfileFetch', 'profileStreamTask'
     assert.ok(node, '使用已验证的增量任务引擎');
     const batch = node.init.arguments[0].properties.find(n => n.key.name === 'writeBatch').value;
     let saved, tables = 0, attempts = 0; const rows = [];
+    const storage = createTaskStorage();
     const writer = async (items, type, taskId, target, fields, options) => {
       options.assertActive();
       if (!target) { target = `table-${++tables}`; await options.onTargetTableReady(target); }
@@ -28,7 +30,7 @@ for (const [component, engineName, key] of [['ProfileFetch', 'profileStreamTask'
     const batchFn = new Function('createAndWriteData', 'showProfileFieldProgress', 'showFieldProgress', `return (${source.slice(batch.start, batch.end)})`)(writer, () => {}, () => {});
     const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8').replace(/^import .*;\n/, '').replace('export const useIncrementalTask','const useIncrementalTask');
     const timers = new Map(); let id = 0;
-    const bitable = { base: { getSelection: async () => ({baseId:'base'}) }, bridge: { getData: async () => structuredClone(saved), setData: async (_, value) => {saved=structuredClone(value)} } };
+    const bitable = { base: { getSelection: async () => ({baseId:'base'}) }, bridge: { getData: storage.getData, setData: async (key, value) => { await storage.setData(key, value); saved = storage.current(); } } };
     const create = new Function('bitable','setTimeout','clearTimeout',`${engineSource};return useIncrementalTask`)(bitable, fn=>{timers.set(++id,fn);return id},id=>timers.delete(id));
     const config = { storageKey: 'test', getStatus: async () => ({status:3}), isTerminal: () => true,
       getResults: async task => ({ items: task.cursor === '2' ? [] : [{[key]: task.cursor ? 'b' : 'a'}], next_cursor: task.cursor ? '2' : '1', has_more: true }),
@@ -71,6 +73,7 @@ for (const [page, engine, helpers, limit] of [
         return `const ${name} = ${source.slice(node.init.start, node.init.end)};`;
       }).join('\n');
       let saved, attempts = 0, seq = 0;
+      const storage = createTaskStorage();
       const timers = new Map(), requests = [], rows = [], totals = [], finished = [];
       const request = async config => {
         assert.equal(config.data.limit, limit);
@@ -92,7 +95,7 @@ for (const [page, engine, helpers, limit] of [
       const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
         .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
       const bitable = { base: { getSelection: async () => ({ baseId: 'base' }) },
-        bridge: { setData: async (_, value) => { saved = structuredClone(value); }, getData: async () => saved } };
+        bridge: { setData: async (key, value) => { await storage.setData(key, value); saved = storage.current(); }, getData: storage.getData } };
       const create = new Function('bitable', 'setTimeout', 'clearTimeout', `${engineSource}; return useIncrementalTask;`)(bitable,
         fn => { timers.set(++seq, fn); return seq; }, id => timers.delete(id));
       const task = create({ storageKey: 'test', getStatus: async () => ({ status: 3 }), isTerminal: () => true, getResults,

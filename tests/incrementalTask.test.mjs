@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { taskProgressView } from './helpers/taskStorage.mjs';
 
 function harness(options = {}) {
-  let saved = null;
+  const records = {};
+  const saved = taskProgressView(records);
   const timers = new Map(); let seq = 0;
   const source = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
     .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
-  const bitable = { bridge: { setData: async (_, value) => { saved = structuredClone(value); }, getData: async () => saved },
+  const bitable = { bridge: { setData: async (key, value) => { records[key] = structuredClone(value); }, getData: async key => (key === undefined ? saved.test : records[key]) ?? null },
     base: { getSelection: async () => ({ baseId: 'base' }) } };
   const create = new Function('bitable', 'setTimeout', 'clearTimeout', `${source}; return useIncrementalTask;`)(bitable,
     (fn, delay) => { const id = ++seq; timers.set(id, { fn, delay }); return id; }, id => timers.delete(id));
@@ -18,7 +20,7 @@ function harness(options = {}) {
     getResults: async () => { const items = batches.shift() || []; return { items, next_cursor: items.length ? 'cursor-1' : '', has_more: false }; },
     writeBatch: async () => calls.push('write'),
     onFinish: (_, task) => finished.push(task.writtenCount), onError: error => errors.push(error), ...options });
-  return { task, create, calls, finished, errors, bitable, timers, saved: () => saved,
+  return { task, create, calls, finished, errors, bitable, timers, saved: () => saved.test ?? null,
     tick: async () => { const [id, timer] = [...timers].find(([, timer]) => timer.delay < 60000); timers.delete(id); await timer.fn(); } };
 }
 
@@ -287,7 +289,7 @@ test('终态清理响应失败后，恢复读取再次失败仍保留待清理�
   const save = h.bitable.bridge.setData;
   h.bitable.bridge.setData = async (key, value) => {
     await save(key, value);
-    if (!value.taskId && ++clears === 1) throw new Error('清理已生效但响应失败');
+    if (key.endsWith(':finished') && ++clears === 1) throw new Error('清理已生效但响应失败');
   };
   try {
     await h.task.start({ taskId: 'old' });
@@ -310,7 +312,7 @@ test('终态清理失败后恢复记录已被另一任务替换，不得用旧�
   const h = harness({ getStatus: async task => { reads.push(task.taskId); return { status: task.taskId === 'old' ? 3 : 0 }; }, getResults: async () => ({ items: [] }) });
   const save = h.bitable.bridge.setData;
   h.bitable.bridge.setData = async (key, value) => {
-    if (!value.taskId && ++clears === 1) throw new Error('清理失败');
+    if (key.endsWith(':finished') && ++clears === 1) throw new Error('清理失败');
     return save(key, value);
   };
   try {
@@ -354,7 +356,7 @@ for (const stage of ['getStatus', 'getResults']) {
   }
 }
 
-for (const stage of ['getData', 'getSelection', 'getStatus', 'getResults']) {
+for (const stage of ['getData', 'getSelection', 'getStatus']) {
   test(`${stage}只读超时可同页恢复原任务，晚响应不写入或推进游标`, async () => {
     let release, blocked = true, writes = 0, thrown;
     const gate = new Promise(resolve => { release = resolve; });
@@ -364,7 +366,7 @@ for (const stage of ['getData', 'getSelection', 'getStatus', 'getResults']) {
       getStatus: async () => stage === 'getStatus' && blocked ? gate : status,
       getResults: async task => {
         assert.equal(task.cursor, 'saved-cursor');
-        return stage === 'getResults' && blocked ? gate : result;
+        return result;
       },
       writeBatch: async () => { writes++; },
     });
@@ -387,7 +389,7 @@ for (const stage of ['getData', 'getSelection', 'getStatus', 'getResults']) {
     assert.deepEqual(h.saved(), saved);
 
     blocked = false;
-    release(stage === 'getData' ? saved : stage === 'getSelection' ? { baseId: 'base' } : stage === 'getStatus' ? status : result);
+    release(stage === 'getData' ? saved : stage === 'getSelection' ? { baseId: 'base' } : status);
     for (let i = 0; i < 30; i++) await Promise.resolve();
     assert.equal(writes, 0, '迟到的读取结果不得重新开始写入');
     assert.deepEqual(h.saved(), saved);
@@ -456,6 +458,87 @@ test('读取结果失败仍可重试，成功后只写入一次', async () => {
   assert.deepEqual(h.calls, ['write']);
   assert.deepEqual(h.finished, [1]);
   assert.deepEqual(h.errors, []);
+});
+
+test('结果读取超时自动从保存游标补查，迟到的读取结果不写表', async () => {
+  let releaseRead;
+  const cursors = [], rows = [];
+  const h = harness({
+    operationTimeoutMs: 180000,
+    getResults: async task => {
+      cursors.push(task.cursor);
+      if (cursors.length === 1) return new Promise(resolve => { releaseRead = resolve; });
+      return { items: task.cursor === 'stored' ? [{ id: 'one' }] : [], next_cursor: 'cursor-1' };
+    },
+    writeBatch: async items => rows.push(...items.map(item => item.id)),
+  });
+  try {
+    await h.bitable.bridge.setData('test', { taskId: 'task', baseId: 'base', targetTableId: 'table', cursor: 'stored' });
+    const running = h.task.resume();
+    await flush();
+    const [, timeout] = [...h.timers].find(([, timer]) => timer.delay === 180000);
+    timeout.fn();
+    await running;
+    assert.deepEqual(h.errors, []);
+    assert.equal(h.saved().cursor, 'stored');
+    await h.tick();
+    releaseRead({ items: [{ id: 'late' }], next_cursor: 'late-cursor' });
+    await h.tick();
+    assert.deepEqual(cursors, ['stored', 'stored', 'cursor-1']);
+    assert.deepEqual(rows, ['one']);
+    assert.deepEqual(h.finished, [1]);
+    assert.deepEqual(h.saved(), {});
+  } finally { h.task.stop(); }
+});
+
+test('结果读取持续超时达到原无进度时限，保留任务和游标后暂停', async t => {
+  let now = Date.now(), reads = 0;
+  t.mock.method(Date, 'now', () => now);
+  const h = harness({
+    operationTimeoutMs: 180000,
+    getResults: async () => { reads++; return new Promise(() => {}); },
+  });
+  const expireRead = async run => {
+    await flush();
+    const [, timeout] = [...h.timers].find(([, timer]) => timer.delay === 180000);
+    timeout.fn();
+    await run;
+  };
+  try {
+    const first = h.task.start({ taskId: 'task', targetTableId: 'table', cursor: 'stored' });
+    await expireRead(first);
+    assert.deepEqual(h.errors, []);
+    now += 10 * 60 * 1000;
+    await expireRead(h.tick());
+    assert.equal(reads, 2);
+    assert.match(h.errors[0]?.message, /读取获取结果超时/);
+    assert.equal(h.saved().taskId, 'task');
+    assert.equal(h.saved().cursor, 'stored');
+    assert.deepEqual(h.calls, []);
+    assert.equal(h.timers.size, 0);
+  } finally { h.task.stop(); }
+});
+
+test('结果读取暂时查不到任务时，原表还在就自动继续原任务', async () => {
+  let reads = 0, tableChecks = 0;
+  const h = harness({
+    requestStop: async () => assert.fail('不应停止后台任务'),
+    getResults: async task => ++reads === 1
+      ? { sta: -1, msg: '任务不存在' }
+      : { items: task.cursor ? [] : [{ id: 'one' }], next_cursor: 'cursor-1' },
+  });
+  h.bitable.base.isTableExist = async id => { assert.equal(id, 'table'); tableChecks++; return true; };
+  try {
+    await h.task.start({ taskId: 'task', targetTableId: 'table' });
+    assert.equal(tableChecks, 1);
+    assert.equal(h.saved().taskId, 'task');
+    assert.deepEqual(h.calls, []);
+    await h.tick();
+    await h.tick();
+    assert.deepEqual(h.calls, ['write']);
+    assert.deepEqual(h.finished, [1]);
+    assert.deepEqual(h.errors, []);
+  } finally { h.task.stop(); }
 });
 
 test('写表 Promise 不返回也能超时，不推进游标、不自动重新写入', async () => {
@@ -631,7 +714,7 @@ test('排空后清理超时进入异常保护，晚返回不能再通知完成',
   const setData = h.bitable.bridge.setData;
   let release;
   h.bitable.bridge.setData = async (key, value) => {
-    if (!value.taskId) await new Promise(resolve => { release = resolve; });
+    if (key.endsWith(':finished')) await new Promise(resolve => { release = resolve; });
     return setData(key, value);
   };
   const clearing = h.tick();
@@ -679,7 +762,7 @@ for (const timeOut of [false, true]) {
     await h.task.start({ taskId: 'old' });
     const setData = h.bitable.bridge.setData; let release;
     h.bitable.bridge.setData = async (key, task) => {
-      if (!task.taskId) await new Promise(resolve => { release = resolve; });
+      if (key.endsWith(':finished')) await new Promise(resolve => { release = resolve; });
       return setData(key, task);
     };
     const clearing = h.tick();
@@ -890,3 +973,184 @@ test('终态作者失败名单只用于结果展示，恢复快照保留状态�
   assert.deepEqual(result, { status: { status: 3, failed: 1, failed_items, invalid_items }, writtenCount: 1 });
   assert.deepEqual(h.calls, ['write']);
 });
+
+test('原有输出表已删除时只结束本轮任务，同一任务 ID 的下一轮续跑仍可恢复', async () => {
+  let writes = 0;
+  const h = harness({
+    requestStop: async () => assert.fail('终态不得发停止请求'),
+    writeBatch: async () => {
+      writes++;
+      throw new Error('table not found error');
+    },
+  });
+  h.bitable.base.isTableExist = async id => { assert.equal(id, 'deleted'); return false; };
+  await h.task.start({ taskId: 'original', targetTableId: 'deleted', formData: { radio: 2 } });
+  assert.equal(h.task.getActiveTask(), null);
+  assert.equal(h.saved().taskId, 'original');
+  assert.equal(await h.errors[0].endMissingTarget(), true);
+  assert.equal(h.saved().taskId, 'original');
+  assert.equal(writes, 1);
+  assert.equal(h.timers.size, 0);
+
+  const restored = [];
+  const reopened = h.create({
+    storageKey: 'test',
+    getStatus: async task => { restored.push(task.retryGeneration); return { status: 0 }; },
+    getResults: async () => ({ items: [] }),
+  });
+  try {
+    assert.equal(await reopened.resume(), false);
+    assert.deepEqual(restored, []);
+    await h.bitable.bridge.setData('test', { ...h.saved(), retryGeneration: 1 });
+    assert.equal(await reopened.resume(), true);
+    assert.deepEqual(restored, [1]);
+  } finally { reopened.stop(); }
+});
+
+for (const stage of ['运行状态', '终态', '结果列表', '在途写入']) {
+  test(`另一窗口结束旧任务后，迟到的${stage}不会修改新任务进度`, async () => {
+    let entered, release, writes = 0;
+    const pending = new Promise(resolve => { release = resolve; });
+    const waiting = new Promise(resolve => { entered = resolve; });
+    const wait = value => { entered(); return pending.then(() => value); };
+    const old = { taskId: 'old', baseId: 'base', targetTableId: 'target', cursor: 'old-cursor' };
+    const next = { ...old, taskId: 'new', cursor: 'new-cursor' };
+    const items = { items: [{ id: 'old-row' }], next_cursor: 'old-next' };
+    const h = harness({
+      getStatus: async () => stage === '运行状态' || stage === '终态'
+        ? wait({ status: stage === '终态' ? 3 : 0 }) : { status: 0 },
+      getResults: async () => stage === '结果列表' ? wait(items)
+        : stage === '在途写入' ? items : { items: [] },
+      writeBatch: async () => { writes++; if (stage === '在途写入') await wait(); },
+    });
+    await h.bitable.bridge.setData('test', old);
+    const running = h.task.resume();
+    try {
+      await waiting;
+      await h.bitable.bridge.setData('test:ended:base:target:old:0', true);
+      await h.bitable.bridge.setData('test', next);
+      release();
+      await running;
+      assert.deepEqual(h.saved(), next);
+      assert.equal(writes, stage === '在途写入' ? 1 : 0);
+      assert.deepEqual(h.finished, []);
+      assert.equal(h.task.getActiveTask(), null);
+      assert.equal(h.timers.size, 0);
+      assert.match(h.errors[0]?.message, /其他窗口.*结束/);
+    } finally { release(); h.task.stop(); }
+  });
+}
+
+
+for (const operation of ['保存', '清理']) {
+  test(`旧任务已发出的进度${operation}晚于新任务生效，新任务仍从原游标恢复`, async () => {
+    const source = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
+      .replace(/^import .*;\n/gm, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
+    const load = new Function('bitable', 'shallowRef', 'triggerRef', 'setBridgeData', 'setTimeout', 'clearTimeout',
+      `${source}; return useIncrementalTask;`);
+    const shared = new Map([['task', { taskId: 'old', baseId: 'base', targetTableId: 'old-table', cursor: 'old-cursor' }]]);
+    let entered, release;
+    const started = new Promise(resolve => { entered = resolve; });
+    const reply = new Promise(resolve => { release = resolve; });
+    const queries = [];
+    const make = old => {
+      const setData = async (key, value) => {
+        if (old) { entered(); await reply; }
+        shared.set(key, structuredClone(value));
+        return true;
+      };
+      const bitable = {
+        base: { getSelection: async () => ({ baseId: 'base' }) },
+        bridge: { getData: async key => structuredClone(shared.get(key)), setData },
+      };
+      return load(bitable, value => ({ value }), () => {}, setData, () => 1, () => {})({
+        storageKey: 'task',
+        getStatus: async task => { queries.push([task.taskId, task.cursor]); return { status: old && operation === '清理' ? 1 : 0 }; },
+        getResults: async () => ({ items: [] }),
+        writeBatch: async () => assert.fail('用例不应写表'),
+      });
+    };
+    const old = make(true), next = make(false), reopened = make(false);
+    const running = old.resume();
+    try {
+      await started;
+      await next.start({ taskId: 'new', targetTableId: 'new-table', cursor: 'new-cursor' });
+      release();
+      await running;
+      assert.equal(await reopened.resume(), true);
+      assert.deepEqual(queries.at(-1), ['new', 'new-cursor']);
+    } finally {
+      release();
+      old.stop(); next.stop(); reopened.stop();
+    }
+  });
+}
+
+for (const beforeWrite of [false, true]) {
+  test(`同一任务已在另一窗口完成，迟到的${beforeWrite ? '写入前检查点' : '轮询进度'}不会引发重复写入`, async () => {
+    const source = fs.readFileSync(new URL('../src/composables/useIncrementalTask.js', import.meta.url), 'utf8')
+      .replace(/^import .*;\n/gm, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
+    const load = new Function('bitable', 'shallowRef', 'triggerRef', 'setBridgeData', 'setTimeout', 'clearTimeout',
+      `${source}; return useIncrementalTask;`);
+    const saved = { taskId: 'same', baseId: 'base', targetTableId: 'table', cursor: 'previous' };
+    const shared = new Map([['task', saved]]);
+    const waiting = Promise.withResolvers();
+    const delayed = Promise.withResolvers();
+    const writes = [], errors = [], finished = [];
+    let reopenQueries = 0;
+    const make = role => {
+      let tick;
+      const setData = async (key, value) => {
+        const snapshot = structuredClone(value);
+        if (role === 'old' && value.taskId) {
+          waiting.resolve();
+          await delayed.promise;
+        }
+        shared.set(key, snapshot);
+      };
+      const bitable = {
+        base: { getSelection: async () => ({ baseId: 'base' }) },
+        bridge: { getData: async key => structuredClone(shared.get(key)), setData },
+      };
+      const task = load(bitable, value => ({ value }), () => {}, setData,
+        callback => (tick = callback), () => {})({
+        storageKey: 'task',
+        getStatus: async () => {
+          if (role === 'reopen') reopenQueries++;
+          return { status: role === 'old' ? 0 : 1 };
+        },
+        getResults: async task => (role !== 'old' || beforeWrite) && task.cursor === 'previous'
+          ? { items: ['row'], next_cursor: 'last' } : { items: [] },
+        writeBatch: async (items, task, controls) => {
+          await controls.saveProgress();
+          writes.push(...items);
+        },
+        onFinish: () => finished.push(role),
+        onError: error => errors.push(error),
+      });
+      return { task, tick: () => tick() };
+    };
+    const old = make('old'), current = make('current'), reopened = make('reopen');
+    const pending = old.task.resume();
+    try {
+      await waiting.promise;
+      await current.task.resume();
+      await current.tick();
+      assert.deepEqual(finished, ['current']);
+      assert.deepEqual(writes, ['row']);
+      assert.equal([...shared].filter(([key, value]) => key !== 'task' && value.taskId).length, 0,
+        '完成后应清理本轮的滚动进度快照');
+      delayed.resolve();
+      await pending;
+      assert.deepEqual(writes, ['row']);
+      assert.equal(await reopened.task.resume(), false);
+      assert.equal(reopenQueries, 0);
+      assert.deepEqual(writes, ['row']);
+      if (beforeWrite) assert.match(errors[0]?.message, /其他窗口.*结束/);
+    } finally {
+      delayed.resolve();
+      old.task.stop(); current.task.stop(); reopened.task.stop();
+      await pending;
+    }
+  });
+}

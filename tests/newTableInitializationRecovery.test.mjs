@@ -1,3 +1,4 @@
+import { createTaskStorage } from './helpers/taskStorage.mjs';
 import { resolveWritableField } from '../src/utils/tableFields.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -28,6 +29,7 @@ const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalT
 function fixture(component, engineName, key, failure) {
   const configs = [{ key, name: '稳定ID', type: 'text' }, { key: 'title', name: '标题', type: 'text' }];
   let saved, failed = false, created = 0, saveReadyFails = false;
+  const storage = createTaskStorage();
   const fields = new Map(), rows = [], errors = [], adds = [];
   const field = meta => ({ ...meta, getType: async () => meta.type, createCell: async value => ({ fieldId: meta.id, value, getValue: async () => value }) });
   const table = { id: 'created',
@@ -54,10 +56,11 @@ function fixture(component, engineName, key, failure) {
   };
   const bitable = { base: { getSelection: async () => ({ baseId: 'base' }), getTable: async () => table, getTableById: async () => table },
     ui: { switchToTable: async () => {} }, bridge: {
-      getData: async () => structuredClone(saved),
-      setData: async (_, task) => {
+      getData: storage.getData,
+      setData: async (key, task) => {
         if (saveReadyFails && task.taskId && !task.initializingTableId) { saveReadyFails = false; throw new Error('ready save failed'); }
-        saved = structuredClone(task);
+        await storage.setData(key, task);
+        saved = storage.current();
       },
     },
   };

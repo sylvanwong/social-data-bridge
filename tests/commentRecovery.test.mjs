@@ -1,5 +1,6 @@
 import { useTaskExecutionResult } from '../src/composables/useTaskExecutionResult.mjs';
 import { buildTaskExecutionResult } from '../src/utils/taskExecutionResult.mjs';
+import { createTaskStorage } from './helpers/taskStorage.mjs';
 import { resolveWritableField } from '../src/utils/tableFields.js';
 import { nextTick } from 'vue';
 import test from 'node:test';
@@ -35,7 +36,8 @@ const engineSource = fs.readFileSync(new URL('../src/composables/useIncrementalT
   .replace(/^import .*;\n/, '').replace('export const useIncrementalTask', 'const useIncrementalTask');
 
 function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapped = false, newTable = false, operationTimeoutMs = 0 } = {}) {
-  let saved, hangWrite = false, failWrite = true, failSave = false, failScan = false, failUpdate = false, failSetup = newTable, createdTables = 0, id = 0, scans = 0;
+  const storage = createTaskStorage();
+  let hangWrite = false, failWrite = true, failSave = false, failScan = false, failUpdate = false, failSetup = newTable, createdTables = 0, id = 0, scans = 0;
   const rows = [], writes = [], updates = [], errors = [], finished = [];
   const cidField = mapped ? 'custom-cid' : 'cid';
   const configs = [
@@ -91,8 +93,8 @@ function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapp
     },
   };
   const bitable = { ui: { switchToTable: async () => {} }, bridge: {
-    setData: async (_, task) => { if (typeof failSave === 'function' ? failSave(task) : failSave && task.cursor) throw new Error('save failed'); saved = structuredClone(task); },
-    getData: async () => structuredClone(saved),
+    setData: async (key, task) => { if (typeof failSave === 'function' ? failSave(task) : failSave && task.cursor) throw new Error('save failed'); await storage.setData(key, task); },
+    getData: storage.getData,
   }, base: { getSelection: async () => ({ baseId: 'base' }), getTableById: async () => table,
     getTable: async () => { if (failSetup) { failSetup = false; throw new Error('setup failed'); } return table; },
   } };
@@ -123,14 +125,53 @@ function fixture({ committedBeforeFailure = 1, mode = 'append', status = 3, mapp
       expireWrite: () => { const [key, timer] = [...timers].find(([, timer]) => timer.delay >= 60000); timers.delete(key); timer.fn(); },
     };
   }
-  return { open, rows, writes, updates, errors, finished, items, fields, selectedFieldKeys, scans: () => scans,
-    saved: () => structuredClone(saved), seedSaved: value => { saved = structuredClone(value); }, failSave: value => { failSave = value; }, failScan: value => { failScan = value; },
+  return { open, table, rows, writes, updates, errors, finished, items, fields, selectedFieldKeys, scans: () => scans,
+    saved: () => structuredClone(storage.current()), seedSaved: storage.seed, failSave: value => { failSave = value; }, failScan: value => { failScan = value; },
     succeedWrites: () => { failWrite = false; }, failAgain: () => { failWrite = true; },
     hangWrite: () => { hangWrite = true; }, failUpdate: () => { failUpdate = true; }, createdTables: () => createdTables,
     initial: { taskId: 'task', pendingCommentWrite: false, targetTableId: newTable ? '' : 'table', writeMode: mode,
       fieldMappings: mapped ? [{ source_key: 'cid', target_field_id: cidField }] : [] },
     ids: () => rows.map(row => row.fields[cidField]),
   };
+}
+
+for (const mode of ['upsert', 'append']) {
+  test(`评论 ${mode} 查表晚返回时，另一窗口已完成则旧窗口不再写表`, async () => {
+    const f = fixture({ mode });
+    f.succeedWrites();
+    if (mode === 'append') f.initial.pendingCommentWrite = true;
+    const old = f.open(), current = f.open();
+    const started = Promise.withResolvers(), release = Promise.withResolvers();
+    const getRecords = f.table.getRecordsByPage;
+    let reads = 0;
+    f.table.getRecordsByPage = async options => {
+      const first = ++reads === 1;
+      const snapshot = await getRecords(options);
+      if (first) {
+        started.resolve();
+        await release.promise;
+      }
+      return snapshot;
+    };
+    const pending = old.task.start(f.initial);
+    try {
+      await started.promise;
+      assert.equal(await current.task.resume(), true);
+      await current.tick();
+      assert.deepEqual(f.finished, [4]);
+      assert.deepEqual(f.ids(), ['a', 'b', 'c', 'd']);
+      release.resolve();
+      await pending;
+      assert.deepEqual(f.ids(), ['a', 'b', 'c', 'd']);
+      assert.deepEqual(f.writes, [2, 2]);
+      assert.match(f.errors[0]?.message, /其他窗口.*结束/);
+    } finally {
+      release.resolve();
+      old.task.stop();
+      current.task.stop();
+      await pending;
+    }
+  });
 }
 
 for (const committedBeforeFailure of [0, 1, 2]) {
@@ -180,7 +221,7 @@ for (const mode of ['append', 'upsert']) {
       });
       const engine = f.open();
       const running = engine.task.start(f.initial);
-      for (let i = 0; i < 100; i++) await Promise.resolve();
+      await new Promise(setImmediate);
       const retry = [...engine.timers].find(([, timer]) => timer.delay === 1000);
       assert.ok(retry);
       assert.deepEqual(f.ids(), ['a', 'b']);

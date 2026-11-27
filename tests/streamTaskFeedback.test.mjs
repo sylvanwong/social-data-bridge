@@ -37,6 +37,7 @@ function fixture(t, page, taskName, overrides = {}) {
     setTimeout, clearTimeout, console: { error() {}, log() {} },
     clearing: ref(false), loading: ref(false), isSubmitting: ref(false), isCancelling: ref(false), hasRecoverableTask: ref(false), recoveryRequiresReopen: ref(false),
     pausedWriteCount: ref(0), latestProfileResult: ref(null), latestProfileResultLoading: ref(false), latestProfileResultError: ref(''),
+    profileRetry: ref(null),
     buildProfileTaskResult: (status, task) => ({ status: Number(status?.status) === 2 ? 'failed' : Number(status?.status) === 3 ? 'stopped' : 'completed', taskId: task?.taskId || '', fetchedCount: task?.writtenCount || 0, succeeded: Number(status?.succeeded) || 0, failed: Number(status?.failed) || 0, requestCount: Number(status?.request_count) || 0, startedAt: status?.start || '', finishedAt: status?.end || '', reason: status?.reason || '' }),
     activeProfileTaskId: ref('task-1'), activeCommentTaskId: ref('task-1'), activeSeriesTaskId: ref('task-1'),
     activeStreamTask: { taskId: 'task-1' }, activeSeriesTask: { taskId: 'task-1' }, componentUnmounted: false,
@@ -598,7 +599,7 @@ for (const [page, taskName, , submitName] of pages) {
     assert.deepEqual(compiled.errors, []);
     const body = compiled.code.replace(/import \{([^}]+)\} from "vue"/, (_, names) => `const {${names.replace(/ as /g, ': ')}} = Vue`).replace('export function render', 'function render');
     const render = new Function('Vue', `${body};return render`)(Vue);
-    const app = Vue.createSSRApp({ setup: () => ({ formData: { executionMode: 'immediate' }, taskActionState: 'recoverable', pausedWriteCount: b.pausedWriteCount, recoveryRequiresReopen: b.recoveryRequiresReopen, handleTaskAction() {} }), render });
+    const app = Vue.createSSRApp({ setup: () => ({ feedback: b.feedback, formData: { executionMode: 'immediate' }, taskActionState: 'recoverable', pausedWriteCount: b.pausedWriteCount, recoveryRequiresReopen: b.recoveryRequiresReopen, handleTaskAction() {} }), render });
     app.component('el-button', { props: ['disabled'], setup: (props, { slots }) => () => Vue.h('button', { disabled: props.disabled }, slots.default?.()) });
     const html = await renderToString(app);
     assert.match(html, /<button[^>]*disabled/);
